@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from redditpages.db import connect
+from redditpages.db import DATA_DIR, connect, data_db
 from redditpages.models import Comment, Post, User
 
 from scripts.sync_important_users import USERS as CURATED
@@ -201,8 +201,8 @@ def _user_stats(session: Session, user: User) -> tuple[list[Post], list[Comment]
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--db", default="important.db")
-    p.add_argument("--out-dir", default="../data/important")
+    p.add_argument("--db", default=data_db("important.db"))
+    p.add_argument("--out-dir", default=str(DATA_DIR / "important"))
     args = p.parse_args()
 
     out_dir = Path(args.out_dir).resolve()

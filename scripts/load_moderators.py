@@ -13,7 +13,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-from redditpages.db import connect, init_schema, session, upsert
+from redditpages.db import connect, data_db, init_schema, session, upsert
 from redditpages.models import SubredditModerator
 
 # Subs whose capped front-page sidebar was unioned across snapshots.
@@ -46,7 +46,7 @@ def consolidate(sub: str, rec: dict):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="important.db")
+    ap.add_argument("--db", default=data_db("important.db"))
     ap.add_argument("--json", default="/tmp/mods_result.json")
     args = ap.parse_args()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TypeVar
 
@@ -16,6 +17,19 @@ from redditpages.models import (  # noqa: F401
 )
 
 T = TypeVar("T", bound=SQLModel)
+
+# The synced SQLite databases are large, network-sourced artifacts kept out of
+# the repo. They live in a sibling ``data/`` directory next to the checkout
+# (override with the ``REDDITPAGES_DATA`` env var).
+DATA_DIR = Path(
+    os.environ.get("REDDITPAGES_DATA")
+    or Path(__file__).resolve().parents[2] / "data"
+)
+
+
+def data_db(name: str = "important.db") -> str:
+    """Resolve a database file name against the shared data directory."""
+    return str(DATA_DIR / name)
 
 
 def connect(path: str | Path = "redditpages.db") -> Engine:

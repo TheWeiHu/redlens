@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from redditpages import __version__
 from redditpages.analytics import compute_user_analytics
-from redditpages.db import connect, init_schema, session
+from redditpages.db import connect, data_db, init_schema, session
 from redditpages.errors import NotFound, RedditPagesError
 from redditpages.ingest import sync_user
 
@@ -20,7 +20,7 @@ def _ts(s: int | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="redditpages")
     p.add_argument("--version", action="version", version=f"redditpages {__version__}")
-    p.add_argument("--db", default="redditpages.db")
+    p.add_argument("--db", default=data_db("important.db"))
     sub = p.add_subparsers(dest="verb", required=True)
     sub.add_parser("init")
     sub.add_parser("sync").add_argument("username")
