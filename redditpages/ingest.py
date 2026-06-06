@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select
 
 from redditpages import arctic
-from redditpages.db import upsert
+from redditpages.db import insert_ignore, upsert
 from redditpages.errors import NotFound
-from redditpages.models import Comment, Post, User
+from redditpages.models import Comment, Post, Subreddit, User, UserStat
 
 T = TypeVar("T", bound=SQLModel)
 BATCH_SIZE = 500
@@ -27,6 +27,7 @@ def sync_user(username: str, engine: Engine) -> SyncResult:
     raw = arctic.fetch_user_meta(username)
     if raw is not None:
         user = User.from_arctic(raw)
+        stats = UserStat.rows_from_arctic(user.username, raw.get("_meta"))
     else:
         # arctic's user-object index lags the content dumps — recent or
         # low-volume accounts often have posts/comments but no user entry.
@@ -39,13 +40,31 @@ def sync_user(username: str, engine: Engine) -> SyncResult:
             username=first.get("author") or username,
             author_fullname=first.get("author_fullname"),
         )
+        stats = []
 
     with Session(engine) as session:
         upsert(session, [user])
+        if stats:
+            upsert(session, stats)
         posts = _stream(session, arctic.iter_posts(user.username), Post.from_arctic)
         comments = _stream(session, arctic.iter_comments(user.username), Comment.from_arctic)
+        _register_subreddits(session, user.username)
         session.commit()
     return SyncResult(user, posts, comments)
+
+
+def _register_subreddits(session: Session, username: str) -> None:
+    """Add any subreddits this user touched to the stable subreddit dimension.
+
+    Insert-only: existing rows are left untouched so the dimension does not
+    churn on every re-sync.
+    """
+    names: set[str] = set()
+    for model in (Post, Comment):
+        names.update(session.exec(
+            select(model.subreddit_name).where(model.author_username == username)
+        ))
+    insert_ignore(session, [Subreddit(name=n) for n in names])
 
 
 def _stream(

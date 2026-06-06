@@ -1,4 +1,4 @@
-from redditpages.models import Comment, Post, User
+from redditpages.models import Comment, Post, User, UserStat
 
 ARCTIC_USER = {
     "author": "KimJongFunk",
@@ -6,6 +6,9 @@ ARCTIC_USER = {
     "_meta": {
         "num_posts": 258, "num_comments": 10754,
         "post_karma": 178954, "comment_karma": 604006, "total_karma": 782960,
+        "earliest_post_at": 1300000000, "last_post_at": 1700000000,
+        "earliest_comment_at": 1290000000, "last_comment_at": 1780411725,
+        "post_stats_updated_at": 1742860804, "comment_stats_updated_at": 1742860804,
     },
 }
 
@@ -25,19 +28,27 @@ ARCTIC_COMMENT = {
 }
 
 
-def test_user_preserves_meta_envelope():
+def test_user_from_arctic_keeps_identity():
     u = User.from_arctic(ARCTIC_USER)
     assert u.username == "KimJongFunk"
     assert u.author_fullname == "rbpdo"
-    assert u.arctic_meta is not None
-    assert u.arctic_meta["total_karma"] == 782960
-    assert u.arctic_meta["num_comments"] == 10754
 
 
-def test_user_handles_missing_meta():
-    u = User.from_arctic({"author": "ghost", "id": "abc"})
-    assert u.username == "ghost"
-    assert u.arctic_meta is None
+def test_userstat_splits_meta_into_post_and_comment_rows():
+    rows = {r.kind: r for r in UserStat.rows_from_arctic("KimJongFunk", ARCTIC_USER["_meta"])}
+    assert set(rows) == {"post", "comment"}
+    assert rows["post"].event_count == 258
+    assert rows["post"].karma == 178954
+    assert rows["post"].last_at == 1700000000
+    assert rows["comment"].event_count == 10754
+    assert rows["comment"].karma == 604006
+    assert rows["comment"].last_at == 1780411725
+
+
+def test_userstat_empty_without_meta():
+    assert UserStat.rows_from_arctic("ghost", None) == []
+    # identity still parses fine with no _meta envelope
+    assert User.from_arctic({"author": "ghost", "id": "abc"}).username == "ghost"
 
 
 def test_post_keeps_signal_drops_noise():

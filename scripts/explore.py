@@ -149,7 +149,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         u = urlparse(self.path)
         q = parse_qs(u.query)
-        one = lambda k, d="": q.get(k, [d])[0]
+
+        def one(k: str, d: str = "") -> str:
+            return q.get(k, [d])[0]
+
         try:
             if u.path == "/":
                 self._send(200, INDEX_HTML.encode(), "text/html; charset=utf-8")
@@ -417,8 +420,13 @@ const EXAMPLES = [
  + "  instr(substr(url,instr(url,'//')+2)||'/', '/')-1)) AS host,\n"
  + "  count(*) n FROM post WHERE url LIKE 'http%' GROUP BY 1 ORDER BY n DESC LIMIT 20"],
   ['Most-moderated mods',
-   'SELECT moderator_username, count(*) AS subs FROM subredditmoderator\n'
+   'SELECT moderator_username, count(*) AS subs FROM moderator\n'
  + 'GROUP BY 1 ORDER BY subs DESC LIMIT 20'],
+  ['Karma split (userstat)',
+   "SELECT username,\n"
+ + "  max(CASE WHEN kind='post' THEN karma END) AS post_karma,\n"
+ + "  max(CASE WHEN kind='comment' THEN karma END) AS comment_karma\n"
+ + 'FROM userstat GROUP BY 1 ORDER BY post_karma DESC LIMIT 20'],
 ];
 function buildExamples(){
   $('#examples').innerHTML = '';

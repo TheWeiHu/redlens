@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from typing import Any
 
@@ -15,21 +14,51 @@ def _now() -> int:
 class User(SQLModel, table=True):
     username: str = Field(primary_key=True)
     author_fullname: str | None = None
-    arctic_meta_json: str | None = None
     fetched_at: int = Field(default_factory=_now)
-
-    @property
-    def arctic_meta(self) -> dict[str, Any] | None:
-        return json.loads(self.arctic_meta_json) if self.arctic_meta_json else None
 
     @classmethod
     def from_arctic(cls, raw: dict[str, Any]) -> User:
-        meta = raw.get("_meta")
-        return cls(
-            username=raw["author"],
-            author_fullname=raw.get("id"),
-            arctic_meta_json=json.dumps(meta) if meta else None,
-        )
+        return cls(username=raw["author"], author_fullname=raw.get("id"))
+
+
+class UserStat(SQLModel, table=True):
+    """Per-kind activity stats for a user — one row per (username, kind) with
+    ``kind`` in {'post', 'comment'}.
+
+    Arctic hands these back as a single flat ``_meta`` blob in which the same
+    five measures repeat once for posts and once for comments. Storing that
+    repeating group as rows rather than a JSON column is what keeps the schema
+    in first normal form. ``total_karma`` is intentionally dropped — it is just
+    the sum of the two ``karma`` rows.
+    """
+
+    username: str = Field(primary_key=True, index=True)
+    kind: str = Field(primary_key=True)          # 'post' | 'comment'
+    event_count: int | None = None               # arctic num_posts / num_comments
+    karma: int | None = None                     # arctic post_karma / comment_karma
+    earliest_at: int | None = None               # epoch of first post / comment
+    last_at: int | None = None                   # epoch of latest post / comment
+    stats_updated_at: int | None = None          # when arctic last recomputed the above
+    fetched_at: int = Field(default_factory=_now)
+
+    @classmethod
+    def rows_from_arctic(
+        cls, username: str, meta: dict[str, Any] | None
+    ) -> list[UserStat]:
+        if not meta:
+            return []
+        out: list[UserStat] = []
+        for kind, plural in (("post", "posts"), ("comment", "comments")):
+            out.append(cls(
+                username=username,
+                kind=kind,
+                event_count=meta.get(f"num_{plural}"),
+                karma=meta.get(f"{kind}_karma"),
+                earliest_at=meta.get(f"earliest_{kind}_at"),
+                last_at=meta.get(f"last_{kind}_at"),
+                stats_updated_at=meta.get(f"{kind}_stats_updated_at"),
+            ))
+        return out
 
 
 class Post(SQLModel, table=True):
@@ -89,12 +118,28 @@ class Comment(SQLModel, table=True):
         )
 
 
-class SubredditModerator(SQLModel, table=True):
+class Subreddit(SQLModel, table=True):
+    """One row per subreddit we have seen — in a post, comment, or mod list.
+
+    A stable identity/dimension table: it does not carry moderator-scrape
+    provenance (that belongs on the ``moderator`` rows), so re-scraping a mod
+    list never churns these rows. Right now the only intrinsic fact we hold is
+    the name; it exists so posts, comments, and moderators have a subreddit to
+    reference.
+    """
+
+    name: str = Field(primary_key=True)
+    fetched_at: int = Field(default_factory=_now)
+
+
+class Moderator(SQLModel, table=True):
     """One row per (subreddit, moderator).
 
     Reddit gated logged-out moderator lists in 2021, so most of this data comes
-    from Internet Archive snapshots. `as_of_date` records the date the row was
-    actually accurate (the snapshot date) — not when we fetched it.
+    from Internet Archive snapshots. ``as_of_date`` records the date the row was
+    actually accurate (the snapshot date) — not when we fetched it. That
+    snapshot provenance rides with the moderator rows (it describes a scrape,
+    not the subreddit itself).
     """
 
     subreddit_name: str = Field(primary_key=True, index=True)

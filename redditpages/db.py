@@ -11,9 +11,11 @@ from sqlmodel import Session, SQLModel, create_engine
 # Importing models registers them with SQLModel.metadata.
 from redditpages.models import (  # noqa: F401
     Comment,
+    Moderator,
     Post,
-    SubredditModerator,
+    Subreddit,
     User,
+    UserStat,
 )
 
 T = TypeVar("T", bound=SQLModel)
@@ -60,4 +62,18 @@ def upsert(session: Session, items: list[T]) -> int:
         index_elements=list(pk_cols),
         set_=update_cols,
     ))
+    return len(items)
+
+
+def insert_ignore(session: Session, items: list[T]) -> int:
+    """Insert rows, skipping any whose primary key already exists.
+
+    Unlike ``upsert``, this never rewrites an existing row — use it for stable
+    dimension tables (e.g. ``subreddit``) that should not churn on re-sync.
+    """
+    if not items:
+        return 0
+    table = type(items[0]).__table__  # type: ignore[attr-defined]
+    stmt = sqlite_insert(table).values([item.model_dump() for item in items])
+    session.execute(stmt.on_conflict_do_nothing())
     return len(items)
