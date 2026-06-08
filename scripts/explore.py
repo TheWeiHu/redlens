@@ -4,7 +4,7 @@ Replaces the old pandas notebook with a local web app: list tables, inspect
 schema, page/sort/search rows, and run read-only SQL — all in the browser,
 using nothing but the Python standard library.
 
-    python scripts/explore.py                 # opens ../data/important.db
+    python scripts/explore.py                 # opens ../data/redditpages.db
     python scripts/explore.py --db other.db   # any SQLite file
     python scripts/explore.py --port 9000 --no-browser
 
@@ -31,7 +31,7 @@ def default_db() -> str:
     """Mirror redditpages.db.data_db without importing the package, so this
     explorer stays pure-stdlib and runnable with no install."""
     base = os.environ.get("REDDITPAGES_DATA") or Path(__file__).resolve().parents[2] / "data"
-    return str(Path(base) / "important.db")
+    return str(Path(base) / "redditpages.db")
 
 
 # --------------------------------------------------------------------------- #
@@ -422,11 +422,9 @@ const EXAMPLES = [
   ['Most-moderated mods',
    'SELECT moderator_username, count(*) AS subs FROM moderator\n'
  + 'GROUP BY 1 ORDER BY subs DESC LIMIT 20'],
-  ['Karma split (userstat)',
-   "SELECT username,\n"
- + "  max(CASE WHEN kind='post' THEN karma END) AS post_karma,\n"
- + "  max(CASE WHEN kind='comment' THEN karma END) AS comment_karma\n"
- + 'FROM userstat GROUP BY 1 ORDER BY post_karma DESC LIMIT 20'],
+  ['Karma split (user)',
+   'SELECT username, post_karma, comment_karma, num_posts, num_comments\n'
+ + 'FROM user ORDER BY post_karma DESC LIMIT 20'],
 ];
 function buildExamples(){
   $('#examples').innerHTML = '';

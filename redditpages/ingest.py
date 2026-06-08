@@ -10,7 +10,7 @@ from sqlmodel import Session, SQLModel, select
 from redditpages import arctic
 from redditpages.db import insert_ignore, upsert
 from redditpages.errors import NotFound
-from redditpages.models import Comment, Post, Subreddit, User, UserStat
+from redditpages.models import Comment, Post, Subreddit, User
 
 T = TypeVar("T", bound=SQLModel)
 BATCH_SIZE = 500
@@ -27,7 +27,6 @@ def sync_user(username: str, engine: Engine) -> SyncResult:
     raw = arctic.fetch_user_meta(username)
     if raw is not None:
         user = User.from_arctic(raw)
-        stats = UserStat.rows_from_arctic(user.username, raw.get("_meta"))
     else:
         # arctic's user-object index lags the content dumps — recent or
         # low-volume accounts often have posts/comments but no user entry.
@@ -40,12 +39,9 @@ def sync_user(username: str, engine: Engine) -> SyncResult:
             username=first.get("author") or username,
             author_fullname=first.get("author_fullname"),
         )
-        stats = []
 
     with Session(engine) as session:
         upsert(session, [user])
-        if stats:
-            upsert(session, stats)
         posts = _stream(session, arctic.iter_posts(user.username), Post.from_arctic)
         comments = _stream(session, arctic.iter_comments(user.username), Comment.from_arctic)
         _register_subreddits(session, user.username)

@@ -1,4 +1,4 @@
-from redditpages.models import Comment, Post, User, UserStat
+from redditpages.models import Comment, Post, User
 
 ARCTIC_USER = {
     "author": "KimJongFunk",
@@ -28,27 +28,24 @@ ARCTIC_COMMENT = {
 }
 
 
-def test_user_from_arctic_keeps_identity():
+def test_user_from_arctic_flattens_meta_to_columns():
     u = User.from_arctic(ARCTIC_USER)
     assert u.username == "KimJongFunk"
     assert u.author_fullname == "rbpdo"
+    assert u.num_posts == 258
+    assert u.num_comments == 10754
+    assert u.post_karma == 178954
+    assert u.comment_karma == 604006
+    assert u.last_post_at == 1700000000
+    assert u.last_comment_at == 1780411725
 
 
-def test_userstat_splits_meta_into_post_and_comment_rows():
-    rows = {r.kind: r for r in UserStat.rows_from_arctic("KimJongFunk", ARCTIC_USER["_meta"])}
-    assert set(rows) == {"post", "comment"}
-    assert rows["post"].event_count == 258
-    assert rows["post"].karma == 178954
-    assert rows["post"].last_at == 1700000000
-    assert rows["comment"].event_count == 10754
-    assert rows["comment"].karma == 604006
-    assert rows["comment"].last_at == 1780411725
-
-
-def test_userstat_empty_without_meta():
-    assert UserStat.rows_from_arctic("ghost", None) == []
-    # identity still parses fine with no _meta envelope
-    assert User.from_arctic({"author": "ghost", "id": "abc"}).username == "ghost"
+def test_user_from_arctic_without_meta_leaves_stats_null():
+    u = User.from_arctic({"author": "ghost", "id": "abc"})
+    assert u.username == "ghost"
+    assert u.num_posts is None
+    assert u.post_karma is None
+    assert u.last_comment_at is None
 
 
 def test_post_keeps_signal_drops_noise():

@@ -15,7 +15,6 @@ from redditpages.models import (  # noqa: F401
     Post,
     Subreddit,
     User,
-    UserStat,
 )
 
 T = TypeVar("T", bound=SQLModel)
@@ -29,7 +28,7 @@ DATA_DIR = Path(
 )
 
 
-def data_db(name: str = "important.db") -> str:
+def data_db(name: str = "redditpages.db") -> str:
     """Resolve a database file name against the shared data directory."""
     return str(DATA_DIR / name)
 

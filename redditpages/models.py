@@ -12,53 +12,47 @@ def _now() -> int:
 
 
 class User(SQLModel, table=True):
+    """A Reddit account plus its arctic activity stats.
+
+    Arctic returns the stats as a flat ``_meta`` blob — the same five measures
+    for posts and for comments. They are one-per-user, so they live as plain
+    columns on this row (atomic, 1NF) rather than a JSON blob. ``total_karma``
+    is dropped: it is just ``post_karma + comment_karma``. All stat columns are
+    null when arctic has no ``_meta`` for the account.
+    """
+
     username: str = Field(primary_key=True)
     author_fullname: str | None = None
+
+    num_posts: int | None = None
+    num_comments: int | None = None
+    post_karma: int | None = None
+    comment_karma: int | None = None
+    earliest_post_at: int | None = None
+    last_post_at: int | None = None
+    earliest_comment_at: int | None = None
+    last_comment_at: int | None = None
+    post_stats_updated_at: int | None = None     # when arctic last recomputed post stats
+    comment_stats_updated_at: int | None = None  # ditto for comment stats
     fetched_at: int = Field(default_factory=_now)
 
     @classmethod
     def from_arctic(cls, raw: dict[str, Any]) -> User:
-        return cls(username=raw["author"], author_fullname=raw.get("id"))
-
-
-class UserStat(SQLModel, table=True):
-    """Per-kind activity stats for a user — one row per (username, kind) with
-    ``kind`` in {'post', 'comment'}.
-
-    Arctic hands these back as a single flat ``_meta`` blob in which the same
-    five measures repeat once for posts and once for comments. Storing that
-    repeating group as rows rather than a JSON column is what keeps the schema
-    in first normal form. ``total_karma`` is intentionally dropped — it is just
-    the sum of the two ``karma`` rows.
-    """
-
-    username: str = Field(primary_key=True, index=True)
-    kind: str = Field(primary_key=True)          # 'post' | 'comment'
-    event_count: int | None = None               # arctic num_posts / num_comments
-    karma: int | None = None                     # arctic post_karma / comment_karma
-    earliest_at: int | None = None               # epoch of first post / comment
-    last_at: int | None = None                   # epoch of latest post / comment
-    stats_updated_at: int | None = None          # when arctic last recomputed the above
-    fetched_at: int = Field(default_factory=_now)
-
-    @classmethod
-    def rows_from_arctic(
-        cls, username: str, meta: dict[str, Any] | None
-    ) -> list[UserStat]:
-        if not meta:
-            return []
-        out: list[UserStat] = []
-        for kind, plural in (("post", "posts"), ("comment", "comments")):
-            out.append(cls(
-                username=username,
-                kind=kind,
-                event_count=meta.get(f"num_{plural}"),
-                karma=meta.get(f"{kind}_karma"),
-                earliest_at=meta.get(f"earliest_{kind}_at"),
-                last_at=meta.get(f"last_{kind}_at"),
-                stats_updated_at=meta.get(f"{kind}_stats_updated_at"),
-            ))
-        return out
+        meta = raw.get("_meta") or {}
+        return cls(
+            username=raw["author"],
+            author_fullname=raw.get("id"),
+            num_posts=meta.get("num_posts"),
+            num_comments=meta.get("num_comments"),
+            post_karma=meta.get("post_karma"),
+            comment_karma=meta.get("comment_karma"),
+            earliest_post_at=meta.get("earliest_post_at"),
+            last_post_at=meta.get("last_post_at"),
+            earliest_comment_at=meta.get("earliest_comment_at"),
+            last_comment_at=meta.get("last_comment_at"),
+            post_stats_updated_at=meta.get("post_stats_updated_at"),
+            comment_stats_updated_at=meta.get("comment_stats_updated_at"),
+        )
 
 
 class Post(SQLModel, table=True):
