@@ -20,7 +20,7 @@ def _ts(s: int | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="redditpages")
     p.add_argument("--version", action="version", version=f"redditpages {__version__}")
-    p.add_argument("--db", default=data_db("important.db"))
+    p.add_argument("--db", default=data_db("redditpages.db"))
     sub = p.add_subparsers(dest="verb", required=True)
     sub.add_parser("init")
     sub.add_parser("sync").add_argument("username")

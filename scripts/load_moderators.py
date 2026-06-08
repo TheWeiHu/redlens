@@ -6,7 +6,7 @@ gated logged-out moderator access in 2021. Each subreddit touched is also
 registered in the subreddit dimension.
 
 Usage:
-    python scripts/load_moderators.py --db important.db --json /tmp/mods_result.json
+    python scripts/load_moderators.py --db redditpages.db --json /tmp/mods_result.json
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def consolidate(sub: str, rec: dict):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=data_db("important.db"))
+    ap.add_argument("--db", default=data_db("redditpages.db"))
     ap.add_argument("--json", default="/tmp/mods_result.json")
     args = ap.parse_args()
 

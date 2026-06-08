@@ -181,7 +181,7 @@ def _sync_one(user_tuple: tuple[str, str, str], db_path: str) -> dict:
 
 
 def main() -> int:
-    db_path = data_db("important.db")
+    db_path = data_db("redditpages.db")
     engine = connect(db_path)
     init_schema(engine)
 

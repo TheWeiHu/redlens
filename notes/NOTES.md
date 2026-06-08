@@ -77,7 +77,7 @@ snapshot_timestamp, source, list_complete` (plus `fetched_at`).
   travel, stocks, AnimalsBeingDerps). r/ChatGPT has **no** rows — it was
   created after the 2021 gate, so no logged-out list ever existed.
 
-Load: `python scripts/load_moderators.py --db important.db --json mods.json`.
+Load: `python scripts/load_moderators.py --db redditpages.db --json mods.json`.
 
 ## Analytics
 

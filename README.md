@@ -25,10 +25,10 @@ The synced SQLite database is a large, network-sourced artifact and lives
 outside the checkout, in a sibling `data/` directory:
 
 ```
-../data/important.db     56 curated users (posts, comments, moderators)
+../data/redditpages.db     56 curated users (posts, comments, moderators)
 ```
 
-`important.db` is the default for the CLI and `scripts/`, so
+`redditpages.db` is the default for the CLI and `scripts/`, so
 `redditpages analytics spez` and `python scripts/build_rich_all.py` work with
 no flags. Point elsewhere with `--db` or the `REDDITPAGES_DATA` env var:
 
@@ -42,7 +42,7 @@ Browse the database in your browser — tables and row counts, schema, sortable
 and searchable rows, and a read-only SQL console with preset analyses:
 
 ```bash
-python scripts/explore.py                 # opens ../data/important.db, pops a browser
+python scripts/explore.py                 # opens ../data/redditpages.db, pops a browser
 python scripts/explore.py --db other.db --port 9000 --no-browser
 ```
 

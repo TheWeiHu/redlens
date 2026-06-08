@@ -201,7 +201,7 @@ def _user_stats(session: Session, user: User) -> tuple[list[Post], list[Comment]
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--db", default=data_db("important.db"))
+    p.add_argument("--db", default=data_db("redditpages.db"))
     p.add_argument("--out-dir", default=str(DATA_DIR / "important"))
     args = p.parse_args()
 
