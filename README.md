@@ -55,7 +55,14 @@ read-only, so nothing here can mutate it.
 redditpages/        models, db, arctic client, ingest, analytics, cli
 scripts/         build/sync tooling + explore.py (the DB browser)
 tests/           pytest, in-memory sqlite, no network
-notes/NOTES.md   schema, design calls, what we drop and why
+```
+
+Design notes (schema, design calls, what we drop and why) live in a local
+[gbrain](https://github.com/garrytan/gbrain) knowledge base, not in the repo:
+
+```bash
+gbrain get project/redditpages-overview   # the map; links to every topic page
+gbrain search "arctic field selection"    # or jump straight to a topic
 ```
 
 ## Test
