@@ -9,9 +9,9 @@ knowledge base. Start at `project/redditpages-overview`, which links to every
 topic page:
 
 - `project/redditpages-data-sources` — arctic-shift endpoints
-- `project/redditpages-db-schema` — users / posts / comments tables
+- `project/redditpages-db-schema` — users / posts / comments / subreddits / moderators tables
 - `project/redditpages-arctic-field-selection` — what we keep vs drop
-- `project/redditpages-moderators` — the `subredditmoderator` table
+- `project/redditpages-moderators` — the `moderator` table
 - `project/redditpages-analytics` — the `UserAnalytics` query model
 - `project/redditpages-three-clocks` — the freshness/timestamp model
 - `project/redditpages-design-decisions` — stack and architecture calls
