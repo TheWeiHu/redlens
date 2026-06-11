@@ -12,6 +12,20 @@ def isolate_config(monkeypatch, tmp_path):
                 "REDDITPAGES_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("REDDITPAGES_CONFIG", str(tmp_path / "config.toml"))
+    # Most tests exercise the wizard as it will behave once keys are wired up.
+    monkeypatch.setattr(onboarding, "ENABLED", True)
+
+
+def test_first_run_silent_while_gated(monkeypatch):
+    monkeypatch.setattr(onboarding, "ENABLED", False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _: pytest.fail("must not prompt while the wizard is gated"),
+    )
+    onboarding.offer_setup_on_first_run()
+    assert not config.config_path().exists()
 
 
 def test_save_config_merges_and_restricts_permissions(tmp_path):
