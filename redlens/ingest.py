@@ -7,10 +7,10 @@ from typing import Any, TypeVar
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel
 
-from redthread import arctic
-from redthread.db import upsert
-from redthread.errors import NotFound
-from redthread.models import Comment, Post, User
+from redlens import arctic
+from redlens.db import upsert
+from redlens.errors import NotFound
+from redlens.models import Comment, Post, User
 
 T = TypeVar("T", bound=SQLModel)
 BATCH_SIZE = 500

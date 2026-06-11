@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "redthread"
+name = "redlens"
 version = "0.2.0"
 description = "Archive any Reddit user's public history into a local SQLite database you own, and analyze it"
 readme = "README.md"
@@ -28,18 +28,18 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/TheWeiHu/redthread"
-Issues = "https://github.com/TheWeiHu/redthread/issues"
-Changelog = "https://github.com/TheWeiHu/redthread/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/TheWeiHu/redlens"
+Issues = "https://github.com/TheWeiHu/redlens/issues"
+Changelog = "https://github.com/TheWeiHu/redlens/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.4", "mypy>=1.8"]
 
 [project.scripts]
-redthread = "redthread.cli:main"
+redlens = "redlens.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["redthread*"]
+include = ["redlens*"]
 exclude = ["tests*"]
 
 [tool.ruff]

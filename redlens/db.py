@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
 
 # Importing models registers them with SQLModel.metadata.
-from redthread.models import (  # noqa: F401
+from redlens.models import (  # noqa: F401
     Comment,
     Post,
     User,
@@ -29,7 +29,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
 }
 
 
-def connect(path: str | Path = "redthread.db") -> Engine:
+def connect(path: str | Path = "redlens.db") -> Engine:
     p = str(path)
     if p != ":memory:":
         Path(p).expanduser().parent.mkdir(parents=True, exist_ok=True)

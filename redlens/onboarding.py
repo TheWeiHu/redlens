@@ -2,7 +2,7 @@
 
 Both keys are optional and nothing requires them: arctic-shift needs no key
 at all. A Reddit API key adds fresh data via the official API; an LLM key
-adds AI profile summaries. ``redthread setup`` runs the wizard explicitly;
+adds AI profile summaries. ``redlens setup`` runs the wizard explicitly;
 the first interactive run offers it once, and either way leaves a config
 file behind so the offer never repeats. Non-interactive runs (pipes, cron,
 CI) are never prompted.
@@ -13,7 +13,7 @@ import getpass
 import sys
 from typing import Any
 
-from redthread.config import config_path, save_config
+from redlens.config import config_path, save_config
 
 # The keys this wizard collects are not consumed anywhere yet — flip this on
 # when the Reddit provider and `summarize` land (v0.3). While False, the
@@ -21,13 +21,13 @@ from redthread.config import config_path, save_config
 ENABLED = False
 
 FIRST_RUN_MARKER = (
-    "# redthread configuration — see `redthread setup` to add or change\n"
+    "# redlens configuration — see `redlens setup` to add or change\n"
     "# optional API keys (Reddit for fresh data, LLM for AI summaries).\n"
 )
 
 
 def run_wizard() -> int:
-    print("redthread setup — both keys are optional; Enter skips.\n")
+    print("redlens setup — both keys are optional; Enter skips.\n")
 
     updates: dict[str, dict[str, Any]] = {}
 
@@ -78,4 +78,4 @@ def offer_setup_on_first_run() -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(mode=0o600, exist_ok=True)
         path.write_text(FIRST_RUN_MARKER)
-        print("ok — run `redthread setup` anytime to add them\n")
+        print("ok — run `redlens setup` anytime to add them\n")

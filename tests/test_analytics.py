@@ -1,10 +1,10 @@
 import pytest
 from sqlmodel import Session
 
-from redthread.analytics import compute_user_analytics
-from redthread.db import connect, init_schema, upsert
-from redthread.errors import NotFound
-from redthread.models import Comment, Post, User
+from redlens.analytics import compute_user_analytics
+from redlens.db import connect, init_schema, upsert
+from redlens.errors import NotFound
+from redlens.models import Comment, Post, User
 
 
 @pytest.fixture

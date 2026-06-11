@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from redthread.errors import NotFound
-from redthread.models import Comment, Post, User, UserAnalytics
+from redlens.errors import NotFound
+from redlens.models import Comment, Post, User, UserAnalytics
 
 
 def compute_user_analytics(session: Session, username: str) -> UserAnalytics:
