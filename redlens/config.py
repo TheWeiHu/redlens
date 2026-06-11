@@ -103,7 +103,7 @@ def save_config(updates: dict[str, dict[str, Any]]) -> Path:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(mode=0o600, exist_ok=True)
-    path.write_text(_toml_dump(merged))
+    path.write_text(_toml_dump(merged), encoding="utf-8")
     path.chmod(0o600)  # also tighten files that predate us
     return path
 

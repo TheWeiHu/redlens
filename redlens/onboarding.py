@@ -77,5 +77,5 @@ def offer_setup_on_first_run() -> None:
         path = config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(mode=0o600, exist_ok=True)
-        path.write_text(FIRST_RUN_MARKER)
+        path.write_text(FIRST_RUN_MARKER, encoding="utf-8")
         print("ok — run `redlens setup` anytime to add them\n")
