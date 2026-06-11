@@ -4,9 +4,10 @@ import argparse
 import sys
 from datetime import UTC, datetime
 
-from redditpages import __version__
+from redditpages import __version__, explore
 from redditpages.analytics import compute_user_analytics
-from redditpages.db import connect, data_db, init_schema, session
+from redditpages.config import resolve_db
+from redditpages.db import connect, init_schema, session
 from redditpages.errors import NotFound, RedditPagesError
 from redditpages.ingest import sync_user
 
@@ -20,20 +21,29 @@ def _ts(s: int | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="redditpages")
     p.add_argument("--version", action="version", version=f"redditpages {__version__}")
-    p.add_argument("--db", default=data_db("redditpages.db"))
+    p.add_argument("--db", default=None, help="SQLite file (default: REDDITPAGES_DB, "
+                   "config.toml, or the per-user data dir)")
     sub = p.add_subparsers(dest="verb", required=True)
     sub.add_parser("init")
     sub.add_parser("sync").add_argument("username")
     a = sub.add_parser("analytics")
     a.add_argument("username")
     a.add_argument("--json", action="store_true")
+    e = sub.add_parser("explore")
+    e.add_argument("--host", default="127.0.0.1")
+    e.add_argument("--port", type=int, default=8000)
+    e.add_argument("--no-browser", action="store_true")
     args = p.parse_args(argv)
 
     try:
-        engine = connect(args.db)
+        db = resolve_db(args.db)
+        if args.verb == "explore":
+            return explore.serve(db, host=args.host, port=args.port,
+                                 open_browser=not args.no_browser)
+        engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
-            print(f"schema applied to {args.db}")
+            print(f"schema applied to {db}")
         elif args.verb == "sync":
             r = sync_user(args.username, engine)
             print(f"u/{r.user.username}: "
