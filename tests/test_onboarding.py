@@ -34,7 +34,7 @@ def test_save_config_merges_and_restricts_permissions(tmp_path):
     path = config.save_config({"llm": {"api_key": 'k"ey\\x'}})
     if os.name == "posix":  # Windows has no POSIX modes; chmod is a no-op there
         assert path.stat().st_mode & 0o777 == 0o600
-    parsed = tomllib.loads(path.read_text())
+    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
     assert parsed["storage"]["db"] == "/tmp/a.db"     # earlier write survived
     assert parsed["llm"]["api_key"] == 'k"ey\\x'      # quoting round-trips
 
