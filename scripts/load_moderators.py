@@ -1,20 +1,21 @@
-"""Load top-100-subreddit moderator lists into the SubredditModerator table.
+"""Load top-100-subreddit moderator lists into the moderator table.
 
 One row per (subreddit, moderator). `as_of_date` is the Internet Archive
 snapshot date the row was accurate on — most lists are archival because Reddit
-gated logged-out moderator access in 2021.
+gated logged-out moderator access in 2021. Each subreddit touched is also
+registered in the subreddit dimension.
 
 Usage:
-    python scripts/load_moderators.py --db important.db --json /tmp/mods_result.json
+    python scripts/load_moderators.py --db redditpages.db --json /tmp/mods_result.json
 """
 from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from redditpages.db import connect, init_schema, session, upsert
-from redditpages.models import SubredditModerator
+from redditpages.db import connect, data_db, init_schema, insert_ignore, session, upsert
+from redditpages.models import Moderator, Subreddit
 
 # Subs whose capped front-page sidebar was unioned across snapshots.
 UNION_SUBS = {"travel", "tattoos", "CryptoCurrency", "stocks", "AnimalsBeingDerps"}
@@ -24,7 +25,7 @@ def ts_to_epoch(ts: str | None) -> int | None:
     if not ts:
         return None
     try:
-        dt = datetime.strptime(ts[:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        dt = datetime.strptime(ts[:14], "%Y%m%d%H%M%S").replace(tzinfo=UTC)
         return int(dt.timestamp())
     except ValueError:
         return None
@@ -46,24 +47,25 @@ def consolidate(sub: str, rec: dict):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="important.db")
+    ap.add_argument("--db", default=data_db("redditpages.db"))
     ap.add_argument("--json", default="/tmp/mods_result.json")
     args = ap.parse_args()
 
-    data = json.load(open(args.json))
+    with open(args.json) as f:
+        data = json.load(f)
     engine = connect(args.db)
     init_schema(engine)
 
-    rows: list[SubredditModerator] = []
-    subs_with_data = 0
+    rows: list[Moderator] = []
+    subs: set[str] = set()
     for sub, rec in data.items():
         mods, total, complete, source = consolidate(sub, rec)
         if not mods:
             continue  # e.g. r/ChatGPT — postdates the gate, no public archive
-        subs_with_data += 1
+        subs.add(sub)
         ts = rec.get("snapshot")
         for i, mod in enumerate(mods, start=1):
-            rows.append(SubredditModerator(
+            rows.append(Moderator(
                 subreddit_name=sub,
                 moderator_username=mod,
                 rank=i,
@@ -76,9 +78,11 @@ def main() -> None:
 
     total_rows = 0
     with session(engine) as s:
+        insert_ignore(s, [Subreddit(name=sub) for sub in subs])
         for j in range(0, len(rows), 200):  # chunk to stay under SQLite param limit
             total_rows += upsert(s, rows[j:j + 200])
         s.commit()
+    subs_with_data = len(subs)
 
     print(f"loaded {total_rows} moderator rows across {subs_with_data} subreddits "
           f"into {args.db}")

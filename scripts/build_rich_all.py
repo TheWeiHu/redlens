@@ -13,7 +13,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from redditpages.db import connect
+from redditpages.db import DATA_DIR, connect, data_db
 from redditpages.models import User
 from scripts.build_payload import build_payload
 
@@ -25,8 +25,8 @@ from render import render  # noqa: E402
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--db", default="important.db")
-    p.add_argument("--out-dir", default="../data/important")
+    p.add_argument("--db", default=data_db("redditpages.db"))
+    p.add_argument("--out-dir", default=str(DATA_DIR / "important"))
     args = p.parse_args()
 
     out = Path(args.out_dir).resolve() / "u"
