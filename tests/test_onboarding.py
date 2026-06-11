@@ -1,3 +1,4 @@
+import os
 import tomllib
 
 import pytest
@@ -31,7 +32,8 @@ def test_first_run_silent_while_gated(monkeypatch):
 def test_save_config_merges_and_restricts_permissions(tmp_path):
     config.save_config({"storage": {"db": "/tmp/a.db"}})
     path = config.save_config({"llm": {"api_key": 'k"ey\\x'}})
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":  # Windows has no POSIX modes; chmod is a no-op there
+        assert path.stat().st_mode & 0o777 == 0o600
     parsed = tomllib.loads(path.read_text())
     assert parsed["storage"]["db"] == "/tmp/a.db"     # earlier write survived
     assert parsed["llm"]["api_key"] == 'k"ey\\x'      # quoting round-trips
