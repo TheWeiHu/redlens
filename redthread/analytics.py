@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from redditpages.errors import NotFound
-from redditpages.models import Comment, Post, User, UserAnalytics
+from redthread.errors import NotFound
+from redthread.models import Comment, Post, User, UserAnalytics
 
 
 def compute_user_analytics(session: Session, username: str) -> UserAnalytics:

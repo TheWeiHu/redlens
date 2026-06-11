@@ -13,8 +13,8 @@ field is non-trivially populated.
 import pytest
 from sqlmodel import Session
 
-from redditpages import compute_user_analytics, connect, init_schema, sync_user
-from redditpages.models import Comment, Post
+from redthread import compute_user_analytics, connect, init_schema, sync_user
+from redthread.models import Comment, Post
 
 TEST_USER = "funny_mod"
 

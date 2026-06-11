@@ -4,12 +4,12 @@ import argparse
 import sys
 from datetime import UTC, datetime
 
-from redditpages import __version__, explore, onboarding
-from redditpages.analytics import compute_user_analytics
-from redditpages.config import resolve_db
-from redditpages.db import connect, init_schema, session
-from redditpages.errors import NotFound, RedditPagesError
-from redditpages.ingest import sync_user
+from redthread import __version__, explore, onboarding
+from redthread.analytics import compute_user_analytics
+from redthread.config import resolve_db
+from redthread.db import connect, init_schema, session
+from redthread.errors import NotFound, RedthreadError
+from redthread.ingest import sync_user
 
 
 def _ts(s: int | None) -> str:
@@ -19,9 +19,9 @@ def _ts(s: int | None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="redditpages")
-    p.add_argument("--version", action="version", version=f"redditpages {__version__}")
-    p.add_argument("--db", default=None, help="SQLite file (default: REDDITPAGES_DB, "
+    p = argparse.ArgumentParser(prog="redthread")
+    p.add_argument("--version", action="version", version=f"redthread {__version__}")
+    p.add_argument("--db", default=None, help="SQLite file (default: REDTHREAD_DB, "
                    "config.toml, or the per-user data dir)")
     sub = p.add_subparsers(dest="verb", required=True)
     sub.add_parser("init")
@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     except NotFound as e:
         print(f"not found: {e}", file=sys.stderr)
         return 2
-    except RedditPagesError as e:
+    except RedthreadError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
