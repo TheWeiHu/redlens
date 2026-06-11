@@ -1,17 +1,36 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "redditpages"
-version = "0.1.0"
-description = "Reddit profile analytics on arctic-shift"
+version = "0.2.0"
+description = "Archive any Reddit user's public history into a local SQLite database you own, and analyze it"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["reddit", "archive", "analytics", "sqlite", "arctic-shift"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Internet",
+]
 dependencies = [
     "platformdirs>=4",
     "sqlmodel>=0.0.14",
 ]
+
+[project.urls]
+Homepage = "https://github.com/TheWeiHu/RedditPages"
+Issues = "https://github.com/TheWeiHu/RedditPages/issues"
+Changelog = "https://github.com/TheWeiHu/RedditPages/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.4", "mypy>=1.8"]

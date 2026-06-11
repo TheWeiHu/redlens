@@ -15,6 +15,11 @@ from typing import Any
 
 from redditpages.config import config_path, save_config
 
+# The keys this wizard collects are not consumed anywhere yet — flip this on
+# when the Reddit provider and `summarize` land (v0.3). While False, the
+# first-run offer is silent and the `setup` subcommand is not registered.
+ENABLED = False
+
 FIRST_RUN_MARKER = (
     "# redditpages configuration — see `redditpages setup` to add or change\n"
     "# optional API keys (Reddit for fresh data, LLM for AI summaries).\n"
@@ -57,6 +62,8 @@ def offer_setup_on_first_run() -> None:
     writes a comment-only file. Skipped entirely when stdin/stdout is not a
     terminal.
     """
+    if not ENABLED:
+        return
     if config_path().exists():
         return
     if not (sys.stdin.isatty() and sys.stdout.isatty()):

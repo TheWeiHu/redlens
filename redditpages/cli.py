@@ -33,7 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
     e.add_argument("--no-browser", action="store_true")
-    sub.add_parser("setup")
+    if onboarding.ENABLED:
+        sub.add_parser("setup")
     args = p.parse_args(argv)
 
     try:

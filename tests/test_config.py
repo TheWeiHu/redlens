@@ -20,7 +20,9 @@ def test_flag_wins_over_everything(monkeypatch, tmp_path):
 
 def test_env_beats_config_file(monkeypatch, tmp_path):
     cfg = tmp_path / "config.toml"
-    cfg.write_text(f'[storage]\ndb = "{tmp_path / "cfg.db"}"\n')
+    # as_posix: backslashes in TOML basic strings are escapes, so raw
+    # Windows paths would be invalid TOML
+    cfg.write_text(f'[storage]\ndb = "{(tmp_path / "cfg.db").as_posix()}"\n')
     monkeypatch.setenv("REDDITPAGES_CONFIG", str(cfg))
     monkeypatch.setenv("REDDITPAGES_DB", str(tmp_path / "env.db"))
     assert config.resolve_db() == tmp_path / "env.db"
@@ -28,7 +30,7 @@ def test_env_beats_config_file(monkeypatch, tmp_path):
 
 def test_config_file_beats_default(monkeypatch, tmp_path):
     cfg = tmp_path / "config.toml"
-    cfg.write_text(f'[storage]\ndb = "{tmp_path / "cfg.db"}"\n')
+    cfg.write_text(f'[storage]\ndb = "{(tmp_path / "cfg.db").as_posix()}"\n')
     monkeypatch.setenv("REDDITPAGES_CONFIG", str(cfg))
     assert config.resolve_db() == tmp_path / "cfg.db"
 
