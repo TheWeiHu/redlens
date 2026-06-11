@@ -8,10 +8,11 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from redditpages.errors import RedditPagesError
+from redlens import __version__
+from redlens.errors import RedlensError
 
 BASE = "https://arctic-shift.photon-reddit.com"
-UA = "redditpages/0.1"
+UA = f"redlens/{__version__} (+https://github.com/TheWeiHu/redlens)"
 PAGINATION_SLEEP_S = 0.25
 # Hard cap on items per stream (posts or comments). Override at runtime by
 # setting ``arctic.MAX_ITEMS_PER_STREAM = N``. Default None = unbounded.
@@ -42,10 +43,10 @@ def _get(path: str, **params: Any) -> dict[str, Any]:
                 )
                 time.sleep(wait)
                 continue
-            raise RedditPagesError(f"arctic GET {url}: {exc}") from exc
+            raise RedlensError(f"arctic GET {url}: {exc}") from exc
         except Exception as exc:
-            raise RedditPagesError(f"arctic GET {url}: {exc}") from exc
-    raise RedditPagesError(f"arctic GET {url}: exhausted retries")
+            raise RedlensError(f"arctic GET {url}: {exc}") from exc
+    raise RedlensError(f"arctic GET {url}: exhausted retries")
 
 
 def fetch_user_meta(username: str) -> dict[str, Any] | None:

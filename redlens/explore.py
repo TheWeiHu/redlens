@@ -1,37 +1,31 @@
-"""Interactive, zero-dependency SQLite browser for the redditpages DB.
+"""Interactive SQLite browser for the redlens DB.
 
-Replaces the old pandas notebook with a local web app: list tables, inspect
-schema, page/sort/search rows, and run read-only SQL — all in the browser,
-using nothing but the Python standard library.
+A local web app: list tables, inspect schema, page/sort/search rows, and run
+read-only SQL — all in the browser, using nothing but the Python standard
+library.
 
-    python scripts/explore.py                 # opens ../data/redditpages.db
-    python scripts/explore.py --db other.db   # any SQLite file
-    python scripts/explore.py --port 9000 --no-browser
+    redlens explore                       # opens the default DB
+    redlens --db other.db explore         # any SQLite file
+    redlens explore --port 9000 --no-browser
 
 The database is opened read-only; the SQL console only accepts a single
 SELECT / WITH / PRAGMA / EXPLAIN statement, so nothing here can mutate data.
 """
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import sqlite3
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+from redlens.errors import NotFound
 
 MAX_ROWS = 500          # browse page cap
 MAX_QUERY_ROWS = 1000   # SQL console cap
-
-
-def default_db() -> str:
-    """Mirror redditpages.db.data_db without importing the package, so this
-    explorer stays pure-stdlib and runnable with no install."""
-    base = os.environ.get("REDDITPAGES_DATA") or Path(__file__).resolve().parents[2] / "data"
-    return str(Path(base) / "redditpages.db")
 
 
 # --------------------------------------------------------------------------- #
@@ -47,7 +41,7 @@ class DB:
         con.row_factory = sqlite3.Row
         return con
 
-    def tables(self) -> list[dict]:
+    def tables(self) -> list[dict[str, Any]]:
         con = self._conn()
         try:
             names = [
@@ -73,7 +67,7 @@ class DB:
         return [c["name"] for c in con.execute(f'PRAGMA table_info("{table}")')]
 
     def rows(self, table: str, *, limit: int, offset: int,
-             order: str | None, direction: str, col: str, q: str) -> dict:
+             order: str | None, direction: str, col: str, q: str) -> dict[str, Any]:
         con = self._conn()
         try:
             cols = self._columns(con, table)
@@ -106,7 +100,7 @@ class DB:
         finally:
             con.close()
 
-    def query(self, sql: str) -> dict:
+    def query(self, sql: str) -> dict[str, Any]:
         stmt = sql.strip().rstrip(";").strip()
         if not stmt:
             raise ValueError("empty query")
@@ -133,7 +127,7 @@ class DB:
 class Handler(BaseHTTPRequestHandler):
     db: DB  # injected on the server
 
-    def log_message(self, format: str, *args) -> None:  # quiet
+    def log_message(self, format: str, *args: Any) -> None:  # quiet
         pass
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
@@ -143,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _json(self, obj: dict, code: int = 200) -> None:
+    def _json(self, obj: dict[str, Any], code: int = 200) -> None:
         self._send(code, json.dumps(obj, default=str).encode(), "application/json")
 
     def do_GET(self) -> None:
@@ -194,7 +188,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>redditpages · db explorer</title>
+<title>redlens · db explorer</title>
 <style>
   :root { --bg:#fff; --fg:#1a1a1a; --mut:#6b7280; --line:#e5e7eb; --accent:#d93a00;
           --hl:#fff7f3; --code:#f6f8fa; }
@@ -419,9 +413,6 @@ const EXAMPLES = [
    "SELECT lower(substr(url, instr(url,'//')+2,\n"
  + "  instr(substr(url,instr(url,'//')+2)||'/', '/')-1)) AS host,\n"
  + "  count(*) n FROM post WHERE url LIKE 'http%' GROUP BY 1 ORDER BY n DESC LIMIT 20"],
-  ['Most-moderated mods',
-   'SELECT moderator_username, count(*) AS subs FROM moderator\n'
- + 'GROUP BY 1 ORDER BY subs DESC LIMIT 20'],
   ['Karma split (user)',
    'SELECT username, post_karma, comment_karma, num_posts, num_comments\n'
  + 'FROM user ORDER BY post_karma DESC LIMIT 20'],
@@ -468,23 +459,22 @@ loadMeta().catch(e => $('#tables').innerHTML = `<li class="err">${e.message}</li
 # Entrypoint                                                                   #
 # --------------------------------------------------------------------------- #
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Local web browser for the redditpages SQLite DB.")
-    ap.add_argument("--db", default=default_db())
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--no-browser", action="store_true")
-    args = ap.parse_args()
+def serve(
+    db_path: str | Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    open_browser: bool = True,
+) -> int:
+    if not Path(db_path).exists():
+        raise NotFound(f"database not found: {db_path} — sync a user first")
 
-    if not Path(args.db).exists():
-        ap.error(f"database not found: {args.db}")
-
-    Handler.db = DB(args.db)
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    url = f"http://{args.host}:{args.port}/"
-    print(f"exploring {Path(args.db).resolve()}")
+    Handler.db = DB(str(db_path))
+    server = ThreadingHTTPServer((host, port), Handler)
+    url = f"http://{host}:{port}/"
+    print(f"exploring {Path(db_path).resolve()}")
     print(f"  → {url}   (Ctrl+C to stop)")
-    if not args.no_browser:
+    if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
@@ -493,7 +483,3 @@ def main() -> int:
     finally:
         server.server_close()
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
