@@ -6,6 +6,9 @@ ARCTIC_USER = {
     "_meta": {
         "num_posts": 258, "num_comments": 10754,
         "post_karma": 178954, "comment_karma": 604006, "total_karma": 782960,
+        "earliest_post_at": 1300000000, "last_post_at": 1700000000,
+        "earliest_comment_at": 1290000000, "last_comment_at": 1780411725,
+        "post_stats_updated_at": 1742860804, "comment_stats_updated_at": 1742860804,
     },
 }
 
@@ -25,19 +28,24 @@ ARCTIC_COMMENT = {
 }
 
 
-def test_user_preserves_meta_envelope():
+def test_user_from_arctic_flattens_meta_to_columns():
     u = User.from_arctic(ARCTIC_USER)
     assert u.username == "KimJongFunk"
     assert u.author_fullname == "rbpdo"
-    assert u.arctic_meta is not None
-    assert u.arctic_meta["total_karma"] == 782960
-    assert u.arctic_meta["num_comments"] == 10754
+    assert u.num_posts == 258
+    assert u.num_comments == 10754
+    assert u.post_karma == 178954
+    assert u.comment_karma == 604006
+    assert u.last_post_at == 1700000000
+    assert u.last_comment_at == 1780411725
 
 
-def test_user_handles_missing_meta():
+def test_user_from_arctic_without_meta_leaves_stats_null():
     u = User.from_arctic({"author": "ghost", "id": "abc"})
     assert u.username == "ghost"
-    assert u.arctic_meta is None
+    assert u.num_posts is None
+    assert u.post_karma is None
+    assert u.last_comment_at is None
 
 
 def test_post_keeps_signal_drops_noise():

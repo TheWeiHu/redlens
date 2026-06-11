@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 from sqlmodel import Session, select
 
-from redditpages.db import connect
+from redditpages.db import connect, data_db
 from redditpages.models import Comment, Post, User
 
 STOP = set("""
@@ -413,7 +413,7 @@ def build_payload(db_path: str, username: str) -> dict:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("username")
-    p.add_argument("--db", default="redditpages.db")
+    p.add_argument("--db", default=data_db("redditpages.db"))
     p.add_argument("--out", default=None)
     args = p.parse_args()
     payload = build_payload(args.db, args.username)

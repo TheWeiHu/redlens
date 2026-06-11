@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from typing import Any
 
@@ -13,22 +12,46 @@ def _now() -> int:
 
 
 class User(SQLModel, table=True):
+    """A Reddit account plus its arctic activity stats.
+
+    Arctic returns the stats as a flat ``_meta`` blob — the same five measures
+    for posts and for comments. They are one-per-user, so they live as plain
+    columns on this row (atomic, 1NF) rather than a JSON blob. ``total_karma``
+    is dropped: it is just ``post_karma + comment_karma``. All stat columns are
+    null when arctic has no ``_meta`` for the account.
+    """
+
     username: str = Field(primary_key=True)
     author_fullname: str | None = None
-    arctic_meta_json: str | None = None
-    fetched_at: int = Field(default_factory=_now)
 
-    @property
-    def arctic_meta(self) -> dict[str, Any] | None:
-        return json.loads(self.arctic_meta_json) if self.arctic_meta_json else None
+    num_posts: int | None = None
+    num_comments: int | None = None
+    post_karma: int | None = None
+    comment_karma: int | None = None
+    earliest_post_at: int | None = None
+    last_post_at: int | None = None
+    earliest_comment_at: int | None = None
+    last_comment_at: int | None = None
+    post_stats_updated_at: int | None = None     # when arctic last recomputed post stats
+    comment_stats_updated_at: int | None = None  # ditto for comment stats
+    fetched_at: int = Field(default_factory=_now)
 
     @classmethod
     def from_arctic(cls, raw: dict[str, Any]) -> User:
-        meta = raw.get("_meta")
+        meta = raw.get("_meta") or {}
         return cls(
             username=raw["author"],
             author_fullname=raw.get("id"),
-            arctic_meta_json=json.dumps(meta) if meta else None,
+            num_posts=meta.get("num_posts"),
+            num_comments=meta.get("num_comments"),
+            post_karma=meta.get("post_karma"),
+            comment_karma=meta.get("comment_karma"),
+            earliest_post_at=meta.get("earliest_post_at"),
+            last_post_at=meta.get("last_post_at"),
+            earliest_comment_at=meta.get("earliest_comment_at"),
+            last_comment_at=meta.get("last_comment_at"),
+            post_stats_updated_at=meta.get("post_stats_updated_at"),
+            comment_stats_updated_at=meta.get("comment_stats_updated_at"),
         )
 
 
@@ -89,12 +112,28 @@ class Comment(SQLModel, table=True):
         )
 
 
-class SubredditModerator(SQLModel, table=True):
+class Subreddit(SQLModel, table=True):
+    """One row per subreddit we have seen — in a post, comment, or mod list.
+
+    A stable identity/dimension table: it does not carry moderator-scrape
+    provenance (that belongs on the ``moderator`` rows), so re-scraping a mod
+    list never churns these rows. Right now the only intrinsic fact we hold is
+    the name; it exists so posts, comments, and moderators have a subreddit to
+    reference.
+    """
+
+    name: str = Field(primary_key=True)
+    fetched_at: int = Field(default_factory=_now)
+
+
+class Moderator(SQLModel, table=True):
     """One row per (subreddit, moderator).
 
     Reddit gated logged-out moderator lists in 2021, so most of this data comes
-    from Internet Archive snapshots. `as_of_date` records the date the row was
-    actually accurate (the snapshot date) — not when we fetched it.
+    from Internet Archive snapshots. ``as_of_date`` records the date the row was
+    actually accurate (the snapshot date) — not when we fetched it. That
+    snapshot provenance rides with the moderator rows (it describes a scrape,
+    not the subreddit itself).
     """
 
     subreddit_name: str = Field(primary_key=True, index=True)
