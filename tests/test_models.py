@@ -1,4 +1,4 @@
-from redthread.models import Comment, Post, User
+from redlens.models import Comment, Post, User
 
 ARCTIC_USER = {
     "author": "KimJongFunk",

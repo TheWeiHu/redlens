@@ -4,12 +4,12 @@ import argparse
 import sys
 from datetime import UTC, datetime
 
-from redthread import __version__, explore, onboarding
-from redthread.analytics import compute_user_analytics
-from redthread.config import resolve_db
-from redthread.db import connect, init_schema, session
-from redthread.errors import NotFound, RedthreadError
-from redthread.ingest import sync_user
+from redlens import __version__, explore, onboarding
+from redlens.analytics import compute_user_analytics
+from redlens.config import resolve_db
+from redlens.db import connect, init_schema, session
+from redlens.errors import NotFound, RedlensError
+from redlens.ingest import sync_user
 
 
 def _ts(s: int | None) -> str:
@@ -19,9 +19,9 @@ def _ts(s: int | None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="redthread")
-    p.add_argument("--version", action="version", version=f"redthread {__version__}")
-    p.add_argument("--db", default=None, help="SQLite file (default: REDTHREAD_DB, "
+    p = argparse.ArgumentParser(prog="redlens")
+    p.add_argument("--version", action="version", version=f"redlens {__version__}")
+    p.add_argument("--db", default=None, help="SQLite file (default: REDLENS_DB, "
                    "config.toml, or the per-user data dir)")
     sub = p.add_subparsers(dest="verb", required=True)
     sub.add_parser("init")
@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     except NotFound as e:
         print(f"not found: {e}", file=sys.stderr)
         return 2
-    except RedthreadError as e:
+    except RedlensError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

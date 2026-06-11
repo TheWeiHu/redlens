@@ -1,12 +1,12 @@
-"""Interactive SQLite browser for the redthread DB.
+"""Interactive SQLite browser for the redlens DB.
 
 A local web app: list tables, inspect schema, page/sort/search rows, and run
 read-only SQL — all in the browser, using nothing but the Python standard
 library.
 
-    redthread explore                       # opens the default DB
-    redthread --db other.db explore         # any SQLite file
-    redthread explore --port 9000 --no-browser
+    redlens explore                       # opens the default DB
+    redlens --db other.db explore         # any SQLite file
+    redlens explore --port 9000 --no-browser
 
 The database is opened read-only; the SQL console only accepts a single
 SELECT / WITH / PRAGMA / EXPLAIN statement, so nothing here can mutate data.
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from redthread.errors import NotFound
+from redlens.errors import NotFound
 
 MAX_ROWS = 500          # browse page cap
 MAX_QUERY_ROWS = 1000   # SQL console cap
@@ -188,7 +188,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>redthread · db explorer</title>
+<title>redlens · db explorer</title>
 <style>
   :root { --bg:#fff; --fg:#1a1a1a; --mut:#6b7280; --line:#e5e7eb; --accent:#d93a00;
           --hl:#fff7f3; --code:#f6f8fa; }
