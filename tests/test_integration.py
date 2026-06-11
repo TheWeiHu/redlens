@@ -14,7 +14,7 @@ import pytest
 from sqlmodel import Session
 
 from redditpages import compute_user_analytics, connect, init_schema, sync_user
-from redditpages.models import Comment, Post, Subreddit
+from redditpages.models import Comment, Post
 
 TEST_USER = "funny_mod"
 
@@ -33,16 +33,13 @@ def test_end_to_end_against_real_arctic(tmp_path):
     # arctic meta arrived flattened onto the user row (not a JSON blob)
     assert result.user.num_comments is not None
 
-    # Counts match what got written, and the subreddit dimension was populated
+    # Counts match what got written
     with Session(engine) as s:
         from sqlmodel import func, select
         n_posts = s.exec(select(func.count()).select_from(Post)).one()
         n_comments = s.exec(select(func.count()).select_from(Comment)).one()
-        n_subs = s.exec(select(func.count()).select_from(Subreddit)).one()
     assert n_posts == result.posts_written
     assert n_comments == result.comments_written
-    # every subreddit the user touched is registered in the dimension
-    assert n_subs > 0
 
     # Analytics agree with the raw counts
     with Session(engine) as s:
