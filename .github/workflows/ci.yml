@@ -24,7 +24,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: ruff check .
-      - run: mypy redditpages
+      - run: mypy redthread
       - run: pytest -m "not integration"
 
   integration:

@@ -3,17 +3,17 @@
 The DB path is resolved with this precedence (first hit wins):
 
 1. ``--db`` flag
-2. ``REDDITPAGES_DB`` env var
+2. ``REDTHREAD_DB`` env var
 3. ``db`` under ``[storage]`` in the config file
-4. the per-user data directory (e.g. ``~/.local/share/redditpages/`` on
-   Linux, ``~/Library/Application Support/redditpages/`` on macOS)
+4. the per-user data directory (e.g. ``~/.local/share/redthread/`` on
+   Linux, ``~/Library/Application Support/redthread/`` on macOS)
 
 The config file is ``config.toml`` in the per-user config directory
-(override the file location with ``REDDITPAGES_CONFIG``). It is optional —
+(override the file location with ``REDTHREAD_CONFIG``). It is optional —
 everything works with no config at all. Recognized so far:
 
     [storage]
-    db = "/path/to/redditpages.db"
+    db = "/path/to/redthread.db"
 
     [reddit]                  # optional: fresh data via Reddit's official API
     client_id = "..."
@@ -23,8 +23,8 @@ everything works with no config at all. Recognized so far:
     api_key = "..."
 
 API keys can also come from the environment, which always wins over the
-file: ``REDDITPAGES_REDDIT_CLIENT_ID`` / ``REDDITPAGES_REDDIT_CLIENT_SECRET``
-and ``REDDITPAGES_LLM_API_KEY`` (falling back to ``ANTHROPIC_API_KEY`` /
+file: ``REDTHREAD_REDDIT_CLIENT_ID`` / ``REDTHREAD_REDDIT_CLIENT_SECRET``
+and ``REDTHREAD_LLM_API_KEY`` (falling back to ``ANTHROPIC_API_KEY`` /
 ``OPENAI_API_KEY``).
 """
 from __future__ import annotations
@@ -36,20 +36,20 @@ from typing import Any
 
 from platformdirs import user_config_dir, user_data_dir
 
-from redditpages.errors import RedditPagesError
+from redthread.errors import RedthreadError
 
-APP_NAME = "redditpages"
+APP_NAME = "redthread"
 
 
 def config_path() -> Path:
-    env = os.environ.get("REDDITPAGES_CONFIG")
+    env = os.environ.get("REDTHREAD_CONFIG")
     if env:
         return Path(env).expanduser()
     return Path(user_config_dir(APP_NAME)) / "config.toml"
 
 
 def default_db_path() -> Path:
-    return Path(user_data_dir(APP_NAME)) / "redditpages.db"
+    return Path(user_data_dir(APP_NAME)) / "redthread.db"
 
 
 def load_config() -> dict[str, Any]:
@@ -61,13 +61,13 @@ def load_config() -> dict[str, Any]:
         with open(path, "rb") as f:
             return tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
-        raise RedditPagesError(f"bad config {path}: {exc}") from exc
+        raise RedthreadError(f"bad config {path}: {exc}") from exc
 
 
 def resolve_db(flag: str | None = None) -> Path:
     if flag:
         return Path(flag).expanduser()
-    env = os.environ.get("REDDITPAGES_DB")
+    env = os.environ.get("REDTHREAD_DB")
     if env:
         return Path(env).expanduser()
     configured = load_config().get("storage", {}).get("db")
@@ -110,8 +110,8 @@ def save_config(updates: dict[str, dict[str, Any]]) -> Path:
 
 def reddit_credentials() -> tuple[str, str] | None:
     """(client_id, client_secret) for Reddit's official API, or None."""
-    cid = os.environ.get("REDDITPAGES_REDDIT_CLIENT_ID")
-    secret = os.environ.get("REDDITPAGES_REDDIT_CLIENT_SECRET")
+    cid = os.environ.get("REDTHREAD_REDDIT_CLIENT_ID")
+    secret = os.environ.get("REDTHREAD_REDDIT_CLIENT_SECRET")
     if not (cid and secret):
         section = load_config().get("reddit", {})
         cid = cid or section.get("client_id")
@@ -123,7 +123,7 @@ def reddit_credentials() -> tuple[str, str] | None:
 
 def llm_api_key() -> str | None:
     """API key for AI summaries, from env or the config file."""
-    for var in ("REDDITPAGES_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    for var in ("REDTHREAD_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         if os.environ.get(var):
             return os.environ[var]
     key = load_config().get("llm", {}).get("api_key")

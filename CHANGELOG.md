@@ -8,17 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.2.0] - 2026-06-11
 
-First installable release.
+First installable release — and a new name: **redthread** (formerly
+redditpages). "The red thread" is the common theme running through a story;
+tracing topics across public discussion is the roadmap.
 
 ### Added
-- DB path resolution that works anywhere: `--db` flag > `REDDITPAGES_DB`
+- DB path resolution that works anywhere: `--db` flag > `REDTHREAD_DB`
   env var > `config.toml` > the per-user data directory (via platformdirs).
-- Optional `~/.config/redditpages/config.toml`.
+- Optional `~/.config/redthread/config.toml`.
 - Schema versioning via SQLite's `PRAGMA user_version`, with automatic
   migrations on connect.
-- `redditpages explore` — the read-only browser DB explorer, now a
+- `redthread explore` — the read-only browser DB explorer, now a
   first-class subcommand.
-- A first-run key-onboarding wizard (`redditpages setup`), shipped disabled
+- A first-run key-onboarding wizard (`redthread setup`), shipped disabled
   until the keys it collects are consumed.
 - MIT license, CI, and PyPI release workflow.
 

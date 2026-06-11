@@ -1,4 +1,4 @@
-from redditpages.models import Comment, Post, User
+from redthread.models import Comment, Post, User
 
 ARCTIC_USER = {
     "author": "KimJongFunk",

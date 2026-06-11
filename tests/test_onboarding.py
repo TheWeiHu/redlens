@@ -2,16 +2,16 @@ import tomllib
 
 import pytest
 
-from redditpages import config, onboarding
+from redthread import config, onboarding
 
 
 @pytest.fixture(autouse=True)
 def isolate_config(monkeypatch, tmp_path):
-    monkeypatch.delenv("REDDITPAGES_DB", raising=False)
-    for var in ("REDDITPAGES_REDDIT_CLIENT_ID", "REDDITPAGES_REDDIT_CLIENT_SECRET",
-                "REDDITPAGES_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    monkeypatch.delenv("REDTHREAD_DB", raising=False)
+    for var in ("REDTHREAD_REDDIT_CLIENT_ID", "REDTHREAD_REDDIT_CLIENT_SECRET",
+                "REDTHREAD_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("REDDITPAGES_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setenv("REDTHREAD_CONFIG", str(tmp_path / "config.toml"))
     # Most tests exercise the wizard as it will behave once keys are wired up.
     monkeypatch.setattr(onboarding, "ENABLED", True)
 
@@ -45,8 +45,8 @@ def test_key_getters_prefer_env(monkeypatch):
     assert config.reddit_credentials() == ("file-id", "file-secret")
     assert config.llm_api_key() == "file-key"
 
-    monkeypatch.setenv("REDDITPAGES_REDDIT_CLIENT_ID", "env-id")
-    monkeypatch.setenv("REDDITPAGES_REDDIT_CLIENT_SECRET", "env-secret")
+    monkeypatch.setenv("REDTHREAD_REDDIT_CLIENT_ID", "env-id")
+    monkeypatch.setenv("REDTHREAD_REDDIT_CLIENT_SECRET", "env-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
     assert config.reddit_credentials() == ("env-id", "env-secret")
     assert config.llm_api_key() == "env-key"

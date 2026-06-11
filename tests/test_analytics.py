@@ -1,10 +1,10 @@
 import pytest
 from sqlmodel import Session
 
-from redditpages.analytics import compute_user_analytics
-from redditpages.db import connect, init_schema, upsert
-from redditpages.errors import NotFound
-from redditpages.models import Comment, Post, User
+from redthread.analytics import compute_user_analytics
+from redthread.db import connect, init_schema, upsert
+from redthread.errors import NotFound
+from redthread.models import Comment, Post, User
 
 
 @pytest.fixture

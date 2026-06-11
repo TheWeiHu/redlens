@@ -1,7 +1,7 @@
 """Mechanics of the PRAGMA user_version migration scheme in db.init_schema."""
 
-from redditpages import db as rdb
-from redditpages.db import connect, init_schema
+from redthread import db as rdb
+from redthread.db import connect, init_schema
 
 
 def _user_version(engine) -> int:
