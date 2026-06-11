@@ -4,7 +4,7 @@ import argparse
 import sys
 from datetime import UTC, datetime
 
-from redditpages import __version__, explore
+from redditpages import __version__, explore, onboarding
 from redditpages.analytics import compute_user_analytics
 from redditpages.config import resolve_db
 from redditpages.db import connect, init_schema, session
@@ -33,9 +33,13 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
     e.add_argument("--no-browser", action="store_true")
+    sub.add_parser("setup")
     args = p.parse_args(argv)
 
     try:
+        if args.verb == "setup":
+            return onboarding.run_wizard()
+        onboarding.offer_setup_on_first_run()
         db = resolve_db(args.db)
         if args.verb == "explore":
             return explore.serve(db, host=args.host, port=args.port,

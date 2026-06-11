@@ -22,6 +22,26 @@ redditpages explore                       # browse the DB in your browser
 No setup needed — the schema is created (and migrated) automatically on
 first use.
 
+## Optional API keys
+
+Everything above works with no keys at all (arctic-shift is a free, open
+mirror). Two keys unlock more, and the first interactive run offers to
+collect them — or run the wizard anytime:
+
+```bash
+redditpages setup
+```
+
+- **Reddit API key** (free; create a "script" app at
+  [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)) — fresh data
+  straight from Reddit's official API, on your own quota.
+- **LLM API key** (Anthropic or OpenAI) — AI profile summaries.
+
+Keys are stored in `~/.config/redditpages/config.toml` (mode 600). The
+environment always wins over the file: `REDDITPAGES_REDDIT_CLIENT_ID` /
+`REDDITPAGES_REDDIT_CLIENT_SECRET`, and `REDDITPAGES_LLM_API_KEY` (or
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`).
+
 ## Data
 
 Everything lands in one SQLite file, by default in your per-user data
