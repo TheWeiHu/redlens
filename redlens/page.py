@@ -27,15 +27,20 @@ TOP_DOMAINS = 8
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _NON_AUTHORS = {"[deleted]", "automoderator"}
-_STOPWORDS = frozenset("""
-a about after all also am an and any are as at be because been before being
-but by can could did do does doing down for from get got had has have he her
-here hers him his how i if in into is it its just like me more most my new
-no not now of off on one only or other our out over own re s so some such
-t than that the their them then there these they this those through to too
-under up very was we were what when where which while who why will with
-would you your yours
-""".split())
+_STOPWORDS = frozenset((
+    "a", "about", "after", "all", "also", "am", "an", "and", "any", "are",
+    "as", "at", "be", "because", "been", "before", "being", "but", "by",
+    "can", "could", "did", "do", "does", "doing", "down", "for", "from",
+    "get", "got", "had", "has", "have", "he", "her", "here", "hers", "him",
+    "his", "how", "i", "if", "in", "into", "is", "it", "its", "just",
+    "like", "me", "more", "most", "my", "new", "no", "not", "now", "of",
+    "off", "on", "one", "only", "or", "other", "our", "out", "over", "own",
+    "re", "s", "so", "some", "such", "t", "than", "that", "the", "their",
+    "them", "then", "there", "these", "they", "this", "those", "through",
+    "to", "too", "under", "up", "very", "was", "we", "were", "what", "when",
+    "where", "which", "while", "who", "why", "will", "with", "would", "you",
+    "your", "yours",
+))
 
 _CSS = """
 :root { --fg:#1a1a1a; --mut:#6b7280; --line:#e5e7eb; --accent:#d93a00; --hl:#fff7f3; }
