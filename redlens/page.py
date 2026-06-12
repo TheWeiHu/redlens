@@ -22,24 +22,46 @@ from redlens.topics import get_topic
 TOP_POSTS = 25
 TOP_SUBREDDITS = 15
 TOP_AUTHORS = 10
-TOP_WORDS = 12
 TOP_DOMAINS = 8
+CLOUD_UNIGRAMS = 40
+CLOUD_BIGRAMS = 15
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _NON_AUTHORS = {"[deleted]", "automoderator"}
+# Conversational-filler stopwords, in the spirit of rhiever/reddit-analysis:
+# aggressive on chatter ("really", "think", "anyone") so topic words surface,
+# hands-off on anything that could be domain signal ("mg", "dose", "insurance").
 _STOPWORDS = frozenset((
-    "a", "about", "after", "all", "also", "am", "an", "and", "any", "are",
-    "as", "at", "be", "because", "been", "before", "being", "but", "by",
-    "can", "could", "did", "do", "does", "doing", "down", "for", "from",
-    "get", "got", "had", "has", "have", "he", "her", "here", "hers", "him",
-    "his", "how", "i", "if", "in", "into", "is", "it", "its", "just",
-    "like", "me", "more", "most", "my", "new", "no", "not", "now", "of",
-    "off", "on", "one", "only", "or", "other", "our", "out", "over", "own",
-    "re", "s", "so", "some", "such", "t", "than", "that", "the", "their",
-    "them", "then", "there", "these", "they", "this", "those", "through",
-    "to", "too", "under", "up", "very", "was", "we", "were", "what", "when",
-    "where", "which", "while", "who", "why", "will", "with", "would", "you",
-    "your", "yours",
+    "a", "able", "about", "actually", "after", "again", "all", "also", "am",
+    "an", "and", "any", "anybody", "anyone", "anything", "are", "aren't",
+    "around", "as", "at", "back", "bad", "be", "because", "been", "before",
+    "being", "best", "better", "bit", "but", "by", "came", "can", "can't",
+    "cant", "come", "could", "couldn't", "couldnt", "day", "days", "did",
+    "didn't", "didnt", "do", "does", "doesn't", "doesnt", "doing", "don't",
+    "dont", "down", "edit", "else", "even", "ever", "everyone", "everything",
+    "feel", "feeling", "feels", "felt", "few", "first", "for", "from", "get",
+    "gets", "getting", "go", "going", "good", "got", "had", "has", "hasn't",
+    "have", "haven't", "he", "he's", "help", "her", "here", "hers", "him",
+    "his", "how", "however", "i", "i'd", "i'll", "i'm", "i've", "id", "if",
+    "ill", "im", "in", "into", "is", "isn't", "isnt", "it", "it's", "its",
+    "ive", "just", "know", "last", "let's", "like", "long", "look",
+    "looking", "looks", "lot", "made", "make", "makes", "making", "many",
+    "maybe", "me", "month", "months", "more", "most", "much", "my", "need",
+    "never", "new", "next", "no", "not", "nothing", "now", "of", "off",
+    "on", "one", "only", "or", "other", "our", "out", "over", "own",
+    "people", "post", "probably", "question", "re", "really", "right", "s",
+    "said", "say", "says", "see", "seen", "she", "she's", "should", "since",
+    "so", "some", "someone", "something", "started", "still", "such",
+    "sure", "t", "take", "taking", "than", "thank", "thanks", "that",
+    "that's", "thats", "the", "their", "them", "then", "there", "there's",
+    "these", "they", "they're", "theyre", "thing", "things", "think",
+    "this", "those", "though", "through", "to", "today", "too", "took",
+    "tried", "try", "trying", "under", "up", "use", "used", "using",
+    "very", "want", "was", "wasn't", "way", "we", "we're", "week", "weeks",
+    "were", "what", "what's", "when", "where", "which", "while", "who",
+    "why", "will", "with", "won't", "wont", "would", "wouldn't", "wouldnt",
+    "yeah", "year", "years", "yes", "you", "you're", "your", "youre",
+    "yours",
 ))
 
 _CSS = """
@@ -70,6 +92,11 @@ a:hover { text-decoration: underline; }
 svg.chart { width: 100%; display: block; }
 svg.chart rect { fill: var(--accent); }
 svg.chart text { font-size: 9px; fill: var(--mut); }
+svg.punch { max-width: 640px; }
+svg.punch circle { fill: var(--accent); opacity: .85; }
+.cloud { line-height: 1.9; }
+.cloud span { color: var(--accent); margin-right: 12px;
+              display: inline-block; vertical-align: baseline; }
 footer { margin: 40px 0 12px; color: var(--mut); font-size: 12px; }
 """
 
@@ -96,17 +123,99 @@ def _ranked(counts: Counter[str], top: int) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:top]
 
 
-def _title_words(posts: list[Post], query: str) -> Counter[str]:
-    """Word frequency across titles — fixed stopword list, and the query's
-    own terms excluded (they trivially dominate)."""
+def _word_counts(
+    posts: list[Post], query: str
+) -> tuple[Counter[str], Counter[str]]:
+    """Unigram and bigram frequencies over titles + selftext — fixed
+    stopword list, query terms excluded (they trivially dominate). Bigrams
+    require both words adjacent in the original text and both surviving
+    the filter, so phrases like 'weight loss' emerge whole."""
     skip = _STOPWORDS | set(_WORD_RE.findall(query.lower()))
-    counts: Counter[str] = Counter()
+    unigrams: Counter[str] = Counter()
+    bigrams: Counter[str] = Counter()
     for p in posts:
-        counts.update(
-            w for w in _WORD_RE.findall((p.title or "").lower())
-            if len(w) > 2 and w not in skip
+        for text in (p.title or "", p.selftext or ""):
+            tokens = _WORD_RE.findall(text.lower())
+            kept = [len(w) > 2 and w not in skip for w in tokens]
+            unigrams.update(w for w, ok in zip(tokens, kept, strict=False) if ok)
+            bigrams.update(
+                f"{a} {b}"
+                for (a, ok_a), (b, ok_b) in zip(
+                    zip(tokens, kept, strict=False), zip(tokens[1:], kept[1:], strict=False), strict=False
+                )
+                if ok_a and ok_b
+            )
+    return unigrams, bigrams
+
+
+def _word_cloud(unigrams: Counter[str], bigrams: Counter[str]) -> str:
+    """An inline word cloud: top unigrams + bigrams, font size scaled by
+    sqrt-frequency, laid out alphabetically (deterministic, reads organic)."""
+    items = _ranked(unigrams, CLOUD_UNIGRAMS) + _ranked(bigrams, CLOUD_BIGRAMS)
+    if not items:
+        return '<div class="meta">not enough text</div>'
+    peak = max(c for _, c in items)
+    spans = []
+    for word, count in sorted(items, key=lambda kv: kv[0]):
+        size = 11 + 23 * (count / peak) ** 0.5
+        spans.append(
+            f'<span style="font-size:{size:.0f}px" '
+            f'title="{count:,}">{html.escape(word)}</span>'
         )
-    return counts
+    return f'<div class="cloud">{" ".join(spans)}</div>'
+
+
+def _influential_users(posts: list[Post], top: int) -> list[tuple[str, int]]:
+    """Authors ranked by total score earned — influence, not volume, so a
+    bot posting 200 zero-score links ranks below one viral poster."""
+    score: Counter[str] = Counter()
+    count: Counter[str] = Counter()
+    for p in posts:
+        if p.author_username.lower() in _NON_AUTHORS:
+            continue
+        score[p.author_username] += p.score
+        count[p.author_username] += 1
+    return [
+        (f"{name} · {count[name]} post{'s' if count[name] != 1 else ''}", pts)
+        for name, pts in _ranked(score, top)
+    ]
+
+
+def _punchcard(posts: list[Post]) -> str:
+    """GitHub-style day-of-week x hour-of-day grid (UTC), dot area ~ volume."""
+    counts: Counter[tuple[int, int]] = Counter()
+    for p in posts:
+        dt = datetime.fromtimestamp(p.created_utc, tz=UTC)
+        counts[(dt.weekday(), dt.hour)] += 1
+    if not counts:
+        return '<div class="meta">no data</div>'
+    peak = max(counts.values())
+    cell, left, top = 24, 40, 6
+    width, height = left + 24 * cell, top + 7 * cell + 18
+    dots = "".join(
+        f'<circle cx="{left + hr * cell + cell / 2:.0f}" '
+        f'cy="{top + day * cell + cell / 2:.0f}" '
+        f'r="{1.5 + 8.5 * (c / peak) ** 0.5:.1f}">'
+        f"<title>{_WEEKDAYS[day]} {hr:02d}:00 UTC — {c:,} posts</title></circle>"
+        for (day, hr), c in sorted(counts.items())
+    )
+    day_labels = "".join(
+        f'<text x="{left - 6}" y="{top + i * cell + cell / 2 + 3}" '
+        f'text-anchor="end">{d}</text>'
+        for i, d in enumerate(_WEEKDAYS)
+    )
+    hour_labels = "".join(
+        f'<text x="{left + h * cell + cell / 2}" y="{height - 5}" '
+        f'text-anchor="middle">{h:02d}h</text>'
+        for h in (0, 4, 8, 12, 16, 20)
+    )
+    return (
+        f'<svg class="chart punch" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="posts by weekday and hour">{day_labels}{hour_labels}{dots}'
+        f"</svg>"
+        f'<div class="meta">post times in UTC — dot size is volume; '
+        f"peak {peak:,} posts in one weekday-hour</div>"
+    )
 
 
 def _link_domains(posts: list[Post]) -> Counter[str]:
@@ -201,36 +310,9 @@ def render_topic_page(engine: Engine, name: str) -> str:
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
-def _momentum_card(posts: list[Post], window_days: int) -> str:
-    """Posts in the trailing 30 days vs the 30 before, anchored to the
-    newest post so the result is a pure function of the data."""
-    if window_days < 60 or not posts:
-        return ""
-    anchor = max(p.created_utc for p in posts)
-    last = sum(1 for p in posts if p.created_utc > anchor - 30 * 86400)
-    prior = sum(1 for p in posts
-                if anchor - 60 * 86400 < p.created_utc <= anchor - 30 * 86400)
-    if prior == 0:
-        return ""
-    delta = 100 * (last - prior) / prior
-    return (f'<div class="card"><div class="n">{delta:+.0f}%</div>'
-            f'<div class="k">last 30 days vs prior ({last:,} vs {prior:,})</div></div>')
-
-
 def _render(topic: Topic, posts: list[Post]) -> str:
     subs = Counter(p.subreddit_name for p in posts)
-    authors = Counter(
-        p.author_username for p in posts
-        if p.author_username.lower() not in _NON_AUTHORS
-    )
-    weekdays = Counter(
-        datetime.fromtimestamp(p.created_utc, tz=UTC).weekday() for p in posts
-    )
-    scores = sorted(p.score for p in posts)
-    median_score = scores[len(scores) // 2] if scores else 0
-    comments_per_post = (
-        sum(p.num_comments for p in posts) / len(posts) if posts else 0.0
-    )
+    unigrams, bigrams = _word_counts(posts, topic.query)
     timestamps = [p.created_utc for p in posts]
     span = (
         f"{_date(min(timestamps))} – {_date(max(timestamps))}" if timestamps else "—"
@@ -262,27 +344,24 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
     <div class="k">comments on them</div></div>
   <div class="card"><div class="n">{len(subs):,} of {net:,}</div>
     <div class="k">subreddits had matches</div></div>
-  <div class="card"><div class="n">{median_score:,}</div>
-    <div class="k">median score</div></div>
-  <div class="card"><div class="n">{comments_per_post:.1f}</div>
-    <div class="k">comments per post</div></div>
-  {_momentum_card(posts, topic.days)}
 </div>
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts, lambda p: 1), "posts")}
 {_spike_note(posts, _daily(posts, lambda p: 1))}
 <h2>Score per day</h2>
 {_day_chart(_daily(posts, lambda p: p.score), "points")}
-<h2>By day of week</h2>
-{_bars([(day, weekdays.get(i, 0)) for i, day in enumerate(_WEEKDAYS)])}
+<h2>When the conversation happens</h2>
+{_punchcard(posts)}
 <h2>Where the conversation happens</h2>
 {_bars(_ranked(subs, TOP_SUBREDDITS), prefix="r/")}
 <div class="meta" style="margin-top:6px">searched {net:,} subreddits;
 {net - len(subs):,} had no matching posts in the window</div>
-<h2>Who's talking</h2>
-{_bars(_ranked(authors, TOP_AUTHORS), prefix="u/")}
-<h2>What the titles say</h2>
-{_bars(_ranked(_title_words(posts, topic.query), TOP_WORDS))}
+<h2>Most influential users</h2>
+{_bars(_influential_users(posts, TOP_AUTHORS), prefix="u/")}
+<div class="meta" style="margin-top:6px">ranked by total score earned,
+not post count</div>
+<h2>What the conversation is about</h2>
+{_word_cloud(unigrams, bigrams)}
 <h2>Where links point</h2>
 {_bars(_ranked(_link_domains(posts), TOP_DOMAINS)) or
  '<div class="meta">no external links</div>'}
