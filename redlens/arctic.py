@@ -54,6 +54,14 @@ def fetch_user_meta(username: str) -> dict[str, Any] | None:
     return arr[0] if arr else None
 
 
+def search_subreddits(prefix: str, limit: int = 25) -> list[dict[str, Any]]:
+    """Subreddits whose name starts with ``prefix`` (case-insensitive),
+    sorted by subscriber count."""
+    arr = _get("/api/subreddits/search",
+               subreddit_prefix=prefix, limit=limit).get("data") or []
+    return arr
+
+
 def _iter_kind(kind: str, username: str) -> Iterator[dict[str, Any]]:
     before: int | None = None
     yielded = 0

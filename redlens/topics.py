@@ -68,6 +68,46 @@ def guess_home_subreddits(name: str) -> list[str]:
     return sorted(guesses)
 
 
+@dataclass(frozen=True)
+class SubredditCandidate:
+    name: str
+    subscribers: int
+    description: str
+    over_18: bool
+
+
+def search_subreddits(topic: str, limit: int = 15) -> list[SubredditCandidate]:
+    """Communities whose *name* matches the topic, via arctic's keyless
+    subreddit search, largest first.
+
+    This is the user-facing discovery step: the CLI shows the result as a
+    pickable list. Name matching finds r/dualipa and r/DuaLipaDiscussion but
+    not r/popheads — communities that merely *discuss* the topic come from
+    the behavioral round (``--discover``) or the user's own additions.
+    """
+    prefixes = list(dict.fromkeys(
+        s.lower() for s in guess_home_subreddits(topic)
+    ))
+    by_name: dict[str, SubredditCandidate] = {}
+    for prefix in prefixes:
+        try:
+            found = arctic.search_subreddits(prefix, limit=limit)
+        except RedlensError:
+            continue  # discovery is best-effort; track still has fallbacks
+        for s in found:
+            name = s.get("display_name")
+            if not name or name.lower() in by_name:
+                continue
+            by_name[name.lower()] = SubredditCandidate(
+                name=name,
+                subscribers=int(s.get("subscribers") or 0),
+                description=" ".join((s.get("public_description") or "").split()),
+                over_18=bool(s.get("over18")),
+            )
+    ranked = sorted(by_name.values(), key=lambda c: -c.subscribers)
+    return ranked[:limit]
+
+
 def get_topic(session: Session, name: str) -> Topic | None:
     return session.exec(
         select(Topic).where(func.lower(Topic.name) == name.lower())
