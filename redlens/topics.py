@@ -165,6 +165,7 @@ def track_topic(
     now = _now()
     with Session(engine, expire_on_commit=False) as session:
         topic = get_topic(session, name)
+        old_days = topic.days if topic else None
         if topic is None:
             topic = Topic(name=name, query=query or name, days=days or 180)
         if query:
@@ -182,13 +183,15 @@ def track_topic(
             discovered = discover_subreddits(topic.query, net, window_start, now)
             net = list(dict.fromkeys(net + discovered))
 
-        # Incremental only when the net hasn't grown: new subreddits need the
+        # Incremental only when the net hasn't grown and the window hasn't
+        # been extended: new subreddits and a longer --days both need the
         # full window, not just what's newer than the cursor.
         net_grew = set(s.lower() for s in net) != {
             s.lower() for s in topic.subreddit_list
         }
+        window_extended = old_days is not None and topic.days > old_days
         after = window_start
-        if topic.newest_seen_utc and not net_grew:
+        if topic.newest_seen_utc and not net_grew and not window_extended:
             after = max(window_start, topic.newest_seen_utc)
 
         seen: set[str] = set()

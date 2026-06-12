@@ -87,6 +87,10 @@ def test_retrack_is_incremental_when_net_unchanged(engine, monkeypatch):
     track_topic(engine, "x", subreddits=["popheads"])  # net grew: full window
     assert all(c["after"] < NOW - 5000 for c in calls)
 
+    calls.clear()
+    track_topic(engine, "x", days=365)                 # window extended: rewind
+    assert all(abs(c["after"] - (NOW - 365 * 86400)) < 5 for c in calls)
+
 
 def test_discover_widens_the_net(engine, monkeypatch):
     seeds = {"dualipa": [raw("p1", "dualipa", author="superfan")]}
