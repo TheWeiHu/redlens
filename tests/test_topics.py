@@ -89,7 +89,9 @@ def test_retrack_is_incremental_when_net_unchanged(engine, monkeypatch):
 
     calls.clear()
     track_topic(engine, "x", days=365)                 # window extended: rewind
-    assert all(abs(c["after"] - (NOW - 365 * 86400)) < 5 for c in calls)
+    # generous tolerance: NOW is import-time, the call is minutes later on
+    # slow CI runners — the point is the rewind to ~365 days, not seconds
+    assert all(abs(c["after"] - (NOW - 365 * 86400)) < 600 for c in calls)
 
 
 def test_discover_widens_the_net(engine, monkeypatch):
