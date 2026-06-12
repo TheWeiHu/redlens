@@ -127,6 +127,7 @@ class Topic(SQLModel, table=True):
     query: str
     subreddits: str = "[]"               # JSON array of subreddit names
     days: int = 180                       # trailing window for full pulls
+    exclude_terms: str = ""              # comma-separated; matching posts dropped
     newest_seen_utc: int | None = None    # incremental cursor
     last_tracked_at: int | None = None
     fetched_at: int = Field(default_factory=_now)

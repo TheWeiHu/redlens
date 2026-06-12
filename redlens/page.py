@@ -177,11 +177,14 @@ def _influential_users(posts: list[Post], top: int) -> list[tuple[str, int]]:
 
 
 def _punchcard(posts: list[Post]) -> str:
-    """GitHub-style day-of-week x hour-of-day grid (UTC), dot area ~ volume."""
+    """GitHub-style day-of-week x hour-of-day grid (UTC). Weight is posts
+    plus the comments they drew — comment timestamps aren't stored, so
+    discussion is attributed to its post's hour (replies cluster close
+    behind the post, so the approximation is honest at this granularity)."""
     counts: Counter[tuple[int, int]] = Counter()
     for p in posts:
         dt = datetime.fromtimestamp(p.created_utc, tz=UTC)
-        counts[(dt.weekday(), dt.hour)] += 1
+        counts[(dt.weekday(), dt.hour)] += 1 + p.num_comments
     if not counts:
         return '<div class="meta">no data</div>'
     peak = max(counts.values())
@@ -208,8 +211,8 @@ def _punchcard(posts: list[Post]) -> str:
         f'<svg class="chart punch" viewBox="0 0 {width} {height}" role="img" '
         f'aria-label="posts by weekday and hour">{day_labels}{hour_labels}{dots}'
         f"</svg>"
-        f'<div class="meta">post times in UTC — dot size is volume; '
-        f"peak {peak:,} posts in one weekday-hour</div>"
+        f'<div class="meta">posts + the comments they drew, by post time '
+        f"(UTC) — dot size is volume; peak {peak:,} in one weekday-hour</div>"
     )
 
 

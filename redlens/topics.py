@@ -166,6 +166,7 @@ def track_topic(
     query: str | None = None,
     subreddits: list[str] | None = None,
     days: int | None = None,
+    exclude: str | None = None,
     discover: bool = False,
     on_progress: Callable[[str, int], None] | None = None,
 ) -> TrackResult:
@@ -180,6 +181,10 @@ def track_topic(
             topic.query = query
         if days:
             topic.days = days
+        if exclude is not None:
+            topic.exclude_terms = exclude
+        excluded = [t.lower() for t in query_terms(topic.exclude_terms)] \
+            if topic.exclude_terms else []
 
         net = list(dict.fromkeys(
             topic.subreddit_list + (subreddits or [])
@@ -222,6 +227,10 @@ def track_topic(
                         seen.add(pid)
                         post = Post.from_arctic(raw)
                         newest = max(newest, post.created_utc)
+                        if excluded:
+                            text = f"{post.title or ''} {post.selftext or ''}".lower()
+                            if any(t in text for t in excluded):
+                                continue  # homonym noise, e.g. Ubisoft for "ubi"
                         batch.append(post)
             except RedlensError as exc:
                 # One bad subreddit (banned, renamed, exhausted retries) must
