@@ -188,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
                    "(default: the topic name)")
     t.add_argument("--days", type=int, help="trailing window (default: 180)")
     t.add_argument("--subreddits", help="comma-separated subreddits to add to the net")
+    t.add_argument("--exclude", help="comma-separated terms; posts containing "
+                   "any are dropped, e.g. 'ubisoft, rainbow six' for topic ubi")
     t.add_argument("--discover", action="store_true",
                    help="widen the net one round via authors of matching posts")
     t.add_argument("-y", "--yes", action="store_true",
@@ -237,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
             res = track_topic(
                 engine, args.topic,
                 query=args.query, subreddits=subs,
-                days=args.days, discover=args.discover,
+                days=args.days, exclude=args.exclude, discover=args.discover,
                 on_progress=lambda sub, n: print(
                     f"  r/{sub}: {n} new", file=sys.stderr),
             )

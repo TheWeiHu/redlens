@@ -23,9 +23,9 @@ T = TypeVar("T", bound=SQLModel)
 # created at the latest schema and stamped directly; databases from before
 # versioning existed (user_version 0 with tables present) are treated as
 # version 1, the v0.2 baseline.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIGRATIONS: dict[int, tuple[str, ...]] = {
-    # 2: ("ALTER TABLE user ADD COLUMN ...",),
+    2: ("ALTER TABLE topic ADD COLUMN exclude_terms VARCHAR NOT NULL DEFAULT ''",),
 }
 
 

@@ -20,11 +20,12 @@ from redlens.topics import (
 NOW = int(time.time())
 
 
-def raw(pid, sub, *, ts=None, author="alice", score=10, title="about dua lipa"):
+def raw(pid, sub, *, ts=None, author="alice", score=10, num_comments=2,
+        title="about dua lipa"):
     return {
         "id": pid, "subreddit": sub, "author": author,
         "created_utc": ts or NOW - 3600, "title": title,
-        "score": score, "num_comments": 2,
+        "score": score, "num_comments": num_comments,
     }
 
 
@@ -179,6 +180,46 @@ def test_multi_term_query_ors_and_dedupes(engine, monkeypatch):
     with Session(engine) as s:
         topic = get_topic(s, "ubi")
         assert topic.query == "ubi, universal basic income"
+
+
+def test_exclude_terms_drop_homonym_noise(engine, monkeypatch):
+    # Regression for the live UBI run: "ubi" is gamer slang for Ubisoft,
+    # so gaming posts flooded the topic. --exclude is the textual defense.
+    data = {"BasicIncome": [
+        raw("policy", "BasicIncome", title="UBI pilot results are in"),
+        raw("noise1", "BasicIncome", title="Ubisoft announces UBI... in a game"),
+        raw("noise2", "BasicIncome", title="ok", ts=NOW - 60),
+    ]}
+    data["BasicIncome"][2] = raw("noise2", "BasicIncome", title="Rainbow Six ubi moment")
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(data))
+
+    res = track_topic(engine, "ubi", subreddits=["BasicIncome"],
+                      exclude="ubisoft, rainbow six")
+    assert res.posts_new == 1
+    with Session(engine) as s:
+        assert {t.post_id for t in s.exec(select(TopicPost))} == {"policy"}
+        assert get_topic(s, "ubi").exclude_terms == "ubisoft, rainbow six"
+
+    # the stored exclusions keep applying on re-tracks, without re-passing
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(
+        {"BasicIncome": [raw("noise3", "BasicIncome",
+                             title="Ubisoft again", ts=NOW - 10)]}))
+    res = track_topic(engine, "ubi")
+    assert res.posts_new == 0
+
+
+def test_influence_ranking_resists_bot_volume(engine, monkeypatch):
+    # Regression for the live ozempic run: a news bot with 181 ignored
+    # posts must rank below a sustained human with engaged posts.
+    from redlens.page import _influential_users
+    bots = [raw(f"b{i}", "news", author="NewsBot", score=1, num_comments=0,
+                ts=NOW - i) for i in range(50)]
+    humans = [raw(f"h{i}", "sub", author="human", score=40, num_comments=10,
+                  ts=NOW - i) for i in range(3)]
+    names = [label for label, _ in _influential_users(
+        [Post.from_arctic(r) for r in bots + humans], top=5)]
+    assert names and names[0].startswith("human")
+    assert not any(n.startswith("NewsBot") for n in names)
 
 
 def test_one_bad_subreddit_does_not_sink_the_net(engine, monkeypatch):
