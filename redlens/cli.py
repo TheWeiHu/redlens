@@ -104,11 +104,15 @@ def _gather_candidates(
         if key not in sources:
             continue
         try:
-            add([SubredditCandidate(name=n, subscribers=0, description="",
-                                    over_18=False, source=key)
-                 for n in fetch(topic)])
+            names = fetch(topic)
         except RedlensError as exc:
             print(f"warning: {key} discovery failed: {exc}", file=sys.stderr)
+            continue
+        if not names:
+            print(f"note: {key} search found no subreddits", file=sys.stderr)
+        add([SubredditCandidate(name=n, subscribers=0, description="",
+                                over_18=False, source=key)
+             for n in names])
 
     popular = list(discovery.POPULAR_SUBREDDITS) if "popular" in sources else []
     return list(merged.values()), popular

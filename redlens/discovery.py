@@ -68,7 +68,16 @@ POPULAR_SUBREDDITS = [
 def _http(req: urllib.request.Request) -> bytes:
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
+            status = int(getattr(r, "status", 200) or 200)
+            if status != 200:
+                # urllib only raises for >=400; DuckDuckGo answers bot
+                # challenges with 202 + an empty "anomaly" page, which must
+                # surface as a failure, not as zero results.
+                raise RedlensError(
+                    f"{req.full_url}: HTTP {status} (likely bot challenge)")
             return bytes(r.read())
+    except RedlensError:
+        raise
     except Exception as exc:
         raise RedlensError(f"GET {req.full_url}: {exc}") from exc
 
