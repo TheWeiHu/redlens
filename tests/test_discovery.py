@@ -116,7 +116,7 @@ def test_gather_merges_sources_and_tags(monkeypatch):
                         lambda topic: ["Ozempic", "loseit"])
     monkeypatch.setattr(discovery, "suggest_llm", lambda topic: ["loseit"])
 
-    cands, popular = cli._gather_candidates("ozempic",
+    cands, popular = cli._gather_candidates(["ozempic"],
                                             ["name", "web", "llm", "popular"])
     by_name = {c.name: c for c in cands}
     assert by_name["Ozempic"].source == "name+web"
@@ -128,9 +128,19 @@ def test_gather_merges_sources_and_tags(monkeypatch):
 def test_gather_notes_an_empty_source(monkeypatch, capsys):
     monkeypatch.setattr("redlens.cli.search_subreddits", lambda topic: [])
     monkeypatch.setattr(discovery, "search_web", lambda topic: [])
-    cands, _ = cli._gather_candidates("x", ["name", "web"])
+    cands, _ = cli._gather_candidates(["x"], ["name", "web"])
     assert cands == []
     assert "web search found no subreddits" in capsys.readouterr().err
+
+
+def test_gather_fans_out_across_query_terms(monkeypatch):
+    searched = []
+    monkeypatch.setattr(
+        "redlens.cli.search_subreddits",
+        lambda term: searched.append(term) or [],
+    )
+    cli._gather_candidates(["ubi", "universal basic income"], ["name"])
+    assert searched == ["ubi", "universal basic income"]
 
 
 def test_gather_survives_a_failing_source(monkeypatch):
@@ -141,5 +151,5 @@ def test_gather_survives_a_failing_source(monkeypatch):
 
     monkeypatch.setattr("redlens.cli.search_subreddits", lambda topic: [])
     monkeypatch.setattr(discovery, "search_web", boom)
-    cands, popular = cli._gather_candidates("x", ["name", "web"])
+    cands, popular = cli._gather_candidates(["x"], ["name", "web"])
     assert cands == [] and popular == []

@@ -161,6 +161,26 @@ def test_picker_drop_and_add(monkeypatch):
     assert picked == ["dualipa", "dua_lipa", "popheads"]
 
 
+def test_multi_term_query_ors_and_dedupes(engine, monkeypatch):
+    calls = []
+
+    def it(subreddit, query, after=None, before=None):
+        calls.append(query)
+        yield raw("shared", subreddit)                 # found by both terms
+        if query == "universal basic income":
+            yield raw("longform", subreddit)           # only the spelt-out term
+
+    monkeypatch.setattr(arctic, "iter_subreddit_query", it)
+    res = track_topic(engine, "ubi",
+                      query="ubi, universal basic income",
+                      subreddits=["BasicIncome"])
+    assert calls == ["ubi", "universal basic income"]  # one search per term
+    assert res.posts_new == 2                          # 'shared' deduped
+    with Session(engine) as s:
+        topic = get_topic(s, "ubi")
+        assert topic.query == "ubi, universal basic income"
+
+
 def test_one_bad_subreddit_does_not_sink_the_net(engine, monkeypatch):
     from redlens.errors import RedlensError
 
