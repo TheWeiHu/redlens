@@ -33,13 +33,20 @@ redlens page  "dua lipa"              # render a standalone HTML report
 ```
 
 Arctic has no global text search, so `track` fans the query out across a
-subreddit **net**. On the first track of a topic, redlens searches for
-matching communities and shows them as a pickable list — drop rows with
-`-2 -5`, add your own with `+popheads`, Enter accepts (`--yes` skips the
-picker; non-interactive runs never prompt). Add more anytime with
-`--subreddits a,b,c`, or let `--discover` widen the net via the other
-subreddits where authors of matching posts post. The net is remembered
-per topic, and re-running is incremental.
+subreddit **net**. On the first track of a topic, redlens asks how to
+find subreddits — pick any mix of sources, or skip:
+
+1. **name match** — communities whose name matches the topic (keyless)
+2. **web search** — subreddits surfacing in a DuckDuckGo search (keyless)
+3. **popular** — cast over a maintained list of the 100 largest subreddits
+4. **LLM suggestions** — one cheap LLM call (needs an LLM API key)
+
+The merged finds are shown as one pickable list, tagged by source — drop
+rows with `-2 -5`, add your own with `+popheads`, Enter accepts (`--yes`
+and non-interactive runs use name matching and never prompt). Add more
+anytime with `--subreddits a,b,c`, or let `--discover` widen the net via
+the other subreddits where authors of matching posts post. The net is
+remembered per topic, and re-running is incremental.
 
 No setup needed — the schema is created (and migrated) automatically on
 first use.

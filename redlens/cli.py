@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from redlens import __version__, explore, onboarding
+from redlens import __version__, discovery, explore, onboarding
 from redlens.analytics import compute_user_analytics
-from redlens.config import resolve_db
+from redlens.config import llm_api_key, resolve_db
 from redlens.db import connect, init_schema, session
 from redlens.errors import NotFound, RedlensError
 from redlens.ingest import sync_user
@@ -20,6 +21,16 @@ from redlens.topics import (
     track_topic,
 )
 
+# Discovery sources for a topic's subreddit net, in display order.
+# (key, label, on by default)
+SOURCES = (
+    ("name", "subreddits whose name matches (keyless, via arctic)", True),
+    ("web", "web search (DuckDuckGo)", True),
+    ("popular", f"cast over the {len(discovery.POPULAR_SUBREDDITS)} most "
+                "popular subreddits", False),
+    ("llm", "LLM suggestions", False),
+)
+
 
 def _ts(s: int | None) -> str:
     if not s:
@@ -29,6 +40,78 @@ def _ts(s: int | None) -> str:
 
 def _slug(name: str) -> str:
     return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
+
+
+def _choose_sources(*, assume_yes: bool) -> list[str]:
+    """Ask which discovery sources to use for a new topic's net.
+
+    Non-interactive runs and --yes use name matching only — the other
+    sources (web scrape, 100-subreddit cast, paid LLM call) are opt-in
+    choices a human should make.
+    """
+    if assume_yes or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return ["name"]
+
+    llm_ready = llm_api_key() is not None
+    print("how should redlens find subreddits?", file=sys.stderr)
+    for i, (key, label, default) in enumerate(SOURCES, 1):
+        mark = " *" if default else ""
+        note = "" if key != "llm" or llm_ready else \
+            "  (needs an LLM API key — not configured)"
+        print(f"  [{i}] {label}{mark}{note}", file=sys.stderr)
+    print('sources ("1 2 4"), Enter for defaults (*), "s" skips discovery',
+          file=sys.stderr)
+    print("> ", end="", file=sys.stderr, flush=True)
+    line = input().strip().lower()
+
+    if line == "s":
+        return []
+    if not line:
+        chosen = [key for key, _, default in SOURCES if default]
+    else:
+        chosen = [SOURCES[int(tok) - 1][0] for tok in line.split()
+                  if tok.isdigit() and 1 <= int(tok) <= len(SOURCES)]
+    if "llm" in chosen and not llm_ready:
+        print("  skipping llm: set ANTHROPIC_API_KEY/OPENAI_API_KEY or "
+              "[llm] api_key in config.toml", file=sys.stderr)
+        chosen.remove("llm")
+    return chosen
+
+
+def _gather_candidates(
+    topic: str, sources: list[str]
+) -> tuple[list[SubredditCandidate], list[str]]:
+    """Run the chosen discovery sources.
+
+    Returns (candidates for the picker, net additions that bypass it —
+    the popular-subreddits cast is all-or-nothing, not row-by-row).
+    """
+    merged: dict[str, SubredditCandidate] = {}
+
+    def add(candidates: list[SubredditCandidate]) -> None:
+        for c in candidates:
+            existing = merged.get(c.name.lower())
+            if existing:
+                merged[c.name.lower()] = dataclasses.replace(
+                    existing, source=f"{existing.source}+{c.source}")
+            else:
+                merged[c.name.lower()] = c
+
+    if "name" in sources:
+        add(search_subreddits(topic))
+    for key, fetch in (("web", discovery.search_web),
+                       ("llm", discovery.suggest_llm)):
+        if key not in sources:
+            continue
+        try:
+            add([SubredditCandidate(name=n, subscribers=0, description="",
+                                    over_18=False, source=key)
+                 for n in fetch(topic)])
+        except RedlensError as exc:
+            print(f"warning: {key} discovery failed: {exc}", file=sys.stderr)
+
+    popular = list(discovery.POPULAR_SUBREDDITS) if "popular" in sources else []
+    return list(merged.values()), popular
 
 
 def _pick_subreddits(
@@ -46,9 +129,10 @@ def _pick_subreddits(
     print("subreddits found — this is the net:", file=sys.stderr)
     for i, c in enumerate(candidates, 1):
         tag = " [nsfw]" if c.over_18 else ""
-        desc = c.description[:48] + ("…" if len(c.description) > 48 else "")
-        print(f"  [{i:2d}] r/{c.name:<24} {c.subscribers:>10,} members{tag}  {desc}",
-              file=sys.stderr)
+        members = f"{c.subscribers:,}" if c.subscribers else "—"
+        desc = c.description[:40] + ("…" if len(c.description) > 40 else "")
+        print(f"  [{i:2d}] r/{c.name:<24} {members:>10} members "
+              f"({c.source}){tag}  {desc}", file=sys.stderr)
     print('edit with "-2 -5" (drop) and "+popheads" (add); Enter accepts',
           file=sys.stderr)
 
@@ -119,15 +203,21 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "track":
             subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
                     if args.subreddits else None)
-            # First track of a topic: find the net and let the user curate
-            # it. Re-tracks reuse the stored net without asking again.
+            # First track of a topic: pick discovery sources, gather, and
+            # let the user curate the resulting net. Re-tracks reuse the
+            # stored net without asking again.
             with session(engine) as s:
                 existing = get_topic(s, args.topic)
             if not (existing and existing.subreddit_list):
-                found = search_subreddits(args.topic)
+                sources = _choose_sources(assume_yes=args.yes)
+                found, popular = _gather_candidates(args.topic, sources)
                 if found:
                     subs = (subs or []) + _pick_subreddits(
                         found, assume_yes=args.yes)
+                if popular:
+                    print(f"+ casting over {len(popular)} popular subreddits",
+                          file=sys.stderr)
+                    subs = (subs or []) + popular
             res = track_topic(
                 engine, args.topic,
                 query=args.query, subreddits=subs,

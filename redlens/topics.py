@@ -74,6 +74,7 @@ class SubredditCandidate:
     subscribers: int
     description: str
     over_18: bool
+    source: str = "name"  # which discovery source(s) proposed it
 
 
 def search_subreddits(topic: str, limit: int = 15) -> list[SubredditCandidate]:
