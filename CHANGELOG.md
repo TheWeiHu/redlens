@@ -8,9 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `redlens track <topic>` — follow a subject across public discussion: a
-  full-text query fanned out over a subreddit net (guessed home subs,
-  `--subreddits`, and one `--discover` round via authors of matching
-  posts). Incremental on re-runs. (#13)
+  full-text query fanned out over a subreddit net, with user-selectable
+  discovery sources (name match via arctic, DuckDuckGo web search, a
+  maintained top-100 popular list, and optional LLM suggestions — the
+  first consumer of the LLM key), one curating picker, `--subreddits`,
+  and one `--discover` round via authors of matching posts. Incremental
+  on re-runs. (#13)
 - `redlens page <topic>` — render a tracked topic as a standalone HTML
   page: volume by subreddit, monthly timeline, top posts. (#13)
 - New `topic` and `topicpost` tables; posts stay in the shared `post`
