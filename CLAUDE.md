@@ -10,4 +10,5 @@ Reddit profile analytics on arctic-shift data. See `README.md` for usage.
 - Keep dependencies minimal: stdlib + sqlmodel. The arctic client and the
   DB explorer are deliberately stdlib-only.
 - Schema lives in `redlens/models.py` (SQLModel, tables: user / post /
-  comment). Writes go through `db.upsert` so re-syncs are idempotent.
+  comment / topic / topicpost). Writes go through `db.upsert` so re-syncs
+  are idempotent.

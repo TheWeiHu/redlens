@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 from redlens import __version__, explore, onboarding
 from redlens.analytics import compute_user_analytics
@@ -10,12 +12,18 @@ from redlens.config import resolve_db
 from redlens.db import connect, init_schema, session
 from redlens.errors import NotFound, RedlensError
 from redlens.ingest import sync_user
+from redlens.page import render_topic_page
+from redlens.topics import track_topic
 
 
 def _ts(s: int | None) -> str:
     if not s:
         return "—"
     return datetime.fromtimestamp(s, tz=UTC).strftime("%Y-%m-%d %H:%MZ")
+
+
+def _slug(name: str) -> str:
+    return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,6 +41,16 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
     e.add_argument("--no-browser", action="store_true")
+    t = sub.add_parser("track", help="follow a topic across public discussion")
+    t.add_argument("topic")
+    t.add_argument("--query", help="full-text query (default: the topic name)")
+    t.add_argument("--days", type=int, help="trailing window (default: 180)")
+    t.add_argument("--subreddits", help="comma-separated subreddits to add to the net")
+    t.add_argument("--discover", action="store_true",
+                   help="widen the net one round via authors of matching posts")
+    g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
+    g.add_argument("topic")
+    g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
     if onboarding.ENABLED:
         sub.add_parser("setup")
     args = p.parse_args(argv)
@@ -53,6 +71,30 @@ def main(argv: list[str] | None = None) -> int:
             r = sync_user(args.username, engine)
             print(f"u/{r.user.username}: "
                   f"{r.posts_written:,} posts, {r.comments_written:,} comments")
+        elif args.verb == "track":
+            subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
+                    if args.subreddits else None)
+            res = track_topic(
+                engine, args.topic,
+                query=args.query, subreddits=subs,
+                days=args.days, discover=args.discover,
+                on_progress=lambda sub, n: print(
+                    f"  r/{sub}: {n} new", file=sys.stderr),
+            )
+            if res.discovered:
+                print(f"discovered: {', '.join('r/' + s for s in res.discovered)}",
+                      file=sys.stderr)
+            for failed_sub, err in res.failed.items():
+                print(f"warning: r/{failed_sub} skipped: {err}", file=sys.stderr)
+            print(f"{res.topic.name!r}: {res.posts_new:,} new posts across "
+                  f"{res.subreddits_searched} subreddits "
+                  f"(query {res.topic.query!r}, last {res.topic.days} days)")
+            print(f"next: redlens page {res.topic.name!r}")
+        elif args.verb == "page":
+            html_doc = render_topic_page(engine, args.topic)
+            out = Path(args.out or f"{_slug(args.topic)}.html")
+            out.write_text(html_doc, encoding="utf-8")
+            print(f"wrote {out} ({len(html_doc):,} bytes)")
         else:
             with session(engine) as s:
                 an = compute_user_analytics(s, args.username)

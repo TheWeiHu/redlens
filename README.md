@@ -18,11 +18,25 @@ pip install -e ".[dev]"
 ## Use
 
 ```bash
-redlens sync KimJongFunk              # pull from arctic
+redlens sync KimJongFunk              # archive a user's public history
 redlens analytics KimJongFunk         # print rollup
 redlens analytics KimJongFunk --json  # or as JSON
 redlens explore                       # browse the DB in your browser
 ```
+
+Track a **topic** instead of a user, then render it as a page:
+
+```bash
+redlens track "dua lipa" --days 180   # cast the net, archive every match
+redlens track "dua lipa" --discover   # widen the net via who posts about it
+redlens page  "dua lipa"              # render a standalone HTML report
+```
+
+Arctic has no global text search, so `track` fans the query out across a
+subreddit net: guessed home subs, anything you add with
+`--subreddits a,b,c`, and (with `--discover`) the other subreddits where
+authors of matching posts also discuss the topic. Re-running is
+incremental.
 
 No setup needed — the schema is created (and migrated) automatically on
 first use.

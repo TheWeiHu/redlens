@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -110,6 +111,40 @@ class Comment(SQLModel, table=True):
             body=raw.get("body"),
             score=int(raw.get("score") or 0),
         )
+
+
+class Topic(SQLModel, table=True):
+    """A tracked subject: a full-text query fanned out over a subreddit net.
+
+    Arctic has no global text search (queries must be scoped to a subreddit
+    or author), so each topic carries its own subreddit list — the net. The
+    list is a JSON array; it grows via ``--subreddits`` or ``--discover``.
+    ``newest_seen_utc`` is the incremental cursor: re-tracking with an
+    unchanged net only fetches newer posts.
+    """
+
+    name: str = Field(primary_key=True)
+    query: str
+    subreddits: str = "[]"               # JSON array of subreddit names
+    days: int = 180                       # trailing window for full pulls
+    newest_seen_utc: int | None = None    # incremental cursor
+    last_tracked_at: int | None = None
+    fetched_at: int = Field(default_factory=_now)
+
+    @property
+    def subreddit_list(self) -> list[str]:
+        return [str(s) for s in json.loads(self.subreddits)]
+
+
+class TopicPost(SQLModel, table=True):
+    """Join table tagging which posts belong to which tracked topic.
+
+    Posts stay in the shared ``post`` table (a post can match several
+    topics, and user-sync and topic-track share the same archive).
+    """
+
+    topic_name: str = Field(primary_key=True, index=True)
+    post_id: str = Field(primary_key=True, index=True)
 
 
 class UserAnalytics(BaseModel):
