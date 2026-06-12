@@ -198,11 +198,38 @@ def render_topic_page(engine: Engine, name: str) -> str:
         return _render(topic, posts)
 
 
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _momentum_card(posts: list[Post], window_days: int) -> str:
+    """Posts in the trailing 30 days vs the 30 before, anchored to the
+    newest post so the result is a pure function of the data."""
+    if window_days < 60 or not posts:
+        return ""
+    anchor = max(p.created_utc for p in posts)
+    last = sum(1 for p in posts if p.created_utc > anchor - 30 * 86400)
+    prior = sum(1 for p in posts
+                if anchor - 60 * 86400 < p.created_utc <= anchor - 30 * 86400)
+    if prior == 0:
+        return ""
+    delta = 100 * (last - prior) / prior
+    return (f'<div class="card"><div class="n">{delta:+.0f}%</div>'
+            f'<div class="k">last 30 days vs prior ({last:,} vs {prior:,})</div></div>')
+
+
 def _render(topic: Topic, posts: list[Post]) -> str:
     subs = Counter(p.subreddit_name for p in posts)
     authors = Counter(
         p.author_username for p in posts
         if p.author_username.lower() not in _NON_AUTHORS
+    )
+    weekdays = Counter(
+        datetime.fromtimestamp(p.created_utc, tz=UTC).weekday() for p in posts
+    )
+    scores = sorted(p.score for p in posts)
+    median_score = scores[len(scores) // 2] if scores else 0
+    comments_per_post = (
+        sum(p.num_comments for p in posts) / len(posts) if posts else 0.0
     )
     timestamps = [p.created_utc for p in posts]
     span = (
@@ -235,12 +262,19 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
     <div class="k">comments on them</div></div>
   <div class="card"><div class="n">{len(subs):,} of {net:,}</div>
     <div class="k">subreddits had matches</div></div>
+  <div class="card"><div class="n">{median_score:,}</div>
+    <div class="k">median score</div></div>
+  <div class="card"><div class="n">{comments_per_post:.1f}</div>
+    <div class="k">comments per post</div></div>
+  {_momentum_card(posts, topic.days)}
 </div>
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts, lambda p: 1), "posts")}
 {_spike_note(posts, _daily(posts, lambda p: 1))}
 <h2>Score per day</h2>
 {_day_chart(_daily(posts, lambda p: p.score), "points")}
+<h2>By day of week</h2>
+{_bars([(day, weekdays.get(i, 0)) for i, day in enumerate(_WEEKDAYS)])}
 <h2>Where the conversation happens</h2>
 {_bars(_ranked(subs, TOP_SUBREDDITS), prefix="r/")}
 <div class="meta" style="margin-top:6px">searched {net:,} subreddits;
