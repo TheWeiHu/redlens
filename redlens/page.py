@@ -100,6 +100,7 @@ def _render(topic: Topic, posts: list[Post]) -> str:
     )
 
     name = html.escape(topic.name)
+    net = len(topic.subreddit_list)
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{name} · redlens</title><style>{_CSS}</style></head><body>
@@ -112,10 +113,13 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
     <div class="k">combined score</div></div>
   <div class="card"><div class="n">{sum(p.num_comments for p in posts):,}</div>
     <div class="k">comments on them</div></div>
-  <div class="card"><div class="n">{len(subs):,}</div><div class="k">subreddits</div></div>
+  <div class="card"><div class="n">{len(subs):,} of {net:,}</div>
+    <div class="k">subreddits had matches</div></div>
 </div>
 <h2>Where the conversation happens</h2>
 {_bars(subs.most_common(TOP_SUBREDDITS), prefix="r/")}
+<div class="meta" style="margin-top:6px">searched {net:,} subreddits;
+{net - len(subs):,} had no matching posts in the window</div>
 <h2>Volume by month</h2>
 {_bars(sorted(months.items()))}
 <h2>Top posts</h2>
