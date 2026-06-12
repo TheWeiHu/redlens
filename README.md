@@ -37,9 +37,13 @@ subreddit **net**. On the first track of a topic, redlens asks how to
 find subreddits — pick any mix of sources, or skip:
 
 1. **name match** — communities whose name matches the topic (keyless)
-2. **web search** — subreddits surfacing in a DuckDuckGo search (keyless)
-3. **popular** — cast over a maintained list of the 100 largest subreddits
-4. **LLM suggestions** — one cheap LLM call (needs an LLM API key)
+2. **global post search** — communities whose *posts* match, via
+   PullPush's global full-text search (keyless; finds r/Semaglutide for
+   "ozempic")
+3. **web search** — subreddits surfacing in a DuckDuckGo search (keyless,
+   best-effort — DDG bot walls happen)
+4. **popular** — cast over a maintained list of the 100 largest subreddits
+5. **LLM suggestions** — one cheap LLM call (needs an LLM API key)
 
 The merged finds are shown as one pickable list, tagged by source — drop
 rows with `-2 -5`, add your own with `+popheads`, Enter accepts (`--yes`

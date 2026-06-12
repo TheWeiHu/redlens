@@ -25,7 +25,8 @@ from redlens.topics import (
 # (key, label, on by default)
 SOURCES = (
     ("name", "subreddits whose name matches (keyless, via arctic)", True),
-    ("web", "web search (DuckDuckGo)", True),
+    ("global", "subreddits with matching posts (keyless, via PullPush)", True),
+    ("web", "web search (DuckDuckGo; may hit bot walls)", False),
     ("popular", f"cast over the {len(discovery.POPULAR_SUBREDDITS)} most "
                 "popular subreddits", False),
     ("llm", "LLM suggestions", False),
@@ -99,7 +100,8 @@ def _gather_candidates(
 
     if "name" in sources:
         add(search_subreddits(topic))
-    for key, fetch in (("web", discovery.search_web),
+    for key, fetch in (("global", discovery.search_global),
+                       ("web", discovery.search_web),
                        ("llm", discovery.suggest_llm)):
         if key not in sources:
             continue
