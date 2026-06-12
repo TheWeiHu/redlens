@@ -24,6 +24,7 @@ from typing import Any
 from redlens import arctic, config
 from redlens.errors import RedlensError
 
+PULLPUSH_URL = "https://api.pullpush.io/reddit/search/submission/"
 WEB_SEARCH_URL = "https://html.duckduckgo.com/html/"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
@@ -80,6 +81,26 @@ def _http(req: urllib.request.Request) -> bytes:
         raise
     except Exception as exc:
         raise RedlensError(f"GET {req.full_url}: {exc}") from exc
+
+
+def search_global(topic: str) -> list[str]:
+    """Subreddits hosting posts that match the topic, via PullPush's global
+    full-text search — the one keyless API with no scope requirement.
+
+    This finds semantically related communities (r/Semaglutide and
+    r/Mounjaro for "ozempic") that name matching structurally cannot.
+    """
+    qs = urllib.parse.urlencode({"q": topic, "size": 100})
+    req = urllib.request.Request(
+        f"{PULLPUSH_URL}?{qs}", headers={"User-Agent": arctic.UA}
+    )
+    data = json.loads(_http(req))
+    found: Counter[str] = Counter()
+    for post in data.get("data") or []:
+        sub = post.get("subreddit") or ""
+        if sub and not sub.startswith("u_"):
+            found[sub] += 1
+    return [name for name, _ in found.most_common(MAX_WEB_RESULTS)]
 
 
 def search_web(topic: str) -> list[str]:

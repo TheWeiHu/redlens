@@ -35,6 +35,18 @@ def test_web_search_mines_and_ranks_subreddit_names(monkeypatch):
     assert "all" not in names              # junk filtered
 
 
+def test_global_search_counts_subreddits(monkeypatch):
+    payload = json.dumps({"data": [
+        {"subreddit": "Ozempic"}, {"subreddit": "Mounjaro"},
+        {"subreddit": "Ozempic"}, {"subreddit": "u_someuser"},
+        {"subreddit": None}, {"subreddit": "Semaglutide"},
+    ]}).encode()
+    monkeypatch.setattr(discovery, "_http", lambda req: payload)
+    names = discovery.search_global("ozempic")
+    assert names[0] == "Ozempic"                       # two mentions
+    assert set(names) == {"Ozempic", "Mounjaro", "Semaglutide"}  # profiles dropped
+
+
 def test_suggest_llm_without_key_is_empty(monkeypatch):
     monkeypatch.setattr(
         discovery, "_http",
@@ -85,12 +97,12 @@ def test_choose_sources_defaults_and_skip(monkeypatch):
     assert cli._choose_sources(assume_yes=False) == ["name"]
 
     _tty(monkeypatch, "")
-    assert cli._choose_sources(assume_yes=False) == ["name", "web"]
+    assert cli._choose_sources(assume_yes=False) == ["name", "global"]
     _tty(monkeypatch, "s")
     assert cli._choose_sources(assume_yes=False) == []
-    _tty(monkeypatch, "3")
+    _tty(monkeypatch, "4")
     assert cli._choose_sources(assume_yes=False) == ["popular"]
-    _tty(monkeypatch, "1 4")          # llm chosen but no key configured
+    _tty(monkeypatch, "1 5")          # llm chosen but no key configured
     assert cli._choose_sources(assume_yes=False) == ["name"]
 
 
