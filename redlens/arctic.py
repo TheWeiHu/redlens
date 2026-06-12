@@ -19,10 +19,13 @@ PAGINATION_SLEEP_S = 0.25
 MAX_ITEMS_PER_STREAM: int | None = None
 
 
-# Arctic rate-limits bursts with HTTP 429. Retry those (and transient 5xx) with
-# exponential backoff, honoring a Retry-After header when present.
+# Arctic rate-limits bursts with HTTP 429, and deep full-text scans
+# intermittently return 422 (observed transient: the same request succeeds on
+# retry). Retry those and transient 5xx with exponential backoff, honoring a
+# Retry-After header when present.
 MAX_RETRIES = 6
 BACKOFF_BASE_S = 1.0
+RETRYABLE = (422, 429, 500, 502, 503, 504)
 
 
 def _get(path: str, **params: Any) -> dict[str, Any]:
@@ -35,7 +38,7 @@ def _get(path: str, **params: Any) -> dict[str, Any]:
                 data: dict[str, Any] = json.loads(r.read())
             return data
         except urllib.error.HTTPError as exc:
-            if exc.code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
+            if exc.code in RETRYABLE and attempt < MAX_RETRIES:
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 wait = (
                     float(retry_after) if retry_after and retry_after.isdigit()

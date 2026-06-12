@@ -201,6 +201,7 @@ def track_topic(
         failed: dict[str, str] = {}
         for sub in net:
             batch: list[Post] = []
+            sub_failed = False
             try:
                 for raw in arctic.iter_subreddit_query(
                     sub, topic.query, after=after, before=now
@@ -213,12 +214,11 @@ def track_topic(
                     newest = max(newest, post.created_utc)
                     batch.append(post)
             except RedlensError as exc:
-                # One bad subreddit (banned, renamed, transient 4xx) must not
-                # sink the whole net; report it and keep casting.
+                # One bad subreddit (banned, renamed, exhausted retries) must
+                # not sink the whole net; keep what was fetched before the
+                # failure, report, and keep casting.
                 failed[sub] = str(exc)
-                if on_progress:
-                    on_progress(f"{sub} (failed)", 0)
-                continue
+                sub_failed = True
             if batch:
                 upsert(session, batch)
                 upsert(session, [
@@ -228,7 +228,8 @@ def track_topic(
             per_subreddit[sub] = len(batch)
             posts_new += len(batch)
             if on_progress:
-                on_progress(sub, len(batch))
+                label = f"{sub} (failed, kept {len(batch)})" if sub_failed else sub
+                on_progress(label, len(batch))
 
         topic.subreddits = json.dumps(net)
         topic.newest_seen_utc = newest or None

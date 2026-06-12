@@ -164,7 +164,7 @@ def test_one_bad_subreddit_does_not_sink_the_net(engine, monkeypatch):
 
     def it(subreddit, query, after=None, before=None):
         if subreddit == "deadsub":
-            raise RedlensError("arctic GET ...: HTTP Error 422")
+            raise RedlensError("arctic GET ...: HTTP Error 503")
         yield raw("p1", subreddit)
 
     monkeypatch.setattr(arctic, "iter_subreddit_query", it)
@@ -172,6 +172,22 @@ def test_one_bad_subreddit_does_not_sink_the_net(engine, monkeypatch):
     assert res.posts_new == 1
     assert "deadsub" in res.failed
     assert res.per_subreddit.get("livesub") == 1
+
+
+def test_mid_pull_failure_keeps_partial_batch(engine, monkeypatch):
+    from redlens.errors import RedlensError
+
+    def it(subreddit, query, after=None, before=None):
+        yield raw("kept1", subreddit)
+        yield raw("kept2", subreddit)
+        raise RedlensError("arctic GET ...: exhausted retries")
+
+    monkeypatch.setattr(arctic, "iter_subreddit_query", it)
+    res = track_topic(engine, "x", subreddits=["flaky"])
+    assert res.posts_new == 2                          # fetched-before-failure saved
+    assert "flaky" in res.failed
+    with Session(engine) as s:
+        assert {t.post_id for t in s.exec(select(TopicPost))} == {"kept1", "kept2"}
 
 
 def test_page_renders_and_requires_tracking(engine, monkeypatch):
