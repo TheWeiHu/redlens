@@ -185,6 +185,7 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert "Wedding &lt;megathread&gt;" in doc         # escaped
     assert "https://reddit.com/comments/p1" in doc
     assert "r/dualipa" in doc
+    assert "1 of 1" in doc                             # matches vs net searched
 
 
 @pytest.mark.integration
