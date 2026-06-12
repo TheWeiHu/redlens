@@ -113,6 +113,14 @@ def test_gather_merges_sources_and_tags(monkeypatch):
     assert popular == discovery.POPULAR_SUBREDDITS
 
 
+def test_gather_notes_an_empty_source(monkeypatch, capsys):
+    monkeypatch.setattr("redlens.cli.search_subreddits", lambda topic: [])
+    monkeypatch.setattr(discovery, "search_web", lambda topic: [])
+    cands, _ = cli._gather_candidates("x", ["name", "web"])
+    assert cands == []
+    assert "web search found no subreddits" in capsys.readouterr().err
+
+
 def test_gather_survives_a_failing_source(monkeypatch):
     from redlens.errors import RedlensError
 
