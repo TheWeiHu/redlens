@@ -212,6 +212,8 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert "Who's talking" in doc and "u/alice" in doc
     assert "What the titles say" in doc and "wedding" in doc
     assert "busiest day" in doc                        # spike note links top post
+    assert "By day of week" in doc
+    assert "median score" in doc and "comments per post" in doc
     assert doc == render_topic_page(engine, "dua lipa")  # byte-deterministic
 
 
