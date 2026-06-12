@@ -205,10 +205,20 @@ def test_cli_track_then_page(engine, tmp_path, monkeypatch):
     db = tmp_path / "topics.db"                        # same file as the fixture
     data = {"dualipa": [raw("p1", "dualipa")], "dua_lipa": [], "DuaLipa": []}
     monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(data))
-    monkeypatch.setattr(arctic, "search_subreddits", lambda prefix, limit=25: [])
+    searches: list[str] = []
+    monkeypatch.setattr(
+        arctic, "search_subreddits",
+        lambda prefix, limit=25: searches.append(prefix) or [],
+    )
     monkeypatch.chdir(tmp_path)
 
     assert main(["--db", str(db), "track", "dua lipa"]) == 0
+    assert searches                                    # first run searches
+
+    searches.clear()
+    assert main(["--db", str(db), "track", "dua lipa"]) == 0
+    assert not searches                                # re-track: stored net, no search
+
     assert main(["--db", str(db), "page", "dua lipa"]) == 0
     out = tmp_path / "dua-lipa.html"
     assert out.exists()
