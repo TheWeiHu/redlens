@@ -71,8 +71,13 @@ def upsert(session: Session, items: list[T]) -> int:
         for c in table.columns
         if c.name not in pk_cols
     }
-    session.execute(stmt.on_conflict_do_update(
-        index_elements=list(pk_cols),
-        set_=update_cols,
-    ))
+    if update_cols:
+        session.execute(stmt.on_conflict_do_update(
+            index_elements=list(pk_cols),
+            set_=update_cols,
+        ))
+    else:
+        # Every column is part of the key (pure join tables like topicpost):
+        # nothing to rewrite on conflict.
+        session.execute(stmt.on_conflict_do_nothing())
     return len(items)

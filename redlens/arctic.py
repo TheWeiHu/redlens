@@ -79,17 +79,17 @@ def _iter_kind(kind: str, username: str) -> Iterator[dict[str, Any]]:
         time.sleep(PAGINATION_SLEEP_S)
 
 
-def iter_subreddit_query(
-    subreddit: str,
+def _iter_scoped_query(
+    scope: dict[str, str],
     query: str,
     after: int | None = None,
     before: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Yield posts in ``subreddit`` whose title or body match ``query``.
+    """Yield posts matching ``query`` within ``scope``.
 
     Arctic's full-text params (``query``/``title``/``selftext``) only work when
     scoped to an ``author`` or ``subreddit`` — there is no global text search —
-    so callers fan this out across a set of subreddits. ``after``/``before`` are
+    so callers fan this out across a set of scopes. ``after``/``before`` are
     epoch seconds bounding ``created_utc``; pagination walks backwards in time
     via the ``before`` cursor, mirroring :func:`_iter_kind`.
     """
@@ -99,8 +99,8 @@ def iter_subreddit_query(
         # arctic rejects limit="auto" alongside a full-text query; 100 is the max.
         batch = (
             _get("/api/posts/search",
-                 subreddit=subreddit, query=query, limit=100,
-                 sort="desc", after=after, before=cursor)
+                 query=query, limit=100,
+                 sort="desc", after=after, before=cursor, **scope)
             .get("data") or []
         )
         if not batch:
@@ -115,6 +115,31 @@ def iter_subreddit_query(
             return
         cursor = oldest
         time.sleep(PAGINATION_SLEEP_S)
+
+
+def iter_subreddit_query(
+    subreddit: str,
+    query: str,
+    after: int | None = None,
+    before: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield posts in ``subreddit`` whose title or body match ``query``."""
+    return _iter_scoped_query({"subreddit": subreddit}, query, after, before)
+
+
+def iter_author_query(
+    author: str,
+    query: str,
+    after: int | None = None,
+    before: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield posts by ``author`` matching ``query``, across all subreddits.
+
+    The author scope is the one window arctic gives onto *unknown*
+    subreddits, which makes it the topic-discovery bootstrap: the people
+    posting about a topic in known subreddits reveal where else it lives.
+    """
+    return _iter_scoped_query({"author": author}, query, after, before)
 
 
 def iter_posts(username: str) -> Iterator[dict[str, Any]]:

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `redlens track <topic>` — follow a subject across public discussion: a
+  full-text query fanned out over a subreddit net (guessed home subs,
+  `--subreddits`, and one `--discover` round via authors of matching
+  posts). Incremental on re-runs. (#13)
+- `redlens page <topic>` — render a tracked topic as a standalone HTML
+  page: volume by subreddit, monthly timeline, top posts. (#13)
+- New `topic` and `topicpost` tables; posts stay in the shared `post`
+  table so user archives and topic archives coexist in one DB.
+
 ## [0.2.0] - 2026-06-11
 
 First installable release — and a new name: **redlens** (formerly
