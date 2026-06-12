@@ -24,6 +24,7 @@ TOP_POSTS = 25
 TOP_SUBREDDITS = 15
 TOP_AUTHORS = 10
 TOP_DOMAINS = 8
+MIN_POST_ENGAGEMENT = 5  # score + 2x comments below this = post didn't land
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _NON_AUTHORS = {"[deleted]", "automoderator"}
@@ -147,18 +148,31 @@ def _themes(posts: list[Post], query: str) -> str:
 
 
 def _influential_users(posts: list[Post], top: int) -> list[tuple[str, int]]:
-    """Authors ranked by total score earned — influence, not volume, so a
-    bot posting 200 zero-score links ranks below one viral poster."""
-    score: Counter[str] = Counter()
+    """Authors ranked by an engagement index: per post, sqrt(score + 2x
+    comments), summed — but only posts clearing a minimum engagement bar
+    count at all. Comments weigh double (a reply is a stronger act than a
+    vote — in support communities discussion, not karma, is the
+    influence); the square root means sustained voices beat one viral
+    fluke; and the floor means firehosing ignored posts earns nothing."""
+    index: dict[str, float] = {}
     count: Counter[str] = Counter()
+    reach: dict[str, set[str]] = {}
     for p in posts:
-        if p.author_username.lower() in _NON_AUTHORS:
+        author = p.author_username
+        if author.lower() in _NON_AUTHORS:
             continue
-        score[p.author_username] += p.score
-        count[p.author_username] += 1
+        engagement = max(p.score, 0) + 2 * p.num_comments
+        if engagement < MIN_POST_ENGAGEMENT:
+            continue
+        index[author] = index.get(author, 0.0) + engagement**0.5
+        count[author] += 1
+        reach.setdefault(author, set()).add(p.subreddit_name)
+    ranked = sorted(index.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:top]
     return [
-        (f"{name} · {count[name]} post{'s' if count[name] != 1 else ''}", pts)
-        for name, pts in _ranked(score, top)
+        (f"{name} · {count[name]} post{'s' if count[name] != 1 else ''}"
+         + (f" in {len(reach[name])} subs" if len(reach[name]) > 1 else ""),
+         round(points))
+        for name, points in ranked
     ]
 
 
@@ -338,8 +352,9 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
 {net - len(subs):,} had no matching posts in the window</div>
 <h2>Most influential users</h2>
 {_bars(_influential_users(posts, TOP_AUTHORS), prefix="u/")}
-<div class="meta" style="margin-top:6px">ranked by total score earned,
-not post count</div>
+<div class="meta" style="margin-top:6px">engagement index:
+&radic;(score + 2&times;comments) per post, summed — sustained voices
+outrank one-hit virality, discussion counts double</div>
 <h2>Themes</h2>
 {_themes(posts, topic.query)}
 <div class="meta" style="margin-top:6px">topics via LDA (collapsed Gibbs
