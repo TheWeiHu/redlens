@@ -209,6 +209,10 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert "Posts per day" in doc and "Score per day" in doc
     assert '<svg class="chart"' in doc
     assert "peak: 507 points" in doc                   # 500 + 7, same day
+    assert "Who's talking" in doc and "u/alice" in doc
+    assert "What the titles say" in doc and "wedding" in doc
+    assert "busiest day" in doc                        # spike note links top post
+    assert doc == render_topic_page(engine, "dua lipa")  # byte-deterministic
 
 
 @pytest.mark.integration

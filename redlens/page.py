@@ -6,9 +6,11 @@ so the output can be mailed, hosted, or opened from disk as-is.
 from __future__ import annotations
 
 import html
+import re
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlparse
 
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
@@ -19,6 +21,21 @@ from redlens.topics import get_topic
 
 TOP_POSTS = 25
 TOP_SUBREDDITS = 15
+TOP_AUTHORS = 10
+TOP_WORDS = 12
+TOP_DOMAINS = 8
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+_NON_AUTHORS = {"[deleted]", "automoderator"}
+_STOPWORDS = frozenset("""
+a about after all also am an and any are as at be because been before being
+but by can could did do does doing down for from get got had has have he her
+here hers him his how i if in into is it its just like me more most my new
+no not now of off on one only or other our out over own re s so some such
+t than that the their them then there these they this those through to too
+under up very was we were what when where which while who why will with
+would you your yours
+""".split())
 
 _CSS = """
 :root { --fg:#1a1a1a; --mut:#6b7280; --line:#e5e7eb; --accent:#d93a00; --hl:#fff7f3; }
@@ -67,6 +84,54 @@ def _bars(counts: list[tuple[str, int]], prefix: str = "") -> str:
 
 def _date(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=UTC).strftime("%b %d, %Y")
+
+
+def _ranked(counts: Counter[str], top: int) -> list[tuple[str, int]]:
+    """most_common with a deterministic tie-break (count desc, then name)."""
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:top]
+
+
+def _title_words(posts: list[Post], query: str) -> Counter[str]:
+    """Word frequency across titles — fixed stopword list, and the query's
+    own terms excluded (they trivially dominate)."""
+    skip = _STOPWORDS | set(_WORD_RE.findall(query.lower()))
+    counts: Counter[str] = Counter()
+    for p in posts:
+        counts.update(
+            w for w in _WORD_RE.findall((p.title or "").lower())
+            if len(w) > 2 and w not in skip
+        )
+    return counts
+
+
+def _link_domains(posts: list[Post]) -> Counter[str]:
+    """External domains posts link to; reddit self/media links excluded."""
+    counts: Counter[str] = Counter()
+    for p in posts:
+        host = urlparse(p.url or "").netloc.lower().removeprefix("www.")
+        if host and not host.endswith(("reddit.com", "redd.it")):
+            counts[host] += 1
+    return counts
+
+
+def _spike_note(posts: list[Post], series: list[tuple[str, int]]) -> str:
+    """One line explaining the busiest day: its top post, linked."""
+    if not series:
+        return ""
+    peak_day = max(series, key=lambda dv: (dv[1], dv[0]))[0]
+    on_day = [
+        p for p in posts
+        if datetime.fromtimestamp(p.created_utc, tz=UTC).date().isoformat() == peak_day
+    ]
+    if not on_day:
+        return ""
+    top = max(on_day, key=lambda p: (p.score, p.post_id))
+    return (
+        f'<div class="meta">busiest day, {peak_day} — top post: '
+        f'<a href="https://reddit.com/comments/{top.post_id}">'
+        f"{html.escape((top.title or '(untitled)')[:90])}</a> "
+        f"({top.score:,} pts, r/{html.escape(top.subreddit_name)})</div>"
+    )
 
 
 def _daily(posts: list[Post], value: Callable[[Post], int]) -> list[tuple[str, int]]:
@@ -122,13 +187,18 @@ def render_topic_page(engine: Engine, name: str) -> str:
             select(Post)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
             .where(TopicPost.topic_name == topic.name)
-            .order_by(Post.score.desc())  # type: ignore[attr-defined]
+            # post_id tie-break keeps the rendered page byte-deterministic
+            .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
         return _render(topic, posts)
 
 
 def _render(topic: Topic, posts: list[Post]) -> str:
     subs = Counter(p.subreddit_name for p in posts)
+    authors = Counter(
+        p.author_username for p in posts
+        if p.author_username.lower() not in _NON_AUTHORS
+    )
     timestamps = [p.created_utc for p in posts]
     span = (
         f"{_date(min(timestamps))} – {_date(max(timestamps))}" if timestamps else "—"
@@ -163,12 +233,20 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
 </div>
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts, lambda p: 1), "posts")}
+{_spike_note(posts, _daily(posts, lambda p: 1))}
 <h2>Score per day</h2>
 {_day_chart(_daily(posts, lambda p: p.score), "points")}
 <h2>Where the conversation happens</h2>
-{_bars(subs.most_common(TOP_SUBREDDITS), prefix="r/")}
+{_bars(_ranked(subs, TOP_SUBREDDITS), prefix="r/")}
 <div class="meta" style="margin-top:6px">searched {net:,} subreddits;
 {net - len(subs):,} had no matching posts in the window</div>
+<h2>Who's talking</h2>
+{_bars(_ranked(authors, TOP_AUTHORS), prefix="u/")}
+<h2>What the titles say</h2>
+{_bars(_ranked(_title_words(posts, topic.query), TOP_WORDS))}
+<h2>Where links point</h2>
+{_bars(_ranked(_link_domains(posts), TOP_DOMAINS)) or
+ '<div class="meta">no external links</div>'}
 <h2>Top posts</h2>
 <table>{top_rows}</table>
 <footer>Generated by <a href="https://github.com/TheWeiHu/redlens">redlens</a> ·
