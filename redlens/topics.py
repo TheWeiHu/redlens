@@ -54,6 +54,14 @@ class TrackResult:
     failed: dict[str, str] = field(default_factory=dict)  # subreddit -> error
 
 
+def query_terms(query: str) -> list[str]:
+    """A topic's query is one or more comma-separated terms, OR'd by
+    fanning out one arctic request per term — arctic ANDs all words within
+    a query and has no OR operator, so 'ubi, universal basic income'
+    must be two searches."""
+    return [t.strip() for t in query.split(",") if t.strip()] or [query]
+
+
 def guess_home_subreddits(name: str) -> list[str]:
     """Candidate home subs from the topic name: 'dua lipa' -> dualipa,
     dua_lipa, DuaLipa. Wrong guesses return nothing and cost one request."""
@@ -199,20 +207,22 @@ def track_topic(
         posts_new = 0
         per_subreddit: dict[str, int] = {}
         failed: dict[str, str] = {}
+        terms = query_terms(topic.query)
         for sub in net:
             batch: list[Post] = []
             sub_failed = False
             try:
-                for raw in arctic.iter_subreddit_query(
-                    sub, topic.query, after=after, before=now
-                ):
-                    pid = raw.get("id")
-                    if not pid or pid in seen:
-                        continue
-                    seen.add(pid)
-                    post = Post.from_arctic(raw)
-                    newest = max(newest, post.created_utc)
-                    batch.append(post)
+                for term in terms:
+                    for raw in arctic.iter_subreddit_query(
+                        sub, term, after=after, before=now
+                    ):
+                        pid = raw.get("id")
+                        if not pid or pid in seen:
+                            continue
+                        seen.add(pid)
+                        post = Post.from_arctic(raw)
+                        newest = max(newest, post.created_utc)
+                        batch.append(post)
             except RedlensError as exc:
                 # One bad subreddit (banned, renamed, exhausted retries) must
                 # not sink the whole net; keep what was fetched before the

@@ -17,6 +17,7 @@ from redlens.page import render_topic_page
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
+    query_terms,
     search_subreddits,
     track_topic,
 )
@@ -80,9 +81,9 @@ def _choose_sources(*, assume_yes: bool) -> list[str]:
 
 
 def _gather_candidates(
-    topic: str, sources: list[str]
+    terms: list[str], sources: list[str]
 ) -> tuple[list[SubredditCandidate], list[str]]:
-    """Run the chosen discovery sources.
+    """Run the chosen discovery sources, fanned across all query terms.
 
     Returns (candidates for the picker, net additions that bypass it —
     the popular-subreddits cast is all-or-nothing, not row-by-row).
@@ -93,23 +94,29 @@ def _gather_candidates(
         for c in candidates:
             existing = merged.get(c.name.lower())
             if existing:
-                merged[c.name.lower()] = dataclasses.replace(
-                    existing, source=f"{existing.source}+{c.source}")
+                if c.source not in existing.source:
+                    merged[c.name.lower()] = dataclasses.replace(
+                        existing, source=f"{existing.source}+{c.source}")
             else:
                 merged[c.name.lower()] = c
 
     if "name" in sources:
-        add(search_subreddits(topic))
+        for term in terms:
+            add(search_subreddits(term))
     for key, fetch in (("global", discovery.search_global),
                        ("web", discovery.search_web),
                        ("llm", discovery.suggest_llm)):
         if key not in sources:
             continue
+        names: list[str] = []
         try:
-            names = fetch(topic)
+            if key == "llm":  # one call covers every term
+                names = fetch(", ".join(terms))
+            else:
+                for term in terms:
+                    names += fetch(term)
         except RedlensError as exc:
             print(f"warning: {key} discovery failed: {exc}", file=sys.stderr)
-            continue
         if not names:
             print(f"note: {key} search found no subreddits", file=sys.stderr)
         add([SubredditCandidate(name=n, subscribers=0, description="",
@@ -176,7 +183,9 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--no-browser", action="store_true")
     t = sub.add_parser("track", help="follow a topic across public discussion")
     t.add_argument("topic")
-    t.add_argument("--query", help="full-text query (default: the topic name)")
+    t.add_argument("--query", help="full-text query; comma-separated terms "
+                   "are OR'd, e.g. 'ubi, universal basic income' "
+                   "(default: the topic name)")
     t.add_argument("--days", type=int, help="trailing window (default: 180)")
     t.add_argument("--subreddits", help="comma-separated subreddits to add to the net")
     t.add_argument("--discover", action="store_true",
@@ -216,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
                 existing = get_topic(s, args.topic)
             if not (existing and existing.subreddit_list):
                 sources = _choose_sources(assume_yes=args.yes)
-                found, popular = _gather_candidates(args.topic, sources)
+                terms = query_terms(args.query) if args.query else [args.topic]
+                found, popular = _gather_candidates(terms, sources)
                 if found:
                     subs = (subs or []) + _pick_subreddits(
                         found, assume_yes=args.yes)
