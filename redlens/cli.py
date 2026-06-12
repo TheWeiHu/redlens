@@ -13,7 +13,12 @@ from redlens.db import connect, init_schema, session
 from redlens.errors import NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.page import render_topic_page
-from redlens.topics import SubredditCandidate, search_subreddits, track_topic
+from redlens.topics import (
+    SubredditCandidate,
+    get_topic,
+    search_subreddits,
+    track_topic,
+)
 
 
 def _ts(s: int | None) -> str:
@@ -88,10 +93,6 @@ def main(argv: list[str] | None = None) -> int:
                    help="widen the net one round via authors of matching posts")
     t.add_argument("-y", "--yes", action="store_true",
                    help="accept the found subreddit list without the picker")
-    t.add_argument("--no-search", action="store_true",
-                   help="skip subreddit search; use --subreddits / stored net only")
-    t.add_argument("--sfw", action="store_true",
-                   help="drop NSFW subreddits from the found list")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
@@ -118,10 +119,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "track":
             subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
                     if args.subreddits else None)
-            if not args.no_search:
+            # First track of a topic: find the net and let the user curate
+            # it. Re-tracks reuse the stored net without asking again.
+            with session(engine) as s:
+                existing = get_topic(s, args.topic)
+            if not (existing and existing.subreddit_list):
                 found = search_subreddits(args.topic)
-                if args.sfw:
-                    found = [c for c in found if not c.over_18]
                 if found:
                     subs = (subs or []) + _pick_subreddits(
                         found, assume_yes=args.yes)
