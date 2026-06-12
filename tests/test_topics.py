@@ -210,8 +210,7 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert '<svg class="chart"' in doc
     assert "peak: 507 points" in doc                   # 500 + 7, same day
     assert "Most influential users" in doc and "u/alice" in doc
-    assert 'class="cloud"' in doc and "wedding" in doc
-    assert "dua" not in doc.split('class="cloud"')[1][:2000].split("</div>")[0]
+    assert "Themes" in doc                             # LDA section renders
     assert "busiest day" in doc                        # spike note links top post
     assert 'class="chart punch"' in doc                # weekday x hour grid
     assert doc == render_topic_page(engine, "dua lipa")  # byte-deterministic

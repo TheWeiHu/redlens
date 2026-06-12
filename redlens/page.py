@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
+from redlens import lda
 from redlens.errors import NotFound
 from redlens.models import Post, Topic, TopicPost
 from redlens.topics import get_topic
@@ -23,8 +24,6 @@ TOP_POSTS = 25
 TOP_SUBREDDITS = 15
 TOP_AUTHORS = 10
 TOP_DOMAINS = 8
-CLOUD_UNIGRAMS = 40
-CLOUD_BIGRAMS = 15
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _NON_AUTHORS = {"[deleted]", "automoderator"}
@@ -32,7 +31,9 @@ _NON_AUTHORS = {"[deleted]", "automoderator"}
 # aggressive on chatter ("really", "think", "anyone") so topic words surface,
 # hands-off on anything that could be domain signal ("mg", "dose", "insurance").
 _STOPWORDS = frozenset((
-    "a", "able", "about", "actually", "after", "again", "all", "also", "am",
+    "a", "able", "about", "actually", "after", "again", "ago", "all",
+    "also", "am", "amp", "com", "gt", "http", "https",
+    "que", "three", "two", "www", "x200b",
     "an", "and", "any", "anybody", "anyone", "anything", "are", "aren't",
     "around", "as", "at", "back", "bad", "be", "because", "been", "before",
     "being", "best", "better", "bit", "but", "by", "came", "can", "can't",
@@ -94,9 +95,9 @@ svg.chart rect { fill: var(--accent); }
 svg.chart text { font-size: 9px; fill: var(--mut); }
 svg.punch { max-width: 640px; }
 svg.punch circle { fill: var(--accent); opacity: .85; }
-.cloud { line-height: 2; }
-.cloud span { color: var(--accent); margin-right: 12px; }
-.cloud small { color: var(--mut); font-size: 11px; }
+.theme { font-size: 14px; margin: 7px 0; }
+.theme span { display: inline-block; width: 48px; color: var(--mut);
+              font-variant-numeric: tabular-nums; }
 footer { margin: 40px 0 12px; color: var(--mut); font-size: 12px; }
 """
 
@@ -123,43 +124,26 @@ def _ranked(counts: Counter[str], top: int) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:top]
 
 
-def _word_counts(
-    posts: list[Post], query: str
-) -> tuple[Counter[str], Counter[str]]:
-    """Unigram and bigram frequencies over titles + selftext — fixed
-    stopword list, query terms excluded (they trivially dominate). Bigrams
-    require both words adjacent in the original text and both surviving
-    the filter, so phrases like 'weight loss' emerge whole."""
+def _themes(posts: list[Post], query: str) -> str:
+    """LDA themes over titles + selftext — one row per topic, weighted by
+    its share of the corpus."""
     skip = _STOPWORDS | set(_WORD_RE.findall(query.lower()))
-    unigrams: Counter[str] = Counter()
-    bigrams: Counter[str] = Counter()
+    docs = []
     for p in posts:
-        for text in (p.title or "", p.selftext or ""):
-            tokens = _WORD_RE.findall(text.lower())
-            kept = [len(w) > 2 and w not in skip for w in tokens]
-            unigrams.update(w for w, ok in zip(tokens, kept, strict=False) if ok)
-            bigrams.update(
-                f"{a} {b}"
-                for (a, ok_a), (b, ok_b) in zip(
-                    zip(tokens, kept, strict=False), zip(tokens[1:], kept[1:], strict=False), strict=False
-                )
-                if ok_a and ok_b
-            )
-    return unigrams, bigrams
-
-
-def _word_cloud(unigrams: Counter[str], bigrams: Counter[str]) -> str:
-    """Top unigrams + bigrams with counts, sized by frequency, ordered
-    alphabetically (deterministic)."""
-    items = _ranked(unigrams, CLOUD_UNIGRAMS) + _ranked(bigrams, CLOUD_BIGRAMS)
-    if not items:
-        return '<div class="meta">not enough text</div>'
-    peak = max(c for _, c in items)
-    return '<div class="cloud">' + " ".join(
-        f'<span style="font-size:{11 + 15 * (c / peak) ** 0.5:.0f}px">'
-        f"{html.escape(w)} <small>{c:,}</small></span>"
-        for w, c in sorted(items, key=lambda kv: kv[0])
-    ) + "</div>"
+        tokens = [
+            w for w in _WORD_RE.findall(f"{p.title or ''} {p.selftext or ''}".lower())
+            if len(w) > 2 and w not in skip
+        ]
+        if tokens:
+            docs.append(tokens)
+    found = lda.topics(docs)
+    if not found:
+        return '<div class="meta">not enough text for topic modeling</div>'
+    return "\n".join(
+        f'<div class="theme"><span>{share:.0%}</span>'
+        f"{html.escape(', '.join(words))}</div>"
+        for share, words in found
+    )
 
 
 def _influential_users(posts: list[Post], top: int) -> list[tuple[str, int]]:
@@ -309,7 +293,6 @@ _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 def _render(topic: Topic, posts: list[Post]) -> str:
     subs = Counter(p.subreddit_name for p in posts)
-    unigrams, bigrams = _word_counts(posts, topic.query)
     timestamps = [p.created_utc for p in posts]
     span = (
         f"{_date(min(timestamps))} – {_date(max(timestamps))}" if timestamps else "—"
@@ -357,8 +340,10 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
 {_bars(_influential_users(posts, TOP_AUTHORS), prefix="u/")}
 <div class="meta" style="margin-top:6px">ranked by total score earned,
 not post count</div>
-<h2>What the conversation is about</h2>
-{_word_cloud(unigrams, bigrams)}
+<h2>Themes</h2>
+{_themes(posts, topic.query)}
+<div class="meta" style="margin-top:6px">topics via LDA (collapsed Gibbs
+sampling) over titles and post text; % is each theme's share</div>
 <h2>Where links point</h2>
 {_bars(_ranked(_link_domains(posts), TOP_DOMAINS)) or
  '<div class="meta">no external links</div>'}
