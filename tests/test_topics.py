@@ -186,6 +186,9 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert "https://reddit.com/comments/p1" in doc
     assert "r/dualipa" in doc
     assert "1 of 1" in doc                             # matches vs net searched
+    assert "Posts per day" in doc and "Score per day" in doc
+    assert '<svg class="chart"' in doc
+    assert "peak: 507 points" in doc                   # 500 + 7, same day
 
 
 @pytest.mark.integration
