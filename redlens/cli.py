@@ -13,7 +13,7 @@ from redlens.db import connect, init_schema, session
 from redlens.errors import NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.page import render_topic_page
-from redlens.topics import track_topic
+from redlens.topics import SubredditCandidate, search_subreddits, track_topic
 
 
 def _ts(s: int | None) -> str:
@@ -24,6 +24,44 @@ def _ts(s: int | None) -> str:
 
 def _slug(name: str) -> str:
     return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
+
+
+def _pick_subreddits(
+    candidates: list[SubredditCandidate], *, assume_yes: bool
+) -> list[str]:
+    """Show the found subreddits and let the user curate the net.
+
+    Edits are '-N' to drop a row and '+name' to add a subreddit; Enter
+    accepts. Non-interactive runs (pipes, cron) and --yes take the list
+    as-is.
+    """
+    if assume_yes or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return [c.name for c in candidates]
+
+    print("subreddits found — this is the net:", file=sys.stderr)
+    for i, c in enumerate(candidates, 1):
+        tag = " [nsfw]" if c.over_18 else ""
+        desc = c.description[:48] + ("…" if len(c.description) > 48 else "")
+        print(f"  [{i:2d}] r/{c.name:<24} {c.subscribers:>10,} members{tag}  {desc}",
+              file=sys.stderr)
+    print('edit with "-2 -5" (drop) and "+popheads" (add); Enter accepts',
+          file=sys.stderr)
+
+    keep = dict(enumerate((c.name for c in candidates), 1))
+    extras: list[str] = []
+    while True:
+        print("> ", end="", file=sys.stderr, flush=True)
+        line = input().strip()
+        if not line:
+            return [n for _, n in sorted(keep.items())] + extras
+        for tok in line.split():
+            if tok.startswith("+") and len(tok) > 1:
+                extras.append(tok[1:].removeprefix("r/"))
+            elif tok.startswith("-") and tok[1:].isdigit() and int(tok[1:]) in keep:
+                del keep[int(tok[1:])]
+        current = [n for _, n in sorted(keep.items())] + extras
+        print(f"net: {', '.join('r/' + n for n in current) or '(empty)'}",
+              file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,6 +86,12 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--subreddits", help="comma-separated subreddits to add to the net")
     t.add_argument("--discover", action="store_true",
                    help="widen the net one round via authors of matching posts")
+    t.add_argument("-y", "--yes", action="store_true",
+                   help="accept the found subreddit list without the picker")
+    t.add_argument("--no-search", action="store_true",
+                   help="skip subreddit search; use --subreddits / stored net only")
+    t.add_argument("--sfw", action="store_true",
+                   help="drop NSFW subreddits from the found list")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
@@ -74,6 +118,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verb == "track":
             subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
                     if args.subreddits else None)
+            if not args.no_search:
+                found = search_subreddits(args.topic)
+                if args.sfw:
+                    found = [c for c in found if not c.over_18]
+                if found:
+                    subs = (subs or []) + _pick_subreddits(
+                        found, assume_yes=args.yes)
             res = track_topic(
                 engine, args.topic,
                 query=args.query, subreddits=subs,

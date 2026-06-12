@@ -33,10 +33,17 @@ redlens page  "dua lipa"              # render a standalone HTML report
 ```
 
 Arctic has no global text search, so `track` fans the query out across a
-subreddit net: guessed home subs, anything you add with
-`--subreddits a,b,c`, and (with `--discover`) the other subreddits where
-authors of matching posts also discuss the topic. Re-running is
-incremental.
+subreddit **net**. The net is built in layers, and you stay in control:
+
+1. **Search** — communities whose name matches the topic (keyless, via
+   arctic), shown as a pickable list: drop rows with `-2 -5`, add your
+   own with `+popheads`, Enter accepts. `--yes` skips the picker,
+   `--sfw` drops flagged-NSFW results, `--no-search` skips this layer.
+2. **Yours** — anything passed with `--subreddits a,b,c`.
+3. **Behavioral** (`--discover`) — the other subreddits where authors of
+   matching posts also discuss the topic.
+
+The net is remembered per topic, and re-running is incremental.
 
 No setup needed — the schema is created (and migrated) automatically on
 first use.

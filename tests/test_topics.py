@@ -4,12 +4,18 @@ import pytest
 from sqlmodel import Session, select
 
 from redlens import arctic
-from redlens.cli import main
+from redlens.cli import _pick_subreddits, main
 from redlens.db import connect, init_schema
 from redlens.errors import NotFound
 from redlens.models import Post, TopicPost
 from redlens.page import render_topic_page
-from redlens.topics import get_topic, guess_home_subreddits, track_topic
+from redlens.topics import (
+    SubredditCandidate,
+    get_topic,
+    guess_home_subreddits,
+    search_subreddits,
+    track_topic,
+)
 
 NOW = int(time.time())
 
@@ -107,6 +113,48 @@ def test_discover_widens_the_net(engine, monkeypatch):
         assert {"popheads", "Fauxmoi"} <= set(topic.subreddit_list)
 
 
+def test_search_subreddits_dedupes_and_ranks(monkeypatch):
+    def fake_search(prefix, limit=25):
+        return {
+            "dualipa": [
+                {"display_name": "dualipa", "subscribers": 614_652,
+                 "public_description": "Everything Dua Lipa", "over18": False},
+                {"display_name": "DuaLipaGW", "subscribers": 92_482, "over18": True},
+            ],
+            "dua_lipa": [
+                {"display_name": "DUALIPA", "subscribers": 614_652},  # dupe, case
+                {"display_name": "dua_lipa", "subscribers": 50},
+            ],
+        }.get(prefix, [])
+
+    monkeypatch.setattr(arctic, "search_subreddits", fake_search)
+    found = search_subreddits("Dua Lipa")
+    assert [c.name for c in found] == ["dualipa", "DuaLipaGW", "dua_lipa"]
+    assert found[0].subscribers == 614_652
+    assert found[1].over_18 is True
+
+
+def _candidates(*names):
+    return [SubredditCandidate(name=n, subscribers=10, description="", over_18=False)
+            for n in names]
+
+
+def test_picker_passthrough_when_not_interactive(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert _pick_subreddits(_candidates("a", "b"), assume_yes=False) == ["a", "b"]
+    assert _pick_subreddits(_candidates("a"), assume_yes=True) == ["a"]
+
+
+def test_picker_drop_and_add(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    lines = iter(["-2 +r/popheads", ""])
+    monkeypatch.setattr("builtins.input", lambda: next(lines))
+    picked = _pick_subreddits(_candidates("dualipa", "DuaLipaGW", "dua_lipa"),
+                              assume_yes=False)
+    assert picked == ["dualipa", "dua_lipa", "popheads"]
+
+
 def test_one_bad_subreddit_does_not_sink_the_net(engine, monkeypatch):
     from redlens.errors import RedlensError
 
@@ -157,6 +205,7 @@ def test_cli_track_then_page(engine, tmp_path, monkeypatch):
     db = tmp_path / "topics.db"                        # same file as the fixture
     data = {"dualipa": [raw("p1", "dualipa")], "dua_lipa": [], "DuaLipa": []}
     monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(data))
+    monkeypatch.setattr(arctic, "search_subreddits", lambda prefix, limit=25: [])
     monkeypatch.chdir(tmp_path)
 
     assert main(["--db", str(db), "track", "dua lipa"]) == 0
