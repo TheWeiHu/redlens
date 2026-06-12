@@ -94,9 +94,9 @@ svg.chart rect { fill: var(--accent); }
 svg.chart text { font-size: 9px; fill: var(--mut); }
 svg.punch { max-width: 640px; }
 svg.punch circle { fill: var(--accent); opacity: .85; }
-.cloud { line-height: 1.9; }
-.cloud span { color: var(--accent); margin-right: 12px;
-              display: inline-block; vertical-align: baseline; }
+.cloud { line-height: 2; }
+.cloud span { color: var(--accent); margin-right: 12px; }
+.cloud small { color: var(--mut); font-size: 11px; }
 footer { margin: 40px 0 12px; color: var(--mut); font-size: 12px; }
 """
 
@@ -149,20 +149,17 @@ def _word_counts(
 
 
 def _word_cloud(unigrams: Counter[str], bigrams: Counter[str]) -> str:
-    """An inline word cloud: top unigrams + bigrams, font size scaled by
-    sqrt-frequency, laid out alphabetically (deterministic, reads organic)."""
+    """Top unigrams + bigrams with counts, sized by frequency, ordered
+    alphabetically (deterministic)."""
     items = _ranked(unigrams, CLOUD_UNIGRAMS) + _ranked(bigrams, CLOUD_BIGRAMS)
     if not items:
         return '<div class="meta">not enough text</div>'
     peak = max(c for _, c in items)
-    spans = []
-    for word, count in sorted(items, key=lambda kv: kv[0]):
-        size = 11 + 23 * (count / peak) ** 0.5
-        spans.append(
-            f'<span style="font-size:{size:.0f}px" '
-            f'title="{count:,}">{html.escape(word)}</span>'
-        )
-    return f'<div class="cloud">{" ".join(spans)}</div>'
+    return '<div class="cloud">' + " ".join(
+        f'<span style="font-size:{11 + 15 * (c / peak) ** 0.5:.0f}px">'
+        f"{html.escape(w)} <small>{c:,}</small></span>"
+        for w, c in sorted(items, key=lambda kv: kv[0])
+    ) + "</div>"
 
 
 def _influential_users(posts: list[Post], top: int) -> list[tuple[str, int]]:
