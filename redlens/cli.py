@@ -45,12 +45,22 @@ def _slug(name: str) -> str:
     return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
 
 
+def _resolve_sources(sources_arg: str | None, *, assume_yes: bool) -> list[str]:
+    """Discovery sources for a new topic: an explicit --sources list wins
+    (the only way to request web/global/llm non-interactively), otherwise
+    fall back to the interactive picker / name-only default."""
+    if sources_arg is not None:
+        valid = {key for key, _, _ in SOURCES}
+        return [s for s in (t.strip() for t in sources_arg.split(",")) if s in valid]
+    return _choose_sources(assume_yes=assume_yes)
+
+
 def _choose_sources(*, assume_yes: bool) -> list[str]:
     """Ask which discovery sources to use for a new topic's net.
 
     Non-interactive runs and --yes use name matching only — the other
     sources (web scrape, 100-subreddit cast, paid LLM call) are opt-in
-    choices a human should make.
+    choices a human should make, via the picker or --sources.
     """
     if assume_yes or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return ["name"]
@@ -200,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
                    "(use when narrowing keywords, not broadening)")
     t.add_argument("-y", "--yes", action="store_true",
                    help="accept the found subreddit list without the picker")
+    t.add_argument("--sources", help="comma-separated discovery sources "
+                   "(name, global, web, popular, llm) — lets you request "
+                   "web/global non-interactively; default is the picker")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
@@ -232,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             with session(engine) as s:
                 existing = get_topic(s, args.topic)
             if not (existing and existing.subreddit_list):
-                sources = _choose_sources(assume_yes=args.yes)
+                sources = _resolve_sources(args.sources, assume_yes=args.yes)
                 terms = query_terms(args.query) if args.query else [args.topic]
                 found, popular = _gather_candidates(terms, sources)
                 if found:
