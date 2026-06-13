@@ -133,6 +133,18 @@ def test_gather_notes_an_empty_source(monkeypatch, capsys):
     assert "web search found no subreddits" in capsys.readouterr().err
 
 
+def test_resolve_sources_explicit_list_wins(monkeypatch):
+    # explicit --sources works non-interactively (no picker), filtering junk
+    monkeypatch.setattr(
+        "builtins.input", lambda: pytest.fail("must not prompt with --sources"))
+    assert cli._resolve_sources("name,global,web", assume_yes=False) \
+        == ["name", "global", "web"]
+    assert cli._resolve_sources("web, bogus, llm", assume_yes=False) \
+        == ["web", "llm"]                              # unknown source dropped
+    # without --sources, --yes still falls back to name-only
+    assert cli._resolve_sources(None, assume_yes=True) == ["name"]
+
+
 def test_gather_fans_out_across_query_terms(monkeypatch):
     searched = []
     monkeypatch.setattr(
