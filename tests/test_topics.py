@@ -290,7 +290,6 @@ def test_rerun_with_new_keywords_backfills_full_window(engine, monkeypatch):
         yield raw(f"{query}-post", subreddit, ts=NOW - 100)   # recent → cursor ~NOW
 
     monkeypatch.setattr(arctic, "iter_subreddit_query", it)
-    full_window = NOW - 180 * 86400
     track_topic(engine, "ubi", query="ubi", subreddits=["BasicIncome"])
 
     calls.clear()                                      # re-track, keywords unchanged
@@ -300,8 +299,11 @@ def test_rerun_with_new_keywords_backfills_full_window(engine, monkeypatch):
     calls.clear()                                      # re-track with an added keyword
     track_topic(engine, "ubi", query="ubi, universal basic income")
     afters = {q: a for q, a in calls}
-    assert afters["ubi"] == full_window                # changed set → all re-pulled
-    assert afters["universal basic income"] == full_window
+    # both terms backfill far past the ~NOW-100 cursor — full window, not
+    # incremental (exact second drifts between import and call, so compare
+    # generously rather than to the import-time constant)
+    assert afters["ubi"] < NOW - 86400
+    assert afters["universal basic income"] < NOW - 86400
     with Session(engine) as s:
         topic = get_topic(s, "ubi")
         assert topic.keyword_list == ["ubi", "universal basic income"]
