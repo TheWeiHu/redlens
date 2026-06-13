@@ -313,7 +313,7 @@ def render_topic_page(engine: Engine, name: str) -> str:
         posts = list(session.exec(
             select(Post)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_name == topic.name)
+            .where(TopicPost.topic_id == topic.id)
             # post_id tie-break keeps the rendered page byte-deterministic
             .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
@@ -347,7 +347,8 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{name} · redlens</title><style>{_CSS}</style></head><body>
 <h1><span class="red">red</span>lens · {name}</h1>
-<div class="sub">Public Reddit discussion matching {html.escape(topic.query)!r},
+<div class="sub">Public Reddit discussion matching
+{html.escape(', '.join(topic.keyword_list))!r},
 last {topic.days} days ({span}) · data via arctic-shift</div>
 <div class="cards">
   <div class="card"><div class="n">{len(posts):,}</div><div class="k">posts</div></div>
@@ -375,7 +376,7 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
 &radic;(score + 2&times;comments) per post, summed — sustained voices
 outrank one-hit virality, discussion counts double</div>
 <h2>Themes</h2>
-{_themes(posts, topic.query, comments)}
+{_themes(posts, ', '.join(topic.keyword_list), comments)}
 <div class="meta" style="margin-top:6px">topics via LDA (collapsed Gibbs
 sampling) over post text{' and comments' if comments else ''}; %
 is each theme's share</div>

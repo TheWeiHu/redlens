@@ -195,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="widen the net one round via authors of matching posts")
     t.add_argument("--comments", action="store_true",
                    help="also pull comment threads under matched posts")
+    t.add_argument("--reset", action="store_true",
+                   help="clear this topic's matches and re-pull from scratch "
+                   "(use when narrowing keywords, not broadening)")
     t.add_argument("-y", "--yes", action="store_true",
                    help="accept the found subreddit list without the picker")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
@@ -243,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                 engine, args.topic,
                 query=args.query, subreddits=subs,
                 days=args.days, exclude=args.exclude, discover=args.discover,
+                reset=args.reset,
                 on_progress=lambda sub, n: print(
                     f"  r/{sub}: {n} new", file=sys.stderr),
             )
@@ -253,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"warning: r/{failed_sub} skipped: {err}", file=sys.stderr)
             print(f"{res.topic.name!r}: {res.posts_new:,} new posts across "
                   f"{res.subreddits_searched} subreddits "
-                  f"(query {res.topic.query!r}, last {res.topic.days} days)")
+                  f"(keywords {', '.join(res.topic.keyword_list)!r}, "
+                  f"last {res.topic.days} days)")
             if args.comments:
                 print("pulling comment threads under matched posts…",
                       file=sys.stderr)

@@ -123,14 +123,19 @@ class Topic(SQLModel, table=True):
     unchanged net only fetches newer posts.
     """
 
-    name: str = Field(primary_key=True)
-    query: str
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True, index=True)   # the CLI handle
+    keywords: str = "[]"                 # JSON array; terms OR'd at fetch time
     subreddits: str = "[]"               # JSON array of subreddit names
     days: int = 180                       # trailing window for full pulls
     exclude_terms: str = ""              # comma-separated; matching posts dropped
     newest_seen_utc: int | None = None    # incremental cursor
     last_tracked_at: int | None = None
     fetched_at: int = Field(default_factory=_now)
+
+    @property
+    def keyword_list(self) -> list[str]:
+        return [str(k) for k in json.loads(self.keywords)]
 
     @property
     def subreddit_list(self) -> list[str]:
@@ -140,11 +145,13 @@ class Topic(SQLModel, table=True):
 class TopicPost(SQLModel, table=True):
     """Join table tagging which posts belong to which tracked topic.
 
-    Posts stay in the shared ``post`` table (a post can match several
-    topics, and user-sync and topic-track share the same archive).
+    Keyed on ``topic_id`` (not name) so a topic's name or keywords can
+    change without orphaning its matches. Posts stay in the shared
+    ``post`` table (a post can match several topics, and user-sync and
+    topic-track share the same archive).
     """
 
-    topic_name: str = Field(primary_key=True, index=True)
+    topic_id: int = Field(primary_key=True, index=True)
     post_id: str = Field(primary_key=True, index=True)
 
 

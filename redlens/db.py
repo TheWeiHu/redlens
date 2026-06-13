@@ -17,15 +17,20 @@ from redlens.models import (  # noqa: F401
 T = TypeVar("T", bound=SQLModel)
 
 # Schema versioning rides on SQLite's PRAGMA user_version. Each MIGRATIONS
-# entry upgrades version N-1 -> N and contains only ALTER/UPDATE statements
-# for *existing* tables — brand-new tables arrive for free via
-# ``SQLModel.metadata.create_all`` before migrations run. Fresh databases are
-# created at the latest schema and stamped directly; databases from before
-# versioning existed (user_version 0 with tables present) are treated as
-# version 1, the v0.2 baseline.
-SCHEMA_VERSION = 2
+# entry upgrades version N-1 -> N. Migrations run BEFORE
+# ``SQLModel.metadata.create_all``, so an entry can ALTER an existing table,
+# or DROP one whose shape changed fundamentally and let create_all rebuild it
+# at the current ORM schema (brand-new tables also arrive via create_all).
+# Fresh databases skip migrations and are built straight at the latest schema;
+# databases from before versioning (user_version 0 with tables present) are
+# treated as version 1, the v0.2 baseline.
+SCHEMA_VERSION = 3
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE topic ADD COLUMN exclude_terms VARCHAR NOT NULL DEFAULT ''",),
+    # v3 gave topic a surrogate id + keyword list and rekeyed topicpost on
+    # topic_id; both change shape, so drop and let create_all rebuild. Tracked
+    # topics are re-created by the next `track` (posts/comments are preserved).
+    3: ("DROP TABLE IF EXISTS topicpost", "DROP TABLE IF EXISTS topic"),
 }
 
 
@@ -47,11 +52,14 @@ def init_schema(engine: Engine) -> None:
             # existed; that schema is the v1 baseline. No tables = fresh:
             # create_all below builds the latest schema outright.
             version = 1 if existed else SCHEMA_VERSION
-    SQLModel.metadata.create_all(engine)
+    # Migrations first: an entry may drop a reshaped table that create_all
+    # then rebuilds at the current ORM schema.
     with engine.begin() as con:
         for target in range(version + 1, SCHEMA_VERSION + 1):
             for stmt in MIGRATIONS[target]:
                 con.exec_driver_sql(stmt)
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as con:
         con.exec_driver_sql(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
