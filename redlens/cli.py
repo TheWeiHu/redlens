@@ -17,6 +17,7 @@ from redlens.page import render_topic_page
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
+    pull_topic_comments,
     query_terms,
     search_subreddits,
     track_topic,
@@ -192,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
                    "any are dropped, e.g. 'ubisoft, rainbow six' for topic ubi")
     t.add_argument("--discover", action="store_true",
                    help="widen the net one round via authors of matching posts")
+    t.add_argument("--comments", action="store_true",
+                   help="also pull comment threads under matched posts")
     t.add_argument("-y", "--yes", action="store_true",
                    help="accept the found subreddit list without the picker")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
@@ -251,6 +254,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{res.topic.name!r}: {res.posts_new:,} new posts across "
                   f"{res.subreddits_searched} subreddits "
                   f"(query {res.topic.query!r}, last {res.topic.days} days)")
+            if args.comments:
+                print("pulling comment threads under matched posts…",
+                      file=sys.stderr)
+                n = pull_topic_comments(
+                    engine, args.topic,
+                    on_progress=lambda i, total: print(
+                        f"  comments: {i}/{total} posts", file=sys.stderr),
+                )
+                print(f"{res.topic.name!r}: {n:,} comments stored")
             print(f"next: redlens page {res.topic.name!r}")
         elif args.verb == "page":
             html_doc = render_topic_page(engine, args.topic)

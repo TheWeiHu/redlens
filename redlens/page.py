@@ -17,8 +17,8 @@ from sqlmodel import Session, select
 
 from redlens import lda
 from redlens.errors import NotFound
-from redlens.models import Post, Topic, TopicPost
-from redlens.topics import get_topic
+from redlens.models import Comment, Post, Topic, TopicPost
+from redlens.topics import get_topic, topic_comments
 
 TOP_POSTS = 25
 TOP_SUBREDDITS = 15
@@ -125,18 +125,26 @@ def _ranked(counts: Counter[str], top: int) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:top]
 
 
-def _themes(posts: list[Post], query: str) -> str:
-    """LDA themes over titles + selftext — one row per topic, weighted by
-    its share of the corpus."""
+def _themes(posts: list[Post], query: str, comments: list[Comment]) -> str:
+    """LDA themes over post titles + selftext and, when pulled, comment
+    bodies — one row per topic, weighted by its share of the corpus.
+    Comments are where the actual discussion lives, so folding them in
+    sharpens the themes considerably."""
     skip = _STOPWORDS | set(_WORD_RE.findall(query.lower()))
+
+    def tokenize(text: str) -> list[str]:
+        return [w for w in _WORD_RE.findall(text.lower())
+                if len(w) > 2 and w not in skip]
+
     docs = []
     for p in posts:
-        tokens = [
-            w for w in _WORD_RE.findall(f"{p.title or ''} {p.selftext or ''}".lower())
-            if len(w) > 2 and w not in skip
-        ]
-        if tokens:
-            docs.append(tokens)
+        toks = tokenize(f"{p.title or ''} {p.selftext or ''}")
+        if toks:
+            docs.append(toks)
+    for c in comments:
+        toks = tokenize(c.body or "")
+        if toks:
+            docs.append(toks)
     found = lda.topics(docs)
     if not found:
         return '<div class="meta">not enough text for topic modeling</div>'
@@ -176,15 +184,19 @@ def _influential_users(posts: list[Post], top: int) -> list[tuple[str, int]]:
     ]
 
 
-def _punchcard(posts: list[Post]) -> str:
-    """GitHub-style day-of-week x hour-of-day grid (UTC). Weight is posts
-    plus the comments they drew — comment timestamps aren't stored, so
-    discussion is attributed to its post's hour (replies cluster close
-    behind the post, so the approximation is honest at this granularity)."""
+def _punchcard(posts: list[Post], comments: list[Comment]) -> str:
+    """GitHub-style day-of-week x hour-of-day grid (UTC), dot area ~ volume.
+
+    With comment threads pulled, each comment lands at its *own* real
+    timestamp — true discussion rhythm. Without them, comments are
+    approximated at their post's hour via num_comments."""
     counts: Counter[tuple[int, int]] = Counter()
     for p in posts:
         dt = datetime.fromtimestamp(p.created_utc, tz=UTC)
-        counts[(dt.weekday(), dt.hour)] += 1 + p.num_comments
+        counts[(dt.weekday(), dt.hour)] += 1 if comments else 1 + p.num_comments
+    for c in comments:
+        dt = datetime.fromtimestamp(c.created_utc, tz=UTC)
+        counts[(dt.weekday(), dt.hour)] += 1
     if not counts:
         return '<div class="meta">no data</div>'
     peak = max(counts.values())
@@ -211,8 +223,11 @@ def _punchcard(posts: list[Post]) -> str:
         f'<svg class="chart punch" viewBox="0 0 {width} {height}" role="img" '
         f'aria-label="posts by weekday and hour">{day_labels}{hour_labels}{dots}'
         f"</svg>"
-        f'<div class="meta">posts + the comments they drew, by post time '
-        f"(UTC) — dot size is volume; peak {peak:,} in one weekday-hour</div>"
+        + (f'<div class="meta">posts and comments at their real times '
+           f"(UTC) — dot size is volume; peak {peak:,} in one weekday-hour</div>"
+           if comments else
+           f'<div class="meta">posts + the comments they drew, by post time '
+           f"(UTC) — dot size is volume; peak {peak:,} in one weekday-hour</div>")
     )
 
 
@@ -302,13 +317,14 @@ def render_topic_page(engine: Engine, name: str) -> str:
             # post_id tie-break keeps the rendered page byte-deterministic
             .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
-        return _render(topic, posts)
+        comments = topic_comments(session, topic.name)
+        return _render(topic, posts, comments)
 
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
-def _render(topic: Topic, posts: list[Post]) -> str:
+def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
     subs = Counter(p.subreddit_name for p in posts)
     timestamps = [p.created_utc for p in posts]
     span = (
@@ -337,8 +353,8 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
   <div class="card"><div class="n">{len(posts):,}</div><div class="k">posts</div></div>
   <div class="card"><div class="n">{sum(p.score for p in posts):,}</div>
     <div class="k">combined score</div></div>
-  <div class="card"><div class="n">{sum(p.num_comments for p in posts):,}</div>
-    <div class="k">comments on them</div></div>
+  <div class="card"><div class="n">{(len(comments) or sum(p.num_comments for p in posts)):,}</div>
+    <div class="k">{'comments analyzed' if comments else 'comments on them'}</div></div>
   <div class="card"><div class="n">{len(subs):,} of {net:,}</div>
     <div class="k">subreddits had matches</div></div>
 </div>
@@ -348,7 +364,7 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
 <h2>Score per day</h2>
 {_day_chart(_daily(posts, lambda p: p.score), "points")}
 <h2>When the conversation happens</h2>
-{_punchcard(posts)}
+{_punchcard(posts, comments)}
 <h2>Where the conversation happens</h2>
 {_bars(_ranked(subs, TOP_SUBREDDITS), prefix="r/")}
 <div class="meta" style="margin-top:6px">searched {net:,} subreddits;
@@ -359,9 +375,10 @@ last {topic.days} days ({span}) · data via arctic-shift</div>
 &radic;(score + 2&times;comments) per post, summed — sustained voices
 outrank one-hit virality, discussion counts double</div>
 <h2>Themes</h2>
-{_themes(posts, topic.query)}
+{_themes(posts, topic.query, comments)}
 <div class="meta" style="margin-top:6px">topics via LDA (collapsed Gibbs
-sampling) over titles and post text; % is each theme's share</div>
+sampling) over post text{' and comments' if comments else ''}; %
+is each theme's share</div>
 <h2>Where links point</h2>
 {_bars(_ranked(_link_domains(posts), TOP_DOMAINS)) or
  '<div class="meta">no external links</div>'}

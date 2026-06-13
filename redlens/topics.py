@@ -30,7 +30,7 @@ from sqlmodel import Session, select
 from redlens import arctic
 from redlens.db import upsert
 from redlens.errors import RedlensError
-from redlens.models import Post, Topic, TopicPost
+from redlens.models import Comment, Post, Topic, TopicPost
 
 # Discovery bounds: how many top posters to follow out of the seed subs, and
 # how many new subreddits one round may add to the net.
@@ -264,3 +264,52 @@ def track_topic(
         per_subreddit=per_subreddit,
         failed=failed,
     )
+
+
+def pull_topic_comments(
+    engine: Engine,
+    name: str,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """Fetch the comment threads under a topic's matched posts.
+
+    Comments are reached through ``topicpost`` (post matched the topic) and
+    stored in the shared ``comment`` table, linked by ``comment.link_id ==
+    post.post_id`` — so topic-to-comment membership is derivable with no
+    extra table. Idempotent: re-running upserts the same comments.
+    """
+    with Session(engine, expire_on_commit=False) as session:
+        topic = get_topic(session, name)
+        if topic is None:
+            raise RedlensError(f"topic {name!r} not tracked yet")
+        # Only posts that actually drew discussion are worth a request.
+        post_ids = list(session.exec(
+            select(Post.post_id)
+            .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+            .where(TopicPost.topic_name == topic.name, Post.num_comments > 0)
+        ))
+        written = 0
+        for i, pid in enumerate(post_ids, 1):
+            try:
+                batch = [Comment.from_arctic(raw)
+                         for raw in arctic.iter_post_comments(pid)]
+            except RedlensError:
+                continue  # one unreachable thread shouldn't sink the pull
+            if batch:
+                upsert(session, batch)
+                written += len(batch)
+            if on_progress and (i % 50 == 0 or i == len(post_ids)):
+                on_progress(i, len(post_ids))
+        session.commit()
+    return written
+
+
+def topic_comments(session: Session, name: str) -> list[Comment]:
+    """Comments under a topic's matched posts (the link_id bridge)."""
+    return list(session.exec(
+        select(Comment)
+        .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
+        .where(func.lower(TopicPost.topic_name) == name.lower())
+        .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
+    ))

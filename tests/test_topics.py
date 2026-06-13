@@ -182,6 +182,61 @@ def test_multi_term_query_ors_and_dedupes(engine, monkeypatch):
         assert topic.query == "ubi, universal basic income"
 
 
+def comment_raw(cid, link_id, *, body="ubi is great", ts=None, score=3):
+    return {
+        "id": cid, "author": "bob", "subreddit": "BasicIncome",
+        "link_id": f"t3_{link_id}", "created_utc": ts or NOW - 100,
+        "body": body, "score": score,
+    }
+
+
+def test_pull_topic_comments_via_link_bridge(engine, monkeypatch):
+    from redlens.topics import pull_topic_comments, topic_comments
+    posts = {"BasicIncome": [raw("p1", "BasicIncome", num_comments=2),
+                             raw("p2", "BasicIncome", num_comments=0)]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(posts))
+    track_topic(engine, "ubi", subreddits=["BasicIncome"])
+
+    threads = {"p1": [comment_raw("c1", "p1"), comment_raw("c2", "p1")]}
+
+    def fake_post_comments(post_id):
+        if post_id == "p2":
+            raise AssertionError("must skip posts with num_comments=0")
+        yield from threads.get(post_id, [])
+
+    monkeypatch.setattr(arctic, "iter_post_comments", fake_post_comments)
+    n = pull_topic_comments(engine, "ubi")
+    assert n == 2
+    with Session(engine) as s:
+        got = topic_comments(s, "ubi")            # derived via link_id, no table
+        assert {c.comment_id for c in got} == {"c1", "c2"}
+
+    n2 = pull_topic_comments(engine, "ubi")        # idempotent
+    assert n2 == 2
+    with Session(engine) as s:
+        assert len(topic_comments(s, "ubi")) == 2
+
+
+def test_page_folds_comment_text_into_themes(engine, monkeypatch):
+    from redlens.page import render_topic_page
+    from redlens.topics import pull_topic_comments
+    # posts say little; the signal lives in the comments
+    posts = {"BasicIncome": [raw(f"p{i}", "BasicIncome", title="discussion",
+                                 num_comments=1) for i in range(8)]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(posts))
+    track_topic(engine, "ubi", subreddits=["BasicIncome"])
+    monkeypatch.setattr(
+        arctic, "iter_post_comments",
+        lambda pid: iter([comment_raw(f"{pid}c", pid,
+                                      body="automation displaces workers")]),
+    )
+    pull_topic_comments(engine, "ubi")
+    doc = render_topic_page(engine, "ubi")
+    assert "comments analyzed" in doc
+    assert "real times" in doc                     # punchcard uses comment ts
+    assert "and comments" in doc                    # themes note
+
+
 def test_exclude_terms_drop_homonym_noise(engine, monkeypatch):
     # Regression for the live UBI run: "ubi" is gamer slang for Ubisoft,
     # so gaming posts flooded the topic. --exclude is the textual defense.
