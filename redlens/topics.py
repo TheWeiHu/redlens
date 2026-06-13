@@ -23,7 +23,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -168,21 +168,39 @@ def track_topic(
     days: int | None = None,
     exclude: str | None = None,
     discover: bool = False,
+    reset: bool = False,
     on_progress: Callable[[str, int], None] | None = None,
 ) -> TrackResult:
-    """Pull every post matching the topic's query across its subreddit net."""
+    """Pull every post matching the topic's keywords across its subreddit net."""
     now = _now()
     with Session(engine, expire_on_commit=False) as session:
         topic = get_topic(session, name)
         old_days = topic.days if topic else None
+        old_keywords = set(topic.keyword_list) if topic else set()
         if topic is None:
-            topic = Topic(name=name, query=query or name, days=days or 180)
+            topic = Topic(name=name)
         if query:
-            topic.query = query
+            topic.keywords = json.dumps(query_terms(query))
+        elif not topic.keyword_list:
+            topic.keywords = json.dumps([name])
         if days:
             topic.days = days
         if exclude is not None:
             topic.exclude_terms = exclude
+        # Persist now so topicpost rows can reference a stable topic id.
+        session.add(topic)
+        session.flush()
+        topic_id = topic.id
+        assert topic_id is not None
+
+        terms = topic.keyword_list
+        terms_changed = old_keywords != set(terms)
+        if reset:
+            session.execute(
+                delete(TopicPost).where(TopicPost.topic_id == topic_id)  # type: ignore[arg-type]
+            )
+            topic.newest_seen_utc = None
+
         excluded = [t.lower() for t in query_terms(topic.exclude_terms)] \
             if topic.exclude_terms else []
 
@@ -193,18 +211,21 @@ def track_topic(
         window_start = now - topic.days * 86400
         discovered: list[str] = []
         if discover:
-            discovered = discover_subreddits(topic.query, net, window_start, now)
+            for term in terms:
+                discovered += discover_subreddits(term, net, window_start, now)
+            discovered = list(dict.fromkeys(discovered))
             net = list(dict.fromkeys(net + discovered))
 
-        # Incremental only when the net hasn't grown and the window hasn't
-        # been extended: new subreddits and a longer --days both need the
-        # full window, not just what's newer than the cursor.
+        # Incremental only when nothing widened the result set: a grown net,
+        # a longer window, or a changed keyword set each need the full window
+        # so the new dimension backfills rather than only matching forward.
         net_grew = set(s.lower() for s in net) != {
             s.lower() for s in topic.subreddit_list
         }
         window_extended = old_days is not None and topic.days > old_days
         after = window_start
-        if topic.newest_seen_utc and not net_grew and not window_extended:
+        if (topic.newest_seen_utc and not net_grew and not window_extended
+                and not terms_changed and not reset):
             after = max(window_start, topic.newest_seen_utc)
 
         seen: set[str] = set()
@@ -212,7 +233,6 @@ def track_topic(
         posts_new = 0
         per_subreddit: dict[str, int] = {}
         failed: dict[str, str] = {}
-        terms = query_terms(topic.query)
         for sub in net:
             batch: list[Post] = []
             sub_failed = False
@@ -241,7 +261,7 @@ def track_topic(
             if batch:
                 upsert(session, batch)
                 upsert(session, [
-                    TopicPost(topic_name=topic.name, post_id=p.post_id)
+                    TopicPost(topic_id=topic_id, post_id=p.post_id)
                     for p in batch
                 ])
             per_subreddit[sub] = len(batch)
@@ -253,7 +273,7 @@ def track_topic(
         topic.subreddits = json.dumps(net)
         topic.newest_seen_utc = newest or None
         topic.last_tracked_at = now
-        upsert(session, [topic])
+        session.add(topic)
         session.commit()
 
     return TrackResult(
@@ -287,7 +307,7 @@ def pull_topic_comments(
         post_ids = list(session.exec(
             select(Post.post_id)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_name == topic.name, Post.num_comments > 0)
+            .where(TopicPost.topic_id == topic.id, Post.num_comments > 0)
         ))
         written = 0
         for i, pid in enumerate(post_ids, 1):
@@ -310,6 +330,7 @@ def topic_comments(session: Session, name: str) -> list[Comment]:
     return list(session.exec(
         select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
-        .where(func.lower(TopicPost.topic_name) == name.lower())
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower())
         .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
     ))

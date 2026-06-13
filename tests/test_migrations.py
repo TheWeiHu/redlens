@@ -72,19 +72,33 @@ def test_pre_versioning_db_treated_as_baseline(tmp_path, monkeypatch):
     assert _user_version(engine) == nxt
 
 
-def test_real_v2_migration_adds_exclude_terms(tmp_path):
-    # A genuine v1-era database: topic table without exclude_terms.
+def test_v3_rebuilds_topic_with_id_and_keywords(tmp_path):
+    # A genuine v1-era database: name-keyed topic with a `query` column and a
+    # topic_name-keyed topicpost. v3 rebuilds both; posts are untouched.
     engine = connect(tmp_path / "v1.db")
     with engine.begin() as con:
         con.exec_driver_sql(
             "CREATE TABLE topic (name VARCHAR PRIMARY KEY, query VARCHAR, "
             "subreddits VARCHAR, days INTEGER, newest_seen_utc INTEGER, "
             "last_tracked_at INTEGER, fetched_at INTEGER)")
+        con.exec_driver_sql(
+            "CREATE TABLE topicpost (topic_name VARCHAR, post_id VARCHAR, "
+            "PRIMARY KEY (topic_name, post_id))")
+        con.exec_driver_sql(
+            "CREATE TABLE post (post_id VARCHAR PRIMARY KEY, author_username "
+            "VARCHAR, subreddit_name VARCHAR, created_utc INTEGER, score "
+            "INTEGER, num_comments INTEGER, over_18 BOOLEAN, fetched_at INTEGER)")
+        con.exec_driver_sql("INSERT INTO post (post_id) VALUES ('keepme')")
         con.exec_driver_sql("PRAGMA user_version = 1")
     init_schema(engine)
     with engine.begin() as con:
-        cols = [r[1] for r in con.exec_driver_sql('PRAGMA table_info("topic")')]
-    assert "exclude_terms" in cols
+        topic_cols = [r[1] for r in con.exec_driver_sql('PRAGMA table_info("topic")')]
+        tp_cols = [r[1] for r in con.exec_driver_sql('PRAGMA table_info("topicpost")')]
+        posts = con.exec_driver_sql("SELECT post_id FROM post").scalars().all()
+    assert "id" in topic_cols and "keywords" in topic_cols
+    assert "query" not in topic_cols
+    assert "topic_id" in tp_cols and "topic_name" not in tp_cols
+    assert list(posts) == ["keepme"]               # post data preserved
     assert _user_version(engine) == rdb.SCHEMA_VERSION
 
 

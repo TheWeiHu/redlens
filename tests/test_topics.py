@@ -65,10 +65,12 @@ def test_track_creates_topic_and_dedupes(engine, monkeypatch):
     with Session(engine) as s:
         topic = get_topic(s, "DUA LIPA")               # lookup is case-insensitive
         assert topic is not None
-        assert topic.query == "dua lipa"
+        assert topic.id is not None                    # surrogate id assigned
+        assert topic.keyword_list == ["dua lipa"]
         assert set(topic.subreddit_list) == {"DuaLipa", "dua_lipa", "dualipa"}
         assert topic.newest_seen_utc == NOW - 3600
         assert {t.post_id for t in s.exec(select(TopicPost))} == {"p1", "p2"}
+        assert {t.topic_id for t in s.exec(select(TopicPost))} == {topic.id}
         assert s.exec(select(Post)).all()              # posts in the shared table
 
 
@@ -179,7 +181,7 @@ def test_multi_term_query_ors_and_dedupes(engine, monkeypatch):
     assert res.posts_new == 2                          # 'shared' deduped
     with Session(engine) as s:
         topic = get_topic(s, "ubi")
-        assert topic.query == "ubi, universal basic income"
+        assert topic.keyword_list == ["ubi", "universal basic income"]
 
 
 def comment_raw(cid, link_id, *, body="ubi is great", ts=None, score=3):
@@ -275,6 +277,50 @@ def test_influence_ranking_resists_bot_volume(engine, monkeypatch):
         [Post.from_arctic(r) for r in bots + humans], top=5)]
     assert names and names[0].startswith("human")
     assert not any(n.startswith("NewsBot") for n in names)
+
+
+def test_rerun_with_new_keywords_backfills_full_window(engine, monkeypatch):
+    # Adding a keyword must backfill the whole window for the new term, not
+    # just match newer-than-cursor — otherwise history under the new term is
+    # silently missed.
+    calls = []
+
+    def it(subreddit, query, after=None, before=None):
+        calls.append((query, after))
+        yield raw(f"{query}-post", subreddit, ts=NOW - 100)   # recent → cursor ~NOW
+
+    monkeypatch.setattr(arctic, "iter_subreddit_query", it)
+    full_window = NOW - 180 * 86400
+    track_topic(engine, "ubi", query="ubi", subreddits=["BasicIncome"])
+
+    calls.clear()                                      # re-track, keywords unchanged
+    track_topic(engine, "ubi")
+    assert calls[0][1] == NOW - 100                    # incremental: cursor applied
+
+    calls.clear()                                      # re-track with an added keyword
+    track_topic(engine, "ubi", query="ubi, universal basic income")
+    afters = {q: a for q, a in calls}
+    assert afters["ubi"] == full_window                # changed set → all re-pulled
+    assert afters["universal basic income"] == full_window
+    with Session(engine) as s:
+        topic = get_topic(s, "ubi")
+        assert topic.keyword_list == ["ubi", "universal basic income"]
+        assert len(s.exec(select(TopicPost)).all()) == 2   # additive union
+
+
+def test_reset_clears_then_repulls(engine, monkeypatch):
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(
+        {"BasicIncome": [raw("old", "BasicIncome")]}))
+    track_topic(engine, "ubi", query="ubi", subreddits=["BasicIncome"])
+    with Session(engine) as s:
+        assert {t.post_id for t in s.exec(select(TopicPost))} == {"old"}
+
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_subreddit_query(
+        {"BasicIncome": [raw("fresh", "BasicIncome")]}))
+    track_topic(engine, "ubi", reset=True)
+    with Session(engine) as s:
+        # old match cleared, only the fresh pull remains
+        assert {t.post_id for t in s.exec(select(TopicPost))} == {"fresh"}
 
 
 def test_one_bad_subreddit_does_not_sink_the_net(engine, monkeypatch):
