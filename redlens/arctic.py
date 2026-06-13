@@ -159,3 +159,34 @@ def iter_posts(username: str) -> Iterator[dict[str, Any]]:
 
 def iter_comments(username: str) -> Iterator[dict[str, Any]]:
     return _iter_kind("comments", username)
+
+
+def iter_post_comments(post_id: str) -> Iterator[dict[str, Any]]:
+    """Yield every comment under a post (its ``link_id``), newest first.
+
+    This is how topic tracking gathers discussion: comments are reached
+    through the posts already matched, so no topic-to-comment table is
+    needed — ``comment.link_id`` is the bridge.
+    """
+    cursor: int | None = None
+    yielded = 0
+    while True:
+        batch = (
+            _get("/api/comments/search",
+                 link_id=post_id, limit=100, sort="desc", before=cursor)
+            .get("data") or []
+        )
+        if not batch:
+            return
+        for item in batch:
+            yield item
+            yielded += 1
+            if MAX_ITEMS_PER_STREAM is not None and yielded >= MAX_ITEMS_PER_STREAM:
+                return
+        if len(batch) < 100:
+            return
+        oldest = min(int(b.get("created_utc") or 0) for b in batch)
+        if not oldest or oldest == cursor:
+            return
+        cursor = oldest
+        time.sleep(PAGINATION_SLEEP_S)
