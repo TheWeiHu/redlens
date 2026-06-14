@@ -19,4 +19,3 @@ Reddit profile analytics on arctic-shift data. See `README.md` for usage.
   the feature working** (the real command + output — a `track`/`sync` run, a
   rendered page, a new flag, the fixed bug). Evidence it works, not a claim
   that it should. Docs-only/refactor PRs state "N/A — no behavior change".
-  The PR template (`.github/pull_request_template.md`) has the section.
