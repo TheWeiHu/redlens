@@ -19,3 +19,7 @@ Reddit profile analytics on arctic-shift data. See `README.md` for usage.
   the feature working** (the real command + output — a `track`/`sync` run, a
   rendered page, a new flag, the fixed bug). Evidence it works, not a claim
   that it should. Docs-only/refactor PRs state "N/A — no behavior change".
+- When addressing PR review comments, **reply on GitHub to each comment**
+  saying how it was handled (`gh api repos/<owner>/<repo>/pulls/<n>/comments/
+  <id>/replies -f body=...`), and **post one summary comment** on the PR
+  (`gh pr comment <n>`). Don't just push the fixes silently.
