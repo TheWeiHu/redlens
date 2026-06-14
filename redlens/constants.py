@@ -28,6 +28,9 @@ BACKOFF_BASE_S = 1.0
 # (transient — succeeds on retry). Retry these and transient 5xx.
 RETRYABLE_STATUS = (422, 429, 500, 502, 503, 504)
 
+# --- tracking ---------------------------------------------------------------
+COMMIT_BATCH = 500               # flush posts to the DB every N (bounds memory)
+
 # --- discovery --------------------------------------------------------------
 DISCOVER_MAX_AUTHORS = 8          # top posters followed out of the seed subs
 DISCOVER_MAX_NEW_SUBREDDITS = 12  # new subs one --discover round may add
@@ -59,6 +62,7 @@ TOP_DOMAINS = 8
 MIN_POST_ENGAGEMENT = 5          # score + COMMENT_WEIGHT*comments below = didn't land
 COMMENT_WEIGHT = 2              # a comment counts this many votes toward engagement
 TITLE_MAX = 110                 # chars of a post title shown before truncating
+DRILL_POSTS = 25                # posts listed inside each expandable group
 ACCENT = "#d93a00"             # redlens red — the page's one accent color
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"

@@ -2,13 +2,19 @@
 
 One self-contained file — minimal inline CSS (a single red accent), a
 couple of lightweight inline-SVG plots with hover tooltips, no JavaScript
-and no external assets. Functional and minimalist, not a polished site.
+and no external assets.
+
+Every aggregate is explorable: the subreddit, author, and link-domain
+bars are ``<details>`` disclosures (no JS) that expand to the underlying
+Reddit posts behind the number, each linking straight to the thread — so
+any claim on the page drills down to the evidence that makes it up.
 """
 from __future__ import annotations
 
 import html
 import re
-from collections import Counter
+from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -39,6 +45,11 @@ a:hover {{ text-decoration: underline; }}
        align-items: center; margin: .15rem 0; }}
 .bar .t {{ background: #f0e7e3; }} .bar .f {{ background: {_A}; height: .9rem; }}
 .bar .v {{ text-align: right; color: #666; }}
+details > summary {{ list-style: none; cursor: pointer; }}
+details > summary::-webkit-details-marker {{ display: none; }}
+details[open] > summary .bar {{ background: #faf3f0; }}
+details ul {{ margin: .2rem 0 .6rem 1rem; padding: 0; }}
+details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
 svg {{ width: 100%; height: auto; }}
 svg rect, svg circle {{ fill: {_A}; }}
@@ -63,14 +74,38 @@ def _ranked(counts: Counter[str], top: int) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:top]
 
 
-def _bars(rows: list[tuple[str, int]], prefix: str = "") -> str:
+def _bar(label: str, n: int, peak: int, prefix: str = "") -> str:
+    return (f'<div class="bar"><div>{html.escape(prefix + label)}</div>'
+            f'<div class="t"><div class="f" style="width:{100 * n / peak:.0f}%">'
+            f'</div></div><div class="v">{n:,}</div></div>')
+
+
+def _post_links(posts: list[Post]) -> str:
+    """A clickable list of the underlying posts — every claim drills down to
+    the real Reddit threads behind it."""
+    return "<ul>" + "".join(
+        f"<li><a href='https://reddit.com/comments/{p.post_id}'>"
+        f"{_trunc(p.title or '(untitled)')}</a> "
+        f"<span class='muted'>{p.score:,} pts · {p.num_comments:,} comm. · "
+        f"r/{html.escape(p.subreddit_name)} · {_date(p.created_utc)}</span></li>"
+        for p in posts[:constants.DRILL_POSTS]
+    ) + "</ul>"
+
+
+def _drill(rows: list[tuple[str, int]], groups: dict[str, list[Post]],
+           prefix: str = "") -> str:
+    """Bar rows that expand (no JS, via <details>) to the posts behind them,
+    best first."""
     peak = max((n for _, n in rows), default=1)
-    return "\n".join(
-        f'<div class="bar"><div>{html.escape(prefix + label)}</div>'
-        f'<div class="t"><div class="f" style="width:{100 * n / peak:.0f}%"></div></div>'
-        f'<div class="v">{n:,}</div></div>'
-        for label, n in rows
-    )
+    out = []
+    for label, n in rows:
+        posts = sorted(groups.get(label, []),
+                       key=lambda p: (-p.score, p.post_id))
+        out.append(
+            f"<details><summary>{_bar(label, n, peak, prefix)}</summary>"
+            f"{_post_links(posts)}</details>"
+        )
+    return "\n".join(out)
 
 
 def _daily(posts: list[Post]) -> list[tuple[str, int]]:
@@ -156,10 +191,11 @@ def _themes(posts: list[Post], keywords: str, comments: list[Comment]) -> str:
     )
 
 
-def _influential(posts: list[Post]) -> list[tuple[str, int]]:
+def _influential(posts: list[Post]) -> list[tuple[str, int, str]]:
     """Authors by engagement index: per post sqrt(score + COMMENT_WEIGHT x
     comments), summed, counting only posts past a floor — sustained voices
-    over one fluke, and zero-engagement bot volume excluded."""
+    over one fluke, and zero-engagement bot volume excluded. Returns
+    (display label, points, raw username) so the page can drill to their posts."""
     index: dict[str, float] = {}
     count: Counter[str] = Counter()
     for p in posts:
@@ -171,17 +207,27 @@ def _influential(posts: list[Post]) -> list[tuple[str, int]]:
         index[p.author_username] = index.get(p.author_username, 0.0) + engagement**0.5
         count[p.author_username] += 1
     ranked = sorted(index.items(), key=lambda kv: (-kv[1], kv[0].lower()))
-    return [(f"{name} ({count[name]})", round(pts))
+    return [(f"{name} ({count[name]})", round(pts), name)
             for name, pts in ranked[:constants.TOP_AUTHORS]]
 
 
+def _host(post: Post) -> str:
+    """The external domain a post links to, or '' for self/Reddit posts."""
+    host = urlparse(post.url or "").netloc.lower().removeprefix("www.")
+    return "" if host.endswith(("reddit.com", "redd.it")) else host
+
+
 def _link_domains(posts: list[Post]) -> Counter[str]:
-    counts: Counter[str] = Counter()
+    return Counter(h for p in posts if (h := _host(p)))
+
+
+def _by(posts: list[Post], key: Callable[[Post], str]) -> dict[str, list[Post]]:
+    """Group posts under a key function, dropping empty keys."""
+    groups: dict[str, list[Post]] = defaultdict(list)
     for p in posts:
-        host = urlparse(p.url or "").netloc.lower().removeprefix("www.")
-        if host and not host.endswith(("reddit.com", "redd.it")):
-            counts[host] += 1
-    return counts
+        if k := key(p):
+            groups[k].append(p)
+    return groups
 
 
 def render_topic_page(engine: Engine, name: str) -> str:
@@ -218,7 +264,18 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
         f"<td class='n'>{p.num_comments:,} comm.</td></tr>"
         for p in posts[:constants.TOP_POSTS]
     )
-    domains = _bars(_ranked(_link_domains(posts), constants.TOP_DOMAINS))
+    sub_groups = _by(posts, lambda p: p.subreddit_name)
+    sub_rows = _ranked(subs, constants.TOP_SUBREDDITS)
+
+    infl = _influential(posts)
+    author_posts = _by(posts, lambda p: p.author_username)
+    infl_rows = [(label, pts) for label, pts, _ in infl]
+    infl_groups = {label: author_posts.get(author, [])
+                   for label, _, author in infl}
+
+    domain_groups = _by(posts, _host)
+    domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
+    domains = _drill(domain_rows, domain_groups) if domain_rows else ""
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -232,9 +289,10 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
 <h2>By weekday &amp; hour (UTC)</h2>
 {_punchcard(posts, comments)}
 <h2>Subreddits</h2>
-{_bars(_ranked(subs, constants.TOP_SUBREDDITS), prefix="r/")}
+<p class="muted">click any row to see the posts behind it</p>
+{_drill(sub_rows, sub_groups, prefix="r/")}
 <h2>Most influential</h2>
-{_bars(_influential(posts), prefix="u/")}
+{_drill(infl_rows, infl_groups, prefix="u/")}
 <h2>Themes</h2>
 {_themes(posts, keywords, comments)}
 <h2>Links</h2>
