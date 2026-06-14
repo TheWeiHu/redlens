@@ -8,37 +8,32 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from redlens import __version__
+from redlens import __version__, constants
+from redlens.constants import (
+    BACKOFF_BASE_S,
+    MAX_RETRIES,
+    PAGINATION_SLEEP_S,
+    RETRYABLE_STATUS,
+)
 from redlens.errors import RedlensError
 
-BASE = "https://arctic-shift.photon-reddit.com"
 UA = f"redlens/{__version__} (+https://github.com/TheWeiHu/redlens)"
-PAGINATION_SLEEP_S = 0.25
 # Hard cap on items per stream (posts or comments). Override at runtime by
 # setting ``arctic.MAX_ITEMS_PER_STREAM = N``. Default None = unbounded.
 MAX_ITEMS_PER_STREAM: int | None = None
 
 
-# Arctic rate-limits bursts with HTTP 429, and deep full-text scans
-# intermittently return 422 (observed transient: the same request succeeds on
-# retry). Retry those and transient 5xx with exponential backoff, honoring a
-# Retry-After header when present.
-MAX_RETRIES = 6
-BACKOFF_BASE_S = 1.0
-RETRYABLE = (422, 429, 500, 502, 503, 504)
-
-
 def _get(path: str, **params: Any) -> dict[str, Any]:
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-    url = f"{BASE}{path}?{qs}" if qs else f"{BASE}{path}"
+    url = f"{constants.ARCTIC_BASE}{path}?{qs}" if qs else f"{constants.ARCTIC_BASE}{path}"
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     for attempt in range(MAX_RETRIES + 1):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=constants.HTTP_TIMEOUT_S) as r:
                 data: dict[str, Any] = json.loads(r.read())
             return data
         except urllib.error.HTTPError as exc:
-            if exc.code in RETRYABLE and attempt < MAX_RETRIES:
+            if exc.code in RETRYABLE_STATUS and attempt < MAX_RETRIES:
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 wait = (
                     float(retry_after) if retry_after and retry_after.isdigit()

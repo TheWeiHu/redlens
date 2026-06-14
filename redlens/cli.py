@@ -7,13 +7,14 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from redlens import __version__, discovery, explore, onboarding
+from redlens import __version__, discovery, onboarding
 from redlens.analytics import compute_user_analytics
 from redlens.config import llm_api_key, resolve_db
 from redlens.db import connect, init_schema, session
 from redlens.errors import NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.page import render_topic_page
+from redlens.reporting import explore
+from redlens.reporting.page import render_topic_page
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
@@ -192,7 +193,26 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
     e.add_argument("--no-browser", action="store_true")
-    t = sub.add_parser("track", help="follow a topic across public discussion")
+    t = sub.add_parser(
+        "track", help="follow a topic across public discussion",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Build a subreddit *net* and archive every post matching the\n"
+            "topic's keywords across it (arctic has no global text search).\n"
+            "On a topic's first track you choose discovery sources and curate\n"
+            "the found list; the net is remembered, and re-tracking is\n"
+            "incremental.\n\n"
+            "Discovery sources (--sources name,global,web,popular,llm; the\n"
+            "interactive picker offers them when --sources is omitted):\n"
+            "  name    subreddits whose NAME matches the topic (keyless)\n"
+            "  global  subreddits whose POSTS match, via PullPush (keyless)\n"
+            "  web     subreddits from a DuckDuckGo search (keyless, flaky)\n"
+            "  popular cast over the ~100 largest subreddits\n"
+            "  llm     one cheap LLM-suggested list (needs an LLM key)\n"
+            "--discover adds a round that follows authors of matching posts\n"
+            "to other subreddits where they discuss the topic."
+        ),
+    )
     t.add_argument("topic")
     t.add_argument("--query", help="full-text query; comma-separated terms "
                    "are OR'd, e.g. 'ubi, universal basic income' "
