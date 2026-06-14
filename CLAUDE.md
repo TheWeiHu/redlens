@@ -23,3 +23,6 @@ Reddit profile analytics on arctic-shift data. See `README.md` for usage.
   saying how it was handled (`gh api repos/<owner>/<repo>/pulls/<n>/comments/
   <id>/replies -f body=...`), and **post one summary comment** on the PR
   (`gh pr comment <n>`). Don't just push the fixes silently.
+- Every comment or reply you post on GitHub (PR reviews, review replies,
+  issue comments) **starts with** `CLAUDE (<model>): ` — e.g.
+  `CLAUDE (Opus 4.8): …` — so it's clear which model wrote it.
