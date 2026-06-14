@@ -1,0 +1,26 @@
+# The ~100 largest general-interest subreddits, for casting a wide net over
+# mainstream discussion (the `popular` discovery source). Edit freely — one
+# or more names per line, '#' starts a comment.
+funny AskReddit gaming worldnews todayilearned aww
+Music memes movies Showerthoughts science pics
+Jokes news space askscience DIY books nottheonion
+food mildlyinteresting explainlikeimfive LifeProTips IAmA
+gadgets EarthPorn sports dataisbeautiful GetMotivated
+gifs videos Art television UpliftingNews
+photoshopbattles Futurology WritingPrompts OldSchoolCool
+history personalfinance philosophy Documentaries
+InternetIsBeautiful listentothis technology
+interestingasfuck wallstreetbets Damnthatsinteresting
+politics relationship_advice NoStupidQuestions
+AmItheAsshole facepalm NatureIsFuckingLit BeAmazed
+unpopularopinion oddlysatisfying Unexpected nba soccer
+nfl anime PS5
+NintendoSwitch pcmasterrace buildapc apple android
+ChatGPT artificial OpenAI cars Fitness
+malefashionadvice femalefashionadvice SkincareAddiction
+MakeupAddiction Parenting Cooking gardening
+travel solotravel investing stocks CryptoCurrency
+Bitcoin legaladvice AskMen AskWomen dating_advice
+TwoXChromosomes teenagers college jobs antiwork
+popculturechat Fauxmoi entertainment celebrities
+popheads

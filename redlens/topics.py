@@ -1,18 +1,29 @@
 """Topic tracking: follow a subject across public discussion.
 
 Arctic has no global full-text search — queries must be scoped to a
-subreddit or an author — so tracking a topic means casting a net:
+subreddit or an author — so tracking a topic means casting a *net* of
+subreddits and fanning the keyword query across it. The net is assembled
+from several optional, complementary sources (see :mod:`redlens.discovery`
+for the first four; the CLI ``--sources`` flag selects them):
 
-1. start from a subreddit list (guessed home subs, ``--subreddits``, or the
-   list stored on the topic from previous runs),
-2. optionally widen it by one discovery round (``--discover``): the authors
-   of matching posts are queried author-scoped, and the other subreddits
-   *their* matching posts live in join the net,
-3. fan the query out per subreddit, dedupe by post id, upsert.
+- **name** — subreddits whose name matches the topic (arctic, keyless).
+- **global** — subreddits hosting matching posts anywhere on Reddit, via
+  the keyless PullPush mirror (the only unscoped full-text search).
+- **web** — subreddits mined from a DuckDuckGo result page (keyless,
+  best-effort: DDG bot-walls automated queries).
+- **popular** — the ~100 largest general subreddits, cast over wholesale.
+- **llm** — one cheap LLM-suggested list, when an LLM key is configured.
 
-Empty or non-existent subreddits cost one request and return nothing, so
-over-casting the net is cheap. Re-running with an unchanged net is
-incremental via ``Topic.newest_seen_utc``.
+On top of those, ``--discover`` does a behavioral round here: it finds the
+authors of matching posts in the current net and queries them
+author-scoped (arctic's one window onto unknown subreddits) to learn where
+else they discuss the topic. The user also seeds/curates the net directly
+(``--subreddits``, the interactive picker), and it's remembered per topic.
+
+The pull then fans each keyword across each subreddit, dedupes by post id,
+and upserts. Empty or non-existent subreddits cost one request and return
+nothing, so over-casting is cheap. Re-running with an unchanged net and
+keyword set is incremental via ``Topic.newest_seen_utc``.
 """
 from __future__ import annotations
 
@@ -28,16 +39,14 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from redlens import arctic
+from redlens.constants import (
+    DISCOVER_MAX_AUTHORS,
+    DISCOVER_MAX_NEW_SUBREDDITS,
+    NON_AUTHORS,
+)
 from redlens.db import upsert
 from redlens.errors import RedlensError
 from redlens.models import Comment, Post, Topic, TopicPost
-
-# Discovery bounds: how many top posters to follow out of the seed subs, and
-# how many new subreddits one round may add to the net.
-DISCOVER_MAX_AUTHORS = 8
-DISCOVER_MAX_NEW_SUBREDDITS = 12
-# Authors that scope to noise rather than people.
-_NON_AUTHORS = {"[deleted]", "AutoModerator"}
 
 
 def _now() -> int:
@@ -138,7 +147,7 @@ def discover_subreddits(
                 sub, query, after=after, before=before
             ):
                 author = raw.get("author") or ""
-                if author and author not in _NON_AUTHORS:
+                if author and author.lower() not in NON_AUTHORS:
                     authors[author] += 1
         except RedlensError:
             continue  # a dead seed shouldn't sink discovery

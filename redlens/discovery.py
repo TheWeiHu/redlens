@@ -1,16 +1,25 @@
 """Discovery sources for a topic's subreddit net.
 
-Four sources, all optional, all feeding one user-curated picker:
+Five sources, all optional, all feeding one user-curated picker:
 
 1. **name** — arctic's keyless subreddit search (names matching the topic);
    lives in :mod:`redlens.topics` as ``search_subreddits``.
-2. **web** — a DuckDuckGo search for the topic + reddit, mining result URLs
-   for subreddit names. Keyless; finds communities that merely *discuss*
-   the topic (r/loseit for "ozempic").
-3. **popular** — a maintained list of the ~100 largest general subreddits,
-   cast over wholesale (an empty subreddit costs one request).
-4. **llm** — one cheap LLM call suggesting subreddits, available when an
-   LLM API key is configured.
+2. **global** — PullPush (the keyless Pushshift-style mirror) full-text
+   searches *all* of Reddit and we take the subreddits its matching posts
+   live in. The only source with no scope requirement, so it finds related
+   communities by name (r/Semaglutide, r/Mounjaro for "ozempic").
+3. **web** — a DuckDuckGo search for the topic + reddit, mining result URLs
+   for subreddit names. Keyless; finds discussed-in communities (r/loseit
+   for "ozempic"). Best-effort — DDG bot-walls automated queries.
+4. **popular** — the ~100 largest general subreddits (``data/
+   popular_subreddits.txt``), cast over wholesale (empty subs cost one
+   request each).
+5. **llm** — one cheap LLM call suggesting subreddits, when an LLM API key
+   is configured.
+
+The per-topic behavioral round (``--discover`` in :mod:`redlens.topics`)
+complements these by following the authors of matching posts to wherever
+else they discuss the topic.
 """
 from __future__ import annotations
 
@@ -21,54 +30,22 @@ import urllib.request
 from collections import Counter
 from typing import Any
 
-from redlens import arctic, config
+from redlens import arctic, config, constants
+from redlens.constants import MAX_LLM_RESULTS, MAX_WEB_RESULTS
 from redlens.errors import RedlensError
-
-PULLPUSH_URL = "https://api.pullpush.io/reddit/search/submission/"
-WEB_SEARCH_URL = "https://html.duckduckgo.com/html/"
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-MAX_WEB_RESULTS = 10
-MAX_LLM_RESULTS = 10
 
 _SUBREDDIT_RE = re.compile(r"reddit\.com/r/([A-Za-z0-9_]{2,21})")
 _VALID_NAME_RE = re.compile(r"^[A-Za-z0-9_]{2,21}$")
 _JUNK_NAMES = {"all", "popular", "search", "subreddits"}
 
-# The ~100 largest general-interest subreddits, for casting a wide net over
-# mainstream discussion. Maintained by hand; order is rough size.
-POPULAR_SUBREDDITS = [
-    "funny", "AskReddit", "gaming", "worldnews", "todayilearned", "aww",
-    "Music", "memes", "movies", "Showerthoughts", "science", "pics",
-    "Jokes", "news", "space", "askscience", "DIY", "books", "nottheonion",
-    "food", "mildlyinteresting", "explainlikeimfive", "LifeProTips", "IAmA",
-    "gadgets", "EarthPorn", "sports", "dataisbeautiful", "GetMotivated",
-    "gifs", "videos", "Art", "television", "UpliftingNews",
-    "photoshopbattles", "Futurology", "WritingPrompts", "OldSchoolCool",
-    "history", "personalfinance", "philosophy", "Documentaries",
-    "InternetIsBeautiful", "listentothis", "technology",
-    "interestingasfuck", "wallstreetbets", "Damnthatsinteresting",
-    "politics", "relationship_advice", "NoStupidQuestions",
-    "AmItheAsshole", "facepalm", "NatureIsFuckingLit", "BeAmazed",
-    "unpopularopinion", "oddlysatisfying", "Unexpected", "nba", "soccer",
-    "nfl", "anime", "PS5",
-    "NintendoSwitch", "pcmasterrace", "buildapc", "apple", "android",
-    "ChatGPT", "artificial", "OpenAI", "cars", "Fitness",
-    "malefashionadvice", "femalefashionadvice", "SkincareAddiction",
-    "MakeupAddiction", "Parenting", "Cooking", "gardening",
-    "travel", "solotravel", "investing", "stocks", "CryptoCurrency",
-    "Bitcoin", "legaladvice", "AskMen", "AskWomen", "dating_advice",
-    "TwoXChromosomes", "teenagers", "college", "jobs", "antiwork",
-    "popculturechat", "Fauxmoi", "entertainment", "celebrities",
-    "popheads",
-]
+# The ~100 largest general subreddits, in data/popular_subreddits.txt so the
+# list is easy to update without touching code.
+POPULAR_SUBREDDITS = constants.data_lines("popular_subreddits.txt")
 
 
 def _http(req: urllib.request.Request) -> bytes:
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=constants.HTTP_TIMEOUT_S) as r:
             status = int(getattr(r, "status", 200) or 200)
             if status != 200:
                 # urllib only raises for >=400; DuckDuckGo answers bot
@@ -92,7 +69,7 @@ def search_global(topic: str) -> list[str]:
     """
     qs = urllib.parse.urlencode({"q": topic, "size": 100})
     req = urllib.request.Request(
-        f"{PULLPUSH_URL}?{qs}", headers={"User-Agent": arctic.UA}
+        f"{constants.PULLPUSH_URL}?{qs}", headers={"User-Agent": arctic.UA}
     )
     data = json.loads(_http(req))
     found: Counter[str] = Counter()
@@ -108,7 +85,7 @@ def search_web(topic: str) -> list[str]:
     most-mentioned first."""
     qs = urllib.parse.urlencode({"q": f"{topic} reddit"})
     req = urllib.request.Request(
-        f"{WEB_SEARCH_URL}?{qs}", headers={"User-Agent": arctic.UA}
+        f"{constants.DUCKDUCKGO_URL}?{qs}", headers={"User-Agent": arctic.UA}
     )
     page = urllib.parse.unquote(_http(req).decode("utf-8", errors="replace"))
     found = Counter(
@@ -127,18 +104,18 @@ def _llm_complete(prompt: str, api_key: str) -> str:
         "anthropic" if api_key.startswith("sk-ant") else "openai"
     )
     if provider == "anthropic":
-        url = ANTHROPIC_URL
+        url = constants.ANTHROPIC_URL
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
         body: dict[str, Any] = {
-            "model": settings.get("model") or DEFAULT_ANTHROPIC_MODEL,
+            "model": settings.get("model") or constants.DEFAULT_ANTHROPIC_MODEL,
             "max_tokens": 300,
             "messages": [{"role": "user", "content": prompt}],
         }
     else:
-        url = OPENAI_URL
+        url = constants.OPENAI_URL
         headers = {"Authorization": f"Bearer {api_key}"}
         body = {
-            "model": settings.get("model") or DEFAULT_OPENAI_MODEL,
+            "model": settings.get("model") or constants.DEFAULT_OPENAI_MODEL,
             "max_tokens": 300,
             "messages": [{"role": "user", "content": prompt}],
         }

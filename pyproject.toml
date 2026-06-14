@@ -42,6 +42,9 @@ redlens = "redlens.cli:main"
 include = ["redlens*"]
 exclude = ["tests*"]
 
+[tool.setuptools.package-data]
+redlens = ["data/*.txt"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
