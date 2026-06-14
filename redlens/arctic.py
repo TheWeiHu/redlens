@@ -10,6 +10,7 @@ from typing import Any
 
 from redlens import __version__, constants
 from redlens.constants import (
+    ARCTIC_PAGE_LIMIT,
     BACKOFF_BASE_S,
     MAX_RETRIES,
     PAGINATION_SLEEP_S,
@@ -102,10 +103,10 @@ def _iter_scoped_query(
     cursor = before
     yielded = 0
     while True:
-        # arctic rejects limit="auto" alongside a full-text query; 100 is the max.
+        # arctic rejects limit="auto" alongside a full-text query.
         batch = (
             _get("/api/posts/search",
-                 query=query, limit=100,
+                 query=query, limit=ARCTIC_PAGE_LIMIT,
                  sort="desc", after=after, before=cursor, **scope)
             .get("data") or []
         )
@@ -168,7 +169,7 @@ def iter_post_comments(post_id: str) -> Iterator[dict[str, Any]]:
     while True:
         batch = (
             _get("/api/comments/search",
-                 link_id=post_id, limit=100, sort="desc", before=cursor)
+                 link_id=post_id, limit=ARCTIC_PAGE_LIMIT, sort="desc", before=cursor)
             .get("data") or []
         )
         if not batch:
@@ -178,7 +179,7 @@ def iter_post_comments(post_id: str) -> Iterator[dict[str, Any]]:
             yielded += 1
             if MAX_ITEMS_PER_STREAM is not None and yielded >= MAX_ITEMS_PER_STREAM:
                 return
-        if len(batch) < 100:
+        if len(batch) < ARCTIC_PAGE_LIMIT:
             return
         oldest = min(int(b.get("created_utc") or 0) for b in batch)
         if not oldest or oldest == cursor:

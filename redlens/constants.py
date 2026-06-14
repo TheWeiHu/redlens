@@ -36,12 +36,30 @@ MAX_LLM_RESULTS = 10             # subreddits taken from one LLM suggestion call
 # Authors that scope to noise rather than people.
 NON_AUTHORS = frozenset({"[deleted]", "automoderator", "automod"})
 
+# --- search page sizes ------------------------------------------------------
+ARCTIC_PAGE_LIMIT = 100          # max rows per full-text search request
+PULLPUSH_SIZE = 100              # rows per PullPush global search
+LLM_MAX_TOKENS = 300            # cap on the discovery LLM call
+
+# --- LDA topic modeling -----------------------------------------------------
+LDA_TOPICS = 6                   # themes to find
+LDA_ITERATIONS = 25              # Gibbs sampling sweeps
+LDA_VOCAB_SIZE = 1500            # most-frequent words kept
+LDA_MAX_DOCS = 1500              # docs sampled (caps runtime)
+LDA_TOP_WORDS = 8                # words shown per theme
+LDA_ALPHA = 0.1                  # document-topic prior
+LDA_BETA = 0.01                  # topic-word prior
+LDA_SEED = 42                    # fixed → deterministic output
+
 # --- report (topic page) ----------------------------------------------------
 TOP_POSTS = 25
 TOP_SUBREDDITS = 15
 TOP_AUTHORS = 10
 TOP_DOMAINS = 8
-MIN_POST_ENGAGEMENT = 5          # score + 2x comments below this = didn't land
+MIN_POST_ENGAGEMENT = 5          # score + COMMENT_WEIGHT*comments below = didn't land
+COMMENT_WEIGHT = 2              # a comment counts this many votes toward engagement
+TITLE_MAX = 110                 # chars of a post title shown before truncating
+ACCENT = "#d93a00"             # redlens red — the page's one accent color
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 

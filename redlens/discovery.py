@@ -67,7 +67,7 @@ def search_global(topic: str) -> list[str]:
     This finds semantically related communities (r/Semaglutide and
     r/Mounjaro for "ozempic") that name matching structurally cannot.
     """
-    qs = urllib.parse.urlencode({"q": topic, "size": 100})
+    qs = urllib.parse.urlencode({"q": topic, "size": constants.PULLPUSH_SIZE})
     req = urllib.request.Request(
         f"{constants.PULLPUSH_URL}?{qs}", headers={"User-Agent": arctic.UA}
     )
@@ -108,7 +108,7 @@ def _llm_complete(prompt: str, api_key: str) -> str:
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
         body: dict[str, Any] = {
             "model": settings.get("model") or constants.DEFAULT_ANTHROPIC_MODEL,
-            "max_tokens": 300,
+            "max_tokens": constants.LLM_MAX_TOKENS,
             "messages": [{"role": "user", "content": prompt}],
         }
     else:
@@ -116,7 +116,7 @@ def _llm_complete(prompt: str, api_key: str) -> str:
         headers = {"Authorization": f"Bearer {api_key}"}
         body = {
             "model": settings.get("model") or constants.DEFAULT_OPENAI_MODEL,
-            "max_tokens": 300,
+            "max_tokens": constants.LLM_MAX_TOKENS,
             "messages": [{"role": "user", "content": prompt}],
         }
     req = urllib.request.Request(

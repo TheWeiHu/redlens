@@ -10,14 +10,17 @@ from __future__ import annotations
 import random
 from collections import Counter
 
-K_TOPICS = 6
-ITERATIONS = 25
-VOCAB_SIZE = 1500
-MAX_DOCS = 1500
-TOP_WORDS = 8
-ALPHA = 0.1   # document-topic prior
-BETA = 0.01   # topic-word prior
-SEED = 42
+from redlens import constants
+
+K_TOPICS = constants.LDA_TOPICS
+TOP_WORDS = constants.LDA_TOP_WORDS
+VOCAB_SIZE = constants.LDA_VOCAB_SIZE
+MAX_DOCS = constants.LDA_MAX_DOCS
+ITERATIONS = constants.LDA_ITERATIONS
+ALPHA = constants.LDA_ALPHA
+BETA = constants.LDA_BETA
+SEED = constants.LDA_SEED
+MIN_DOC_TOKENS = 3  # documents shorter than this are dropped from the corpus
 
 
 def topics(
@@ -30,7 +33,7 @@ def topics(
              sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))[:VOCAB_SIZE]]
     word_id = {w: i for i, w in enumerate(vocab)}
     corpus = [ids for d in docs
-              if len(ids := [word_id[w] for w in d if w in word_id]) >= 3]
+              if len(ids := [word_id[w] for w in d if w in word_id]) >= MIN_DOC_TOKENS]
     if len(corpus) < k or not vocab:
         return []
     if len(corpus) > MAX_DOCS:
