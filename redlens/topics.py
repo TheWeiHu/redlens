@@ -40,6 +40,7 @@ from sqlmodel import Session, select
 
 from redlens import arctic
 from redlens.constants import (
+    COMMIT_BATCH,
     DISCOVER_MAX_AUTHORS,
     DISCOVER_MAX_NEW_SUBREDDITS,
     NON_AUTHORS,
@@ -242,8 +243,21 @@ def track_topic(
         posts_new = 0
         per_subreddit: dict[str, int] = {}
         failed: dict[str, str] = {}
+
+        def flush(batch: list[Post]) -> None:
+            """Persist a chunk of posts + their topic links and commit, so a
+            single huge subreddit never balloons memory or the transaction."""
+            if not batch:
+                return
+            upsert(session, batch)
+            upsert(session, [TopicPost(topic_id=topic_id, post_id=p.post_id)
+                             for p in batch])
+            session.commit()
+            batch.clear()
+
         for sub in net:
             batch: list[Post] = []
+            kept = 0
             sub_failed = False
             try:
                 for term in terms:
@@ -261,23 +275,21 @@ def track_topic(
                             if any(t in text for t in excluded):
                                 continue  # homonym noise, e.g. Ubisoft for "ubi"
                         batch.append(post)
+                        kept += 1
+                        if len(batch) >= COMMIT_BATCH:
+                            flush(batch)
             except RedlensError as exc:
                 # One bad subreddit (banned, renamed, exhausted retries) must
                 # not sink the whole net; keep what was fetched before the
                 # failure, report, and keep casting.
                 failed[sub] = str(exc)
                 sub_failed = True
-            if batch:
-                upsert(session, batch)
-                upsert(session, [
-                    TopicPost(topic_id=topic_id, post_id=p.post_id)
-                    for p in batch
-                ])
-            per_subreddit[sub] = len(batch)
-            posts_new += len(batch)
+            flush(batch)
+            per_subreddit[sub] = kept
+            posts_new += kept
             if on_progress:
-                label = f"{sub} (failed, kept {len(batch)})" if sub_failed else sub
-                on_progress(label, len(batch))
+                label = f"{sub} (failed, kept {kept})" if sub_failed else sub
+                on_progress(label, kept)
 
         topic.subreddits = json.dumps(net)
         topic.newest_seen_utc = newest or None

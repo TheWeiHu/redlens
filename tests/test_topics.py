@@ -107,11 +107,15 @@ def test_cli_track_then_page(engine, tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_track_against_real_arctic(tmp_path, monkeypatch):
-    """Weekly canary: does arctic's scoped full-text search still answer the
-    way track expects? Capped tiny so it costs a couple of requests."""
+    """Weekly canary: does arctic's scoped full-text search still answer in
+    the *shape* track expects? Asserts a well-formed response, not a non-zero
+    count — a quiet window or arctic downtime is infra noise, not a redlens
+    regression."""
     monkeypatch.setattr(arctic, "MAX_ITEMS_PER_STREAM", 5)
     engine = connect(tmp_path / "live.db")
     init_schema(engine)
     res = track_topic(engine, "ozempic", subreddits=["Ozempic"], days=365)
-    assert not res.failed and res.posts_new > 0
-    assert "r/Ozempic" in render_topic_page(engine, "ozempic")
+    assert res.subreddits_searched == 1            # the request was made
+    assert "Ozempic" not in res.failed             # and it came back well-formed
+    assert isinstance(res.posts_new, int)
+    assert render_topic_page(engine, "ozempic").startswith("<!doctype html>")

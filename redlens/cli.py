@@ -50,10 +50,23 @@ def _resolve_sources(sources_arg: str | None, *, assume_yes: bool) -> list[str]:
     """Discovery sources for a new topic: an explicit --sources list wins
     (the only way to request web/global/llm non-interactively), otherwise
     fall back to the interactive picker / name-only default."""
-    if sources_arg is not None:
-        valid = {key for key, _, _ in SOURCES}
-        return [s for s in (t.strip() for t in sources_arg.split(",")) if s in valid]
-    return _choose_sources(assume_yes=assume_yes)
+    if sources_arg is None:
+        return _choose_sources(assume_yes=assume_yes)
+    valid = {key for key, _, _ in SOURCES}
+    chosen: list[str] = []
+    unknown: list[str] = []
+    for tok in (t.strip() for t in sources_arg.split(",")):
+        if not tok:
+            continue
+        (chosen if tok in valid else unknown).append(tok)
+    if unknown:
+        print(f"warning: ignoring unknown --sources: {', '.join(unknown)} "
+              f"(valid: {', '.join(k for k, _, _ in SOURCES)})", file=sys.stderr)
+    if not chosen:
+        raise RedlensError(
+            f"--sources {sources_arg!r} has no valid source "
+            f"(valid: {', '.join(k for k, _, _ in SOURCES)})")
+    return chosen
 
 
 def _choose_sources(*, assume_yes: bool) -> list[str]:

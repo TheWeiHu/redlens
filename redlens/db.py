@@ -7,10 +7,14 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
 
-# Importing models registers them with SQLModel.metadata.
+# Import every table model so `init_schema` is self-sufficient: create_all
+# only builds tables registered in SQLModel.metadata, so they must all be
+# imported here regardless of what the caller happens to import.
 from redlens.models import (  # noqa: F401
     Comment,
     Post,
+    Topic,
+    TopicPost,
     User,
 )
 
