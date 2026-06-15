@@ -8,34 +8,33 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from redlens import __version__
+from redlens import __version__, constants
+from redlens.constants import (
+    ARCTIC_PAGE_LIMIT,
+    BACKOFF_BASE_S,
+    MAX_RETRIES,
+    PAGINATION_SLEEP_S,
+    RETRYABLE_STATUS,
+)
 from redlens.errors import RedlensError
 
-BASE = "https://arctic-shift.photon-reddit.com"
 UA = f"redlens/{__version__} (+https://github.com/TheWeiHu/redlens)"
-PAGINATION_SLEEP_S = 0.25
 # Hard cap on items per stream (posts or comments). Override at runtime by
 # setting ``arctic.MAX_ITEMS_PER_STREAM = N``. Default None = unbounded.
 MAX_ITEMS_PER_STREAM: int | None = None
 
 
-# Arctic rate-limits bursts with HTTP 429. Retry those (and transient 5xx) with
-# exponential backoff, honoring a Retry-After header when present.
-MAX_RETRIES = 6
-BACKOFF_BASE_S = 1.0
-
-
 def _get(path: str, **params: Any) -> dict[str, Any]:
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-    url = f"{BASE}{path}?{qs}" if qs else f"{BASE}{path}"
+    url = f"{constants.ARCTIC_BASE}{path}?{qs}" if qs else f"{constants.ARCTIC_BASE}{path}"
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     for attempt in range(MAX_RETRIES + 1):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=constants.HTTP_TIMEOUT_S) as r:
                 data: dict[str, Any] = json.loads(r.read())
             return data
         except urllib.error.HTTPError as exc:
-            if exc.code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
+            if exc.code in RETRYABLE_STATUS and attempt < MAX_RETRIES:
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 wait = (
                     float(retry_after) if retry_after and retry_after.isdigit()
@@ -52,6 +51,14 @@ def _get(path: str, **params: Any) -> dict[str, Any]:
 def fetch_user_meta(username: str) -> dict[str, Any] | None:
     arr = _get("/api/users/search", author=username, limit=1).get("data") or []
     return arr[0] if arr else None
+
+
+def search_subreddits(prefix: str, limit: int = 25) -> list[dict[str, Any]]:
+    """Subreddits whose name starts with ``prefix`` (case-insensitive),
+    sorted by subscriber count."""
+    arr = _get("/api/subreddits/search",
+               subreddit_prefix=prefix, limit=limit).get("data") or []
+    return arr
 
 
 def _iter_kind(kind: str, username: str) -> Iterator[dict[str, Any]]:
@@ -79,28 +86,28 @@ def _iter_kind(kind: str, username: str) -> Iterator[dict[str, Any]]:
         time.sleep(PAGINATION_SLEEP_S)
 
 
-def iter_subreddit_query(
-    subreddit: str,
+def _iter_scoped_query(
+    scope: dict[str, str],
     query: str,
     after: int | None = None,
     before: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Yield posts in ``subreddit`` whose title or body match ``query``.
+    """Yield posts matching ``query`` within ``scope``.
 
     Arctic's full-text params (``query``/``title``/``selftext``) only work when
     scoped to an ``author`` or ``subreddit`` — there is no global text search —
-    so callers fan this out across a set of subreddits. ``after``/``before`` are
+    so callers fan this out across a set of scopes. ``after``/``before`` are
     epoch seconds bounding ``created_utc``; pagination walks backwards in time
     via the ``before`` cursor, mirroring :func:`_iter_kind`.
     """
     cursor = before
     yielded = 0
     while True:
-        # arctic rejects limit="auto" alongside a full-text query; 100 is the max.
+        # arctic rejects limit="auto" alongside a full-text query.
         batch = (
             _get("/api/posts/search",
-                 subreddit=subreddit, query=query, limit=100,
-                 sort="desc", after=after, before=cursor)
+                 query=query, limit=ARCTIC_PAGE_LIMIT,
+                 sort="desc", after=after, before=cursor, **scope)
             .get("data") or []
         )
         if not batch:
@@ -117,9 +124,65 @@ def iter_subreddit_query(
         time.sleep(PAGINATION_SLEEP_S)
 
 
+def iter_subreddit_query(
+    subreddit: str,
+    query: str,
+    after: int | None = None,
+    before: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield posts in ``subreddit`` whose title or body match ``query``."""
+    return _iter_scoped_query({"subreddit": subreddit}, query, after, before)
+
+
+def iter_author_query(
+    author: str,
+    query: str,
+    after: int | None = None,
+    before: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield posts by ``author`` matching ``query``, across all subreddits.
+
+    The author scope is the one window arctic gives onto *unknown*
+    subreddits, which makes it the topic-discovery bootstrap: the people
+    posting about a topic in known subreddits reveal where else it lives.
+    """
+    return _iter_scoped_query({"author": author}, query, after, before)
+
+
 def iter_posts(username: str) -> Iterator[dict[str, Any]]:
     return _iter_kind("posts", username)
 
 
 def iter_comments(username: str) -> Iterator[dict[str, Any]]:
     return _iter_kind("comments", username)
+
+
+def iter_post_comments(post_id: str) -> Iterator[dict[str, Any]]:
+    """Yield every comment under a post (its ``link_id``), newest first.
+
+    This is how topic tracking gathers discussion: comments are reached
+    through the posts already matched, so no topic-to-comment table is
+    needed — ``comment.link_id`` is the bridge.
+    """
+    cursor: int | None = None
+    yielded = 0
+    while True:
+        batch = (
+            _get("/api/comments/search",
+                 link_id=post_id, limit=ARCTIC_PAGE_LIMIT, sort="desc", before=cursor)
+            .get("data") or []
+        )
+        if not batch:
+            return
+        for item in batch:
+            yield item
+            yielded += 1
+            if MAX_ITEMS_PER_STREAM is not None and yielded >= MAX_ITEMS_PER_STREAM:
+                return
+        if len(batch) < ARCTIC_PAGE_LIMIT:
+            return
+        oldest = min(int(b.get("created_utc") or 0) for b in batch)
+        if not oldest or oldest == cursor:
+            return
+        cursor = oldest
+        time.sleep(PAGINATION_SLEEP_S)
