@@ -30,7 +30,6 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/TheWeiHu/redlens"
 Issues = "https://github.com/TheWeiHu/redlens/issues"
-Changelog = "https://github.com/TheWeiHu/redlens/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.4", "mypy>=1.8"]
@@ -41,6 +40,9 @@ redlens = "redlens.cli:main"
 [tool.setuptools.packages.find]
 include = ["redlens*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+redlens = ["data/*.txt"]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,24 @@
+# Conversational-filler stopwords for topic modeling, in the spirit of
+# rhiever/reddit-analysis: aggressive on chatter ("really", "think", "anyone")
+# so topic words surface, hands-off on domain signal ("mg", "dose", "insurance").
+# Edit freely — whitespace/newline separated, '#' starts a comment.
+a able about actually after again ago all also am amp com gt http https
+que three two www x200b
+an and any anybody anyone anything are aren't around as at back bad be
+because been before being best better bit but by came can can't cant come
+could couldn't couldnt day days did didn't didnt do does doesn't doesnt
+doing don't dont down edit else even ever everyone everything feel feeling
+feels felt few first for from get gets getting go going good got had has
+hasn't have haven't he he's help her here hers him his how however i i'd
+i'll i'm i've id if ill im in into is isn't isnt it it's its ive just know
+last let's like long look looking looks lot made make makes making many
+maybe me month months more most much my need never new next no not nothing
+now of off on one only or other our out over own people post probably
+question re really right s said say says see seen she she's should since so
+some someone something started still such sure t take taking than thank
+thanks that that's thats the their them then there there's these they
+they're theyre thing things think this those though through to today too
+took tried try trying under up use used using very want was wasn't way we
+we're week weeks were what what's when where which while who why will with
+won't wont would wouldn't wouldnt yeah year years yes you you're your youre
+yours
