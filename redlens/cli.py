@@ -208,12 +208,9 @@ def main(argv: list[str] | None = None) -> int:
         "summarize", help="AI profile summary from the archived data (BYO LLM key)")
     sm.add_argument("username")
     sm.add_argument("--json", action="store_true")
-    sm.add_argument("--refresh", action="store_true",
-                    help="regenerate even if a cached summary exists")
     sm.add_argument("--depth", choices=tuple(SUMMARY_DEPTHS),
                     help="how much of the archive to sample (top-voted + recent): "
-                    f"{', '.join(SUMMARY_DEPTHS)} (default: {SUMMARY_DEFAULT_DEPTH}); "
-                    "a different depth than the cached one regenerates")
+                    f"{', '.join(SUMMARY_DEPTHS)} (default: {SUMMARY_DEFAULT_DEPTH})")
     e = sub.add_parser("explore")
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
@@ -334,13 +331,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out} ({len(html_doc):,} bytes)")
         elif args.verb == "summarize":
             with session(engine) as s:
-                summ = summarize_user(s, args.username, refresh=args.refresh,
-                                      depth=args.depth)
+                summ = summarize_user(s, args.username, depth=args.depth)
             if args.json:
                 print(summ.model_dump_json(indent=2))
             else:
-                print(f"u/{summ.username} (via {summ.model}, {summ.depth} depth, "
-                      f"{_ts(summ.created_at)}):\n")
+                print(f"u/{summ.username} (via {summ.model}, {summ.depth} depth):\n")
                 print(summ.text)
         else:
             with session(engine) as s:

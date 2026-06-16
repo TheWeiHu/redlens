@@ -1,0 +1,1 @@
+List up to $count subreddits where '$topic' is actively discussed. Include both dedicated communities and broader ones where it comes up often. Reply with one subreddit name per line, no r/ prefix, no commentary. Only real subreddits.

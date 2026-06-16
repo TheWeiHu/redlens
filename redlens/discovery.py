@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 
-from redlens import arctic, config, constants, llm
+from redlens import arctic, config, constants, llm, prompts
 from redlens.constants import MAX_LLM_RESULTS, MAX_WEB_RESULTS
 from redlens.errors import RedlensError
 
@@ -100,12 +100,7 @@ def suggest_llm(topic: str) -> list[str]:
     api_key = config.llm_api_key()
     if not api_key:
         return []
-    prompt = (
-        f"List up to {MAX_LLM_RESULTS} subreddits where {topic!r} is "
-        "actively discussed. Include both dedicated communities and broader "
-        "ones where it comes up often. Reply with one subreddit name per "
-        "line, no r/ prefix, no commentary. Only real subreddits."
-    )
+    prompt = prompts.render("subreddits", count=str(MAX_LLM_RESULTS), topic=topic)
     text = llm.complete(prompt, api_key)
     names = []
     for line in text.splitlines():
