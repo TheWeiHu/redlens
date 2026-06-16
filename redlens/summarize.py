@@ -164,9 +164,15 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
         "",
         "Infer a profile of this person, grounded only in the posts and "
         "comments above. Cover, in this order:",
-        "- Likely gender, age range, and location/region — give each as an "
-        "inference with a confidence (low / medium / high) and the evidence "
-        'behind it; say "unclear" when the signal is too thin.',
+        "- Likely gender and age range — give each as an inference with a "
+        'confidence (low / medium / high) and the evidence behind it; say '
+        '"unclear" when the signal is too thin.',
+        "- Location/region — a ranked list of 3 to 6 specific guesses (country, "
+        "or a region/city when the evidence supports it), most likely first. "
+        "Format EACH guess exactly as `Place (NN%: brief reason)` — a percent "
+        "and a one-line justification. The percents are independent confidences "
+        "and need not sum to 100. Write `unclear` only if there is genuinely no "
+        "geographic signal at all.",
         "- Big Five personality (openness, conscientiousness, extraversion, "
         "agreeableness, neuroticism) — rate each high / medium / low with a "
         "one-line reason drawn from their writing.",
