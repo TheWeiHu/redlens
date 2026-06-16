@@ -155,6 +155,20 @@ class TopicPost(SQLModel, table=True):
     post_id: str = Field(primary_key=True, index=True)
 
 
+class Summary(SQLModel, table=True):
+    """An AI-generated profile summary, cached per user.
+
+    Keyed on ``username`` (one summary per account): re-running ``summarize``
+    returns the stored row unless ``--refresh`` regenerates it, which
+    overwrites this row in place (new ``model``/``created_at``/``text``).
+    """
+
+    username: str = Field(primary_key=True)
+    model: str                                   # which LLM produced it
+    text: str
+    created_at: int = Field(default_factory=_now)
+
+
 class UserAnalytics(BaseModel):
     username: str
     total_posts: int
