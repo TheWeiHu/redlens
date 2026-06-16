@@ -75,6 +75,11 @@ keys (LLM for summaries/`llm` discovery; Reddit for future fresh-data sync)
 live in `config.toml` (mode 600) or environment variables, which always win
 over the file. Everything works with no config at all.
 
+The file uses `[storage] db`, `[llm] api_key`, and `[reddit] client_id` /
+`client_secret`. The matching env vars are `REDLENS_DB`, `REDLENS_LLM_API_KEY`
+(falling back to `OPENAI_API_KEY`), `REDLENS_REDDIT_CLIENT_ID`, and
+`REDLENS_REDDIT_CLIENT_SECRET`.
+
 ## Development
 
 ```bash
