@@ -53,10 +53,11 @@ variables override the file. See [DESIGN.md](DESIGN.md) for the variable names.
 
 ## Data
 
-Everything lands in one SQLite file you own, by default in your per-user data
-directory (e.g. `~/.local/share/redlens/redlens.db`). Point elsewhere with the
-`--db` flag, `REDLENS_DB`, or `[storage] db` in the config file — see
-[DESIGN.md](DESIGN.md).
+Everything lands in one SQLite file you own — created automatically on first
+use — by default in your per-user data directory: `~/.local/share/redlens/
+redlens.db` on Linux, `~/Library/Application Support/redlens/redlens.db` on
+macOS. Point elsewhere with the `--db` flag, `REDLENS_DB`, or `[storage] db` in
+the config file — see [DESIGN.md](DESIGN.md).
 
 ## Explore
 
