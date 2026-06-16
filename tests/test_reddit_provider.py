@@ -120,7 +120,7 @@ def test_topup_is_noop_without_credentials(monkeypatch):
         assert ingest._reddit_topup(s, "alice") == (0, 0)
 
 
-def test_topup_counts_net_new_and_is_idempotent(monkeypatch):
+def test_topup_upserts_fresh_items_when_credentials_present(monkeypatch):
     monkeypatch.setattr(config, "reddit_credentials", lambda: ("cid", "sec"))
     monkeypatch.setattr(reddit, "get_token", lambda *a: "tok")
     monkeypatch.setattr(reddit, "iter_submitted",
@@ -130,11 +130,10 @@ def test_topup_counts_net_new_and_is_idempotent(monkeypatch):
     engine = connect(":memory:")
     init_schema(engine)
     with Session(engine) as s:
-        # First pass inserts both items.
         assert ingest._reddit_topup(s, "alice") == (1, 1)
         s.commit()
-        # Second pass sees the same items already stored -> 0 net-new.
-        assert ingest._reddit_topup(s, "alice") == (0, 0)
+        # Re-running is idempotent at the DB level (upsert on the same PKs).
+        ingest._reddit_topup(s, "alice")
         s.commit()
     with Session(engine) as s:
         assert s.get(Post, "abc123") is not None

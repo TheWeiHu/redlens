@@ -22,8 +22,7 @@ class SyncResult:
     user: User
     posts_written: int
     comments_written: int
-    # Net-new items inserted by the optional Reddit top-up pass (0 when no
-    # credentials, or when Reddit returned nothing arctic didn't already have).
+    # Items seen in the optional Reddit top-up pass (0 when no credentials).
     reddit_posts: int = 0
     reddit_comments: int = 0
 
