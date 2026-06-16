@@ -1,7 +1,7 @@
 from sqlmodel import Session
 
-from redlens.db import connect, init_schema, upsert
-from redlens.models import Post, TopicPost
+from redlens.db import SCHEMA_VERSION, connect, init_schema, upsert
+from redlens.models import Post, Summary, TopicPost
 
 
 def _post(pid: str, score: int = 0) -> Post:
@@ -60,3 +60,29 @@ def test_upsert_net_new_with_composite_primary_key():
         again = upsert(s, [TopicPost(topic_id=1, post_id="b"),
                            TopicPost(topic_id=2, post_id="b")])
         assert again == 1
+
+
+def test_v4_migration_adds_summary_table_to_a_pre_v4_db(tmp_path):
+    """A database stamped at v3 (no `summary` table) gains it on init, and the
+    schema stamp advances to the current version."""
+    db = tmp_path / "old.db"
+    engine = connect(db)
+    # Build the v3 baseline: every table except `summary`, stamped at v3.
+    with engine.begin() as con:
+        con.exec_driver_sql(
+            "CREATE TABLE user (username VARCHAR PRIMARY KEY)")
+        con.exec_driver_sql("PRAGMA user_version = 3")
+
+    init_schema(engine)
+
+    with engine.begin() as con:
+        assert int(con.exec_driver_sql("PRAGMA user_version").scalar()) == SCHEMA_VERSION
+        has_summary = con.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='summary'"
+        ).first() is not None
+    assert has_summary
+    # And the new table is usable.
+    with Session(engine) as s:
+        upsert(s, [Summary(username="alice", model="m", text="hi")])
+        s.commit()
+        assert s.get(Summary, "alice").text == "hi"

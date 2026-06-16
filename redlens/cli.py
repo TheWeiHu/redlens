@@ -11,10 +11,11 @@ from redlens import __version__, discovery, onboarding
 from redlens.analytics import compute_user_analytics
 from redlens.config import llm_api_key, resolve_db
 from redlens.db import connect, init_schema, session
-from redlens.errors import NotFound, RedlensError
+from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.reporting import explore
 from redlens.reporting.page import render_topic_page
+from redlens.summarize import summarize_user
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
@@ -202,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("analytics")
     a.add_argument("username")
     a.add_argument("--json", action="store_true")
+    sm = sub.add_parser(
+        "summarize", help="AI profile summary from the archived data (BYO LLM key)")
+    sm.add_argument("username")
+    sm.add_argument("--json", action="store_true")
+    sm.add_argument("--refresh", action="store_true",
+                    help="regenerate even if a cached summary exists")
     e = sub.add_parser("explore")
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
@@ -320,6 +327,14 @@ def main(argv: list[str] | None = None) -> int:
             out = Path(args.out or f"{_slug(args.topic)}.html")
             out.write_text(html_doc, encoding="utf-8")
             print(f"wrote {out} ({len(html_doc):,} bytes)")
+        elif args.verb == "summarize":
+            with session(engine) as s:
+                summ = summarize_user(s, args.username, refresh=args.refresh)
+            if args.json:
+                print(summ.model_dump_json(indent=2))
+            else:
+                print(f"u/{summ.username} (via {summ.model}, {_ts(summ.created_at)}):\n")
+                print(summ.text)
         else:
             with session(engine) as s:
                 an = compute_user_analytics(s, args.username)
@@ -338,6 +353,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except NotFound as e:
         print(f"not found: {e}", file=sys.stderr)
+        return 2
+    except MissingKey as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
     except RedlensError as e:
         print(f"error: {e}", file=sys.stderr)

@@ -44,6 +44,13 @@ ARCTIC_PAGE_LIMIT = 100          # max rows per full-text search request
 PULLPUSH_SIZE = 100              # rows per PullPush global search
 LLM_MAX_TOKENS = 300            # cap on the discovery LLM call
 
+# --- profile summary (BYO LLM key) ------------------------------------------
+SUMMARY_MAX_TOKENS = 700         # cap on the summarize completion
+SUMMARY_POST_SAMPLE = 25         # most-recent post titles fed to the model
+SUMMARY_COMMENT_SAMPLE = 25      # most-recent comment snippets fed to the model
+SUMMARY_COMMENT_CHARS = 240      # each comment snippet truncated to this many chars
+SUMMARY_TOP_SUBS = 10            # most-active subreddits named in the payload
+
 # --- LDA topic modeling -----------------------------------------------------
 LDA_TOPICS = 6                   # themes to find
 LDA_ITERATIONS = 25              # Gibbs sampling sweeps
