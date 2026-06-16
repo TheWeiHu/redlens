@@ -14,6 +14,7 @@ from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
+from redlens.models import Profile
 from redlens.reporting import explore
 from redlens.reporting.page import render_topic_page
 from redlens.summarize import summarize_user
@@ -46,6 +47,32 @@ def _ts(s: int | None) -> str:
 
 def _slug(name: str) -> str:
     return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
+
+
+# Demographic fields in display order, with their headings.
+_DEMOGRAPHIC_FIELDS = (
+    ("gender", "Gender"), ("age_range", "Age"), ("country", "Country"),
+    ("state", "State"), ("city", "City"),
+)
+
+
+def _format_profile(p: Profile) -> str:
+    """Render a structured Profile as readable terminal text (reasons are in
+    ``--json``; here we show the labels + confidences)."""
+    lines = [f"u/{p.username} (via {p.model}, {p.depth} depth):", ""]
+    for field, heading in _DEMOGRAPHIC_FIELDS:
+        guesses = p.demographics.get(field) or []
+        if guesses:
+            joined = ", ".join(f"{g.label} ({g.confidence}%)" for g in guesses)
+            lines.append(f"  {heading + ':':<9}{joined}")
+    if p.big_five:
+        lines += ["", "  Big Five: " + " · ".join(
+            f"{trait.capitalize()} {t.score}%" for trait, t in p.big_five.items())]
+    for heading, body in (("Interests", p.interests), ("Beliefs", p.beliefs),
+                          ("Tone", p.tone)):
+        if body:
+            lines += ["", f"{heading}: {body}"]
+    return "\n".join(lines)
 
 
 def _resolve_sources(sources_arg: str | None, *, assume_yes: bool) -> list[str]:
@@ -335,8 +362,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.json:
                 print(summ.model_dump_json(indent=2))
             else:
-                print(f"u/{summ.username} (via {summ.model}, {summ.depth} depth):\n")
-                print(summ.text)
+                print(_format_profile(summ))
         else:
             with session(engine) as s:
                 an = compute_user_analytics(s, args.username)

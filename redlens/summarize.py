@@ -3,10 +3,12 @@
 ``summarize_user`` builds a representative, token-budgeted payload from the
 locally archived data (the user's most-active communities + a sample of their
 actual posts and comments — content, not raw counts/karma) and asks one LLM to
-infer a profile: likely gender/age/location (with confidence), Big Five
-personality, interests, beliefs, and tone. The result is generated on demand
-and returned for printing — nothing is persisted (summaries are cheap and
-depend on the changing archive, so there's nothing worth caching).
+infer a profile as **structured JSON**: ranked gender/age/country/state/city
+guesses (each a confidence + reason), Big Five trait scores, and short
+interests/beliefs/tone paragraphs. Returning JSON instead of prose lets
+consumers (CLI, ``--json``, an HTML view) render it deterministically. The
+result is generated on demand — nothing is persisted (it's cheap and depends
+on the changing archive, so there's nothing worth caching).
 
 The sample is **not** the most recent items only: it blends top-by-score
 content (most upvoted = most defining, drawn from the whole history) with a
@@ -16,9 +18,11 @@ slice of recent activity. How much is sampled is the ``depth`` knob — see
 """
 from __future__ import annotations
 
+import json
 from collections import Counter
-from typing import TypeVar
+from typing import Any, TypeVar
 
+from pydantic import ValidationError
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -60,9 +64,30 @@ def summarize_user(session: Session, username: str, *,
         )
 
     prompt = _build_prompt(session, canon, resolved_depth)
-    text = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS).strip()
-    return Profile(username=canon, model=llm.model_name(), depth=resolved_depth,
-                   text=text)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    data = _parse_json(raw)
+    try:
+        return Profile.model_validate(
+            {"username": canon, "model": llm.model_name(),
+             "depth": resolved_depth, **data})
+    except ValidationError as exc:
+        raise RedlensError(
+            f"LLM profile didn't match the expected shape: {exc}") from exc
+
+
+def _parse_json(raw: str) -> dict[str, Any]:
+    """The JSON object from a completion, tolerant of markdown fences/prose
+    around it (we take the outermost ``{...}``)."""
+    i, j = raw.find("{"), raw.rfind("}")
+    if i == -1 or j <= i:
+        raise RedlensError("LLM did not return a JSON object")
+    try:
+        obj = json.loads(raw[i:j + 1])
+    except json.JSONDecodeError as exc:
+        raise RedlensError(f"LLM returned invalid JSON: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise RedlensError("LLM JSON was not an object")
+    return obj
 
 
 def _sample(session: Session, model: type[_Activity], pk_attr: str,
