@@ -33,56 +33,30 @@ redlens page  "dua lipa"   # render a standalone HTML report
 
 `track` builds a subreddit net (arctic has no global text search) from
 several discovery sources you pick from, plus a curating picker. Run
-`redlens track --help` for the sources, `--subreddits`, `--discover`, and
-`--comments`.
+`redlens track --help` for the discovery sources and flags.
 
 No setup needed — the schema is created (and migrated) automatically on
-first use.
-
-No API keys are needed for any of the above — arctic-shift is a free, open
-mirror.
+first use. No API keys are needed — arctic-shift is a free, open mirror.
 
 ## Optional API keys
 
 Two keys unlock more. The first interactive run offers to collect them once,
-or run the wizard anytime:
-
-```bash
-redlens setup
-```
+or run the wizard anytime with `redlens setup`:
 
 - **LLM API key** (OpenAI or any OpenAI-compatible endpoint) — powers
-  `redlens summarize` (AI profile summaries) and the `llm` discovery source
-  in `track`. Live today.
-- **Reddit API key** (free; create a "script" app at
-  [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)) — for
-  fresh-data top-ups via Reddit's official API. Collected now; used once the
-  Reddit provider lands.
+  `redlens summarize` and the `llm` discovery source in `track`.
+- **Reddit API key** — fresh-data top-ups via Reddit's official API
+  (collected now; used once the Reddit provider lands).
 
-Keys are stored in `~/.config/redlens/config.toml` (mode 600). The
-environment always wins over the file: `REDLENS_REDDIT_CLIENT_ID` /
-`REDLENS_REDDIT_CLIENT_SECRET`, and `REDLENS_LLM_API_KEY` (falling back to
-`OPENAI_API_KEY`).
+Keys are stored in `~/.config/redlens/config.toml` (mode 600); environment
+variables override the file. See [DESIGN.md](DESIGN.md) for the variable names.
 
 ## Data
 
-Everything lands in one SQLite file, by default in your per-user data
-directory (`~/.local/share/redlens/redlens.db` on Linux,
-`~/Library/Application Support/redlens/redlens.db` on macOS).
-
-Point elsewhere with (in order of precedence):
-
-```bash
-redlens --db /path/to/other.db sync spez      # 1. the --db flag
-export REDLENS_DB=/path/to/other.db           # 2. env var
-```
-
-or set it once in `~/.config/redlens/config.toml` (3.):
-
-```toml
-[storage]
-db = "/path/to/other.db"
-```
+Everything lands in one SQLite file you own, by default in your per-user data
+directory (e.g. `~/.local/share/redlens/redlens.db`). Point elsewhere with the
+`--db` flag, `REDLENS_DB`, or `[storage] db` in the config file — see
+[DESIGN.md](DESIGN.md).
 
 ## Explore
 
@@ -96,16 +70,6 @@ redlens explore --port 9000 --no-browser
 
 The DB is opened read-only, so nothing here can mutate it.
 
-## Layout
+---
 
-```
-redlens/     models, db, config, arctic client, ingest, analytics,
-                 explore (the DB browser), cli
-tests/           pytest, in-memory sqlite, no network
-```
-
-## Test
-
-```bash
-pytest
-```
+Architecture, configuration, and development: see [DESIGN.md](DESIGN.md).
