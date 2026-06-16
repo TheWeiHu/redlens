@@ -7,30 +7,30 @@ $post_titles
 Representative comment snippets (top-voted and recent):
 $comment_snippets
 
-Infer a profile of this person, grounded only in the posts and comments above. Return ONLY a JSON object (no markdown, no commentary) with exactly this shape:
+Infer a profile of THIS specific person, grounded only in the posts and comments above. Return ONLY a JSON object (no markdown, no commentary) with exactly this shape. Every value in angle brackets is a placeholder showing the type — REPLACE every one with your own inference for this user. Never copy these placeholders or treat them as the answer:
 
 {
   "demographics": {
-    "gender":    [{"label": "Male", "confidence": 70, "reason": "one short sentence of evidence"}],
-    "age_range": [{"label": "25-35", "confidence": 60, "reason": "..."}],
-    "country":   [{"label": "United States", "confidence": 75, "reason": "..."}],
-    "state":     [{"label": "California", "confidence": 40, "reason": "..."}],
-    "city":      [{"label": "unclear", "confidence": 60, "reason": "..."}]
+    "gender":    [{"label": "<a gender>", "confidence": <integer 0-100>, "reason": "<one short sentence of evidence>"}],
+    "age_range": [{"label": "<an age range, e.g. NN-NN>", "confidence": <integer 0-100>, "reason": "<...>"}],
+    "country":   [{"label": "<a country>", "confidence": <integer 0-100>, "reason": "<...>"}],
+    "state":     [{"label": "<a state/region, or 'unclear'>", "confidence": <integer 0-100>, "reason": "<...>"}],
+    "city":      [{"label": "<a city, or 'unclear'>", "confidence": <integer 0-100>, "reason": "<...>"}]
   },
   "big_five": {
-    "openness":          {"score": 80, "reason": "..."},
-    "conscientiousness": {"score": 70, "reason": "..."},
-    "extraversion":      {"score": 40, "reason": "..."},
-    "agreeableness":     {"score": 75, "reason": "..."},
-    "neuroticism":       {"score": 30, "reason": "..."}
+    "openness":          {"score": <integer 0-100>, "reason": "<...>"},
+    "conscientiousness": {"score": <integer 0-100>, "reason": "<...>"},
+    "extraversion":      {"score": <integer 0-100>, "reason": "<...>"},
+    "agreeableness":     {"score": <integer 0-100>, "reason": "<...>"},
+    "neuroticism":       {"score": <integer 0-100>, "reason": "<...>"}
   },
-  "interests": "a short paragraph on interests and expertise",
-  "beliefs": "a short paragraph on notable beliefs or values",
-  "tone": "a short paragraph on tone and how they engage with others"
+  "interests": "<a short paragraph on interests and expertise>",
+  "beliefs": "<a short paragraph on notable beliefs or values>",
+  "tone": "<a short paragraph on tone and how they engage with others>"
 }
 
 Rules:
 - Each demographics field is a ranked list (most likely first) of 1-3 guesses. `confidence` is an independent 0-100 percent; they need not sum to 100. Keep country, state, and city separate — do not mix granularities. Use a single guess with label "unclear" when there's no signal for a field.
 - Each big_five `score` is 0-100 for how strongly the person exhibits that trait (not a confidence).
-- Every `reason` is one short sentence grounded in the posts/comments above. These are evidence-based inferences, not certainties — keep confidences honest.
+- Every `reason` is one short sentence grounded in this user's posts/comments above, and every number must follow from that evidence — do not reuse round defaults.
 - Do not reference raw statistics (post or comment counts, karma, dates); they're reported elsewhere.
