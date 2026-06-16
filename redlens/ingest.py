@@ -7,10 +7,11 @@ from typing import Any, TypeVar
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel
 
-from redlens import arctic
+from redlens import arctic, config
 from redlens.db import upsert
 from redlens.errors import NotFound
 from redlens.models import Comment, Post, User
+from redlens.providers import reddit
 
 T = TypeVar("T", bound=SQLModel)
 BATCH_SIZE = 500
@@ -21,6 +22,9 @@ class SyncResult:
     user: User
     posts_written: int
     comments_written: int
+    # Items seen in the optional Reddit top-up pass (0 when no credentials).
+    reddit_posts: int = 0
+    reddit_comments: int = 0
 
 
 def sync_user(username: str, engine: Engine) -> SyncResult:
@@ -44,8 +48,22 @@ def sync_user(username: str, engine: Engine) -> SyncResult:
         upsert(session, [user])
         posts = _stream(session, arctic.iter_posts(user.username), Post.from_arctic)
         comments = _stream(session, arctic.iter_comments(user.username), Comment.from_arctic)
+        r_posts, r_comments = _reddit_topup(session, user.username)
         session.commit()
-    return SyncResult(user, posts, comments)
+    return SyncResult(user, posts, comments, r_posts, r_comments)
+
+
+def _reddit_topup(session: Session, username: str) -> tuple[int, int]:
+    """Pull fresh posts/comments from Reddit's official API when credentials
+    are configured. A no-op (0, 0) otherwise — arctic-only behavior is
+    unchanged. Upserts share the archive, so re-runs stay idempotent."""
+    creds = config.reddit_credentials()
+    if creds is None:
+        return 0, 0
+    token = reddit.get_token(*creds)
+    posts = _stream(session, reddit.iter_submitted(token, username), Post.from_reddit)
+    comments = _stream(session, reddit.iter_comments(token, username), Comment.from_reddit)
+    return posts, comments
 
 
 def _stream(

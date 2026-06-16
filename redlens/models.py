@@ -71,6 +71,17 @@ class Post(SQLModel, table=True):
 
     @classmethod
     def from_arctic(cls, raw: dict[str, Any]) -> Post:
+        return cls._build(raw)
+
+    @classmethod
+    def from_reddit(cls, raw: dict[str, Any]) -> Post:
+        """A post from Reddit's official listing API. Same shape as arctic
+        (both are Reddit's schema), so the mapping is shared; ``int()`` copes
+        with Reddit's float ``created_utc``."""
+        return cls._build(raw)
+
+    @classmethod
+    def _build(cls, raw: dict[str, Any]) -> Post:
         return cls(
             post_id=raw["id"],
             author_username=raw["author"],
@@ -98,6 +109,16 @@ class Comment(SQLModel, table=True):
 
     @classmethod
     def from_arctic(cls, raw: dict[str, Any]) -> Comment:
+        return cls._build(raw)
+
+    @classmethod
+    def from_reddit(cls, raw: dict[str, Any]) -> Comment:
+        """A comment from Reddit's official listing API. The fields match
+        arctic's (Reddit's own schema), so the mapping is shared."""
+        return cls._build(raw)
+
+    @classmethod
+    def _build(cls, raw: dict[str, Any]) -> Comment:
         link_id = raw["link_id"]
         if link_id.startswith("t3_"):
             link_id = link_id[3:]

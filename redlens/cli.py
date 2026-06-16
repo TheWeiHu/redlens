@@ -267,8 +267,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"schema applied to {db}")
         elif args.verb == "sync":
             r = sync_user(args.username, engine)
-            print(f"u/{r.user.username}: "
-                  f"{r.posts_written:,} posts, {r.comments_written:,} comments")
+            line = (f"u/{r.user.username}: "
+                    f"{r.posts_written:,} posts, {r.comments_written:,} comments")
+            if r.reddit_posts or r.reddit_comments:
+                line += (f" (+{r.reddit_posts:,} posts, {r.reddit_comments:,} "
+                         f"comments fresh from Reddit)")
+            print(line)
         elif args.verb == "track":
             subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
                     if args.subreddits else None)
