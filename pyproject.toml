@@ -42,7 +42,7 @@ include = ["redlens*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-redlens = ["data/*.txt"]
+redlens = ["data/*.txt", "prompts/*.txt"]
 
 [tool.ruff]
 line-length = 100
@@ -62,6 +62,9 @@ disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The default run is offline: network-marked tests are deselected so `pytest`
+# never reaches out to arctic. Opt in explicitly with `pytest -m integration`.
+addopts = "-m 'not integration'"
 markers = [
-    "integration: hits the network — run with `pytest -m integration` or all with `pytest`",
+    "integration: hits the network (arctic) — skipped by default; run with `pytest -m integration`",
 ]

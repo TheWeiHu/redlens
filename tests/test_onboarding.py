@@ -10,7 +10,7 @@ from redlens import config, onboarding
 def isolate_config(monkeypatch, tmp_path):
     monkeypatch.delenv("REDLENS_DB", raising=False)
     for var in ("REDLENS_REDDIT_CLIENT_ID", "REDLENS_REDDIT_CLIENT_SECRET",
-                "REDLENS_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+                "REDLENS_LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("REDLENS_CONFIG", str(tmp_path / "config.toml"))
     # Most tests exercise the wizard as it will behave once keys are wired up.
@@ -49,7 +49,7 @@ def test_key_getters_prefer_env(monkeypatch):
 
     monkeypatch.setenv("REDLENS_REDDIT_CLIENT_ID", "env-id")
     monkeypatch.setenv("REDLENS_REDDIT_CLIENT_SECRET", "env-secret")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     assert config.reddit_credentials() == ("env-id", "env-secret")
     assert config.llm_api_key() == "env-key"
 

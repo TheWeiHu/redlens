@@ -43,7 +43,7 @@ def run_wizard() -> int:
         else:
             print("  no secret given — skipping the Reddit key")
 
-    print("\nLLM API key — AI profile summaries (Anthropic or OpenAI).")
+    print("\nLLM API key — AI profile summaries (OpenAI or any compatible API).")
     llm_key = getpass.getpass("  API key (Enter to skip): ").strip()
     if llm_key:
         updates["llm"] = {"api_key": llm_key}

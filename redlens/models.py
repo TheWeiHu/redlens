@@ -155,6 +155,40 @@ class TopicPost(SQLModel, table=True):
     post_id: str = Field(primary_key=True, index=True)
 
 
+class Guess(BaseModel):
+    """One ranked inference: a label, a 0-100 confidence, and the evidence."""
+    label: str
+    confidence: int = 0
+    reason: str = ""
+
+
+class Trait(BaseModel):
+    """A Big Five trait: a 0-100 strength score and the evidence."""
+    score: int = 0
+    reason: str = ""
+
+
+class Profile(BaseModel):
+    """An AI-inferred profile, generated on demand and not persisted.
+
+    The model returns this as structured JSON (not prose) so consumers — the
+    CLI, ``--json``, an HTML view — render it deterministically instead of
+    parsing freeform text. ``demographics`` maps a field (``gender``,
+    ``age_range``, ``country``, ``state``, ``city``) to ranked guesses;
+    ``big_five`` maps each OCEAN trait to its score. It's cheap to regenerate
+    and depends on the changing archive, so nothing is cached in the DB.
+    """
+
+    username: str
+    model: str   # which LLM produced it
+    depth: str   # sampling preset used
+    demographics: dict[str, list[Guess]] = {}
+    big_five: dict[str, Trait] = {}
+    interests: str = ""
+    beliefs: str = ""
+    tone: str = ""
+
+
 class UserAnalytics(BaseModel):
     username: str
     total_posts: int

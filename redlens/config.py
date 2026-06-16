@@ -21,11 +21,12 @@ everything works with no config at all. Recognized so far:
 
     [llm]                     # optional: AI profile summaries
     api_key = "..."
+    model = "..."             # default: gpt-4o-mini
+    base_url = "..."          # default: OpenAI; any OpenAI-compatible endpoint
 
 API keys can also come from the environment, which always wins over the
 file: ``REDLENS_REDDIT_CLIENT_ID`` / ``REDLENS_REDDIT_CLIENT_SECRET``
-and ``REDLENS_LLM_API_KEY`` (falling back to ``ANTHROPIC_API_KEY`` /
-``OPENAI_API_KEY``).
+and ``REDLENS_LLM_API_KEY`` (falling back to ``OPENAI_API_KEY``).
 """
 from __future__ import annotations
 
@@ -123,7 +124,7 @@ def reddit_credentials() -> tuple[str, str] | None:
 
 def llm_api_key() -> str | None:
     """API key for AI summaries, from env or the config file."""
-    for var in ("REDLENS_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    for var in ("REDLENS_LLM_API_KEY", "OPENAI_API_KEY"):
         if os.environ.get(var):
             return os.environ[var]
     key = load_config().get("llm", {}).get("api_key")

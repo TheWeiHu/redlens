@@ -1,3 +1,8 @@
+"""The `upsert` contract: it inserts new rows, refreshes existing ones in
+place, and returns the count of rows that were *newly* inserted — including
+for composite-key join tables. That net-new count is what lets sync/track
+report how much fresh data arrived, so it's the behavior worth pinning down.
+"""
 from sqlmodel import Session
 
 from redlens.db import connect, init_schema, upsert
