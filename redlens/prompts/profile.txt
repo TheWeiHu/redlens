@@ -7,9 +7,12 @@ $post_titles
 Representative comment snippets (top-voted and recent):
 $comment_snippets
 
-Infer a profile of this person, grounded only in the posts and comments above. Cover, in this order:
-- Likely gender and age range — give each as an inference with a confidence (low / medium / high) and the evidence behind it; say "unclear" when the signal is too thin.
-- Location/region — a ranked list of 3 to 6 specific guesses (country, or a region/city when the evidence supports it), most likely first. Format EACH guess exactly as `Place (NN%: brief reason)` — a percent and a one-line justification. The percents are independent confidences and need not sum to 100. Write `unclear` only if there is genuinely no geographic signal at all.
+Infer a profile of this person, grounded only in the posts and comments above.
+
+For gender, age range, and location, give ranked guesses, each formatted EXACTLY as `Label (NN%: brief reason)` — a percent confidence and a one-line justification — most likely first. For example: `Male (70%: ...)`, `25-35 (55%: ...)`, `United States (60%: ...)`. The percents are independent and need not sum to 100. Use this same format for all three; do not write "low/medium/high". Cover, in this order:
+- Gender — one or two labels.
+- Age range — one to three ranges.
+- Location/region — 3 to 6 places (country, or a region/city when the evidence supports it). Write `unclear (NN%: ...)` only if there is genuinely no geographic signal.
 - Big Five personality (openness, conscientiousness, extraversion, agreeableness, neuroticism) — rate each high / medium / low with a one-line reason drawn from their writing.
 - Their interests and expertise, and any notable beliefs or values.
 - Their tone and how they engage with others.
