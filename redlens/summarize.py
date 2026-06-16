@@ -1,9 +1,10 @@
 """AI profile summaries — the "intelligent lens" the project is named for.
 
 ``summarize_user`` builds a representative, token-budgeted payload from the
-locally archived data (the :class:`UserAnalytics` rollup + most-active
-subreddits + a sample of the user's posts and comments) and asks one LLM for a
-prose summary, cached in the ``summary`` table. The sample is **not** the most
+locally archived data (the user's most-active communities + a sample of their
+actual posts and comments — content, not raw counts/karma, which ``analytics``
+reports separately) and asks one LLM for a prose character profile, cached in
+the ``summary`` table. The sample is **not** the most
 recent items only: it blends top-by-score content (most upvoted = most
 defining, drawn from the whole history) with a slice of recent activity, so a
 prolific user's older, defining posts aren't invisible. How much is sampled is
@@ -20,7 +21,6 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from redlens import constants, llm
-from redlens.analytics import compute_user_analytics
 from redlens.config import llm_api_key
 from redlens.db import upsert
 from redlens.errors import MissingKey, NotFound, RedlensError
@@ -102,7 +102,8 @@ def _sample(session: Session, model: type[_Activity], pk_attr: str,
         .limit(n)
     ).all()
 
-    recent_quota = max(1, round(n * constants.SUMMARY_RECENT_FRACTION))
+    recent_quota = max(constants.SUMMARY_MIN_RECENT,
+                       round(n * constants.SUMMARY_RECENT_FRACTION))
     chosen: dict[str, _Activity] = {}
     for item in by_recency[:recent_quota]:        # reserve recency slots
         chosen[getattr(item, pk_attr)] = item
@@ -116,12 +117,16 @@ def _sample(session: Session, model: type[_Activity], pk_attr: str,
 
 
 def _build_prompt(session: Session, canon: str, depth: str) -> str:
-    """A representative, bounded description of the user for the model."""
-    posts_n, comments_n, comment_chars = constants.SUMMARY_DEPTHS[depth]
-    an = compute_user_analytics(session, canon)
+    """A representative, bounded description of the user for the model.
 
-    posts = _sample(session, Post, "post_id", canon, posts_n)
-    comments = _sample(session, Comment, "comment_id", canon, comments_n)
+    Deliberately content-first: the payload is the user's communities and a
+    sample of their actual posts/comments — not raw counts/karma/dates. Those
+    statistics are reported by ``analytics`` elsewhere, and feeding them here
+    just tempts the model to recite numbers instead of describing the person.
+    """
+    preset = constants.SUMMARY_DEPTHS[depth]
+    posts = _sample(session, Post, "post_id", canon, preset.posts)
+    comments = _sample(session, Comment, "comment_id", canon, preset.comments)
 
     subs = Counter(
         session.exec(
@@ -133,17 +138,15 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
             select(Comment.subreddit_name).where(Comment.author_username == canon)
         ).all()
     )
+    # Names only, ranked by activity — the order conveys where they're most at
+    # home without putting raw tallies in front of the model.
     top_subs = ", ".join(
-        f"r/{name} ({n})" for name, n in subs.most_common(constants.SUMMARY_TOP_SUBS)
+        f"r/{name}" for name, _ in subs.most_common(constants.SUMMARY_TOP_SUBS)
     ) or "—"
 
     lines = [
         f"Reddit user u/{canon}.",
-        f"Activity: {an.total_posts} posts, {an.total_comments} comments across "
-        f"{an.distinct_subreddits} subreddits; karma {an.total_karma:+} "
-        f"(posts {an.post_karma:+}, comments {an.comment_karma:+}); "
-        f"active on {an.active_days} distinct days.",
-        f"Most-active subreddits: {top_subs}.",
+        f"Communities they participate in most (most active first): {top_subs}.",
         "",
         "Representative post titles (top-voted and recent):",
     ]
@@ -151,14 +154,18 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
     lines.append("")
     lines.append("Representative comment snippets (top-voted and recent):")
     snippets = [
-        "- " + c.body.strip().replace("\n", " ")[:comment_chars]
+        "- " + c.body.strip().replace("\n", " ")[:preset.comment_chars]
         for c in comments if c.body and c.body.strip()
     ]
     lines += snippets or ["(none)"]
     lines += [
         "",
-        "Write a concise 2-3 paragraph summary of this user's interests, "
-        "communities, and posting style, grounded only in the data above. "
-        "Do not invent facts or speculate about real-world identity.",
+        "Write a profile of this person: who they are, what they care about, "
+        "their apparent expertise, opinions, and beliefs, and how they engage "
+        "with others (tone, recurring themes). Ground every claim in the posts "
+        "and comments above. Do NOT recite statistics — post or comment counts, "
+        "karma, dates, and subreddit tallies are reported elsewhere; write about "
+        "the person, not the numbers. Two or three short paragraphs. Do not "
+        "invent facts or speculate about their real-world identity.",
     ]
     return "\n".join(lines)
