@@ -28,9 +28,8 @@ import re
 import urllib.parse
 import urllib.request
 from collections import Counter
-from typing import Any
 
-from redlens import arctic, config, constants
+from redlens import arctic, config, constants, llm, prompts
 from redlens.constants import MAX_LLM_RESULTS, MAX_WEB_RESULTS
 from redlens.errors import RedlensError
 
@@ -95,58 +94,14 @@ def search_web(topic: str) -> list[str]:
     return [name for name, _ in found.most_common(MAX_WEB_RESULTS)]
 
 
-def _llm_complete(prompt: str, api_key: str) -> str:
-    """One small completion via raw HTTP — this package is stdlib-only by
-    design, so no provider SDKs. Anthropic or OpenAI, by key shape (or the
-    [llm] provider/model config overrides)."""
-    settings = config.load_config().get("llm", {})
-    provider = settings.get("provider") or (
-        "anthropic" if api_key.startswith("sk-ant") else "openai"
-    )
-    if provider == "anthropic":
-        url = constants.ANTHROPIC_URL
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-        body: dict[str, Any] = {
-            "model": settings.get("model") or constants.DEFAULT_ANTHROPIC_MODEL,
-            "max_tokens": constants.LLM_MAX_TOKENS,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    else:
-        url = constants.OPENAI_URL
-        headers = {"Authorization": f"Bearer {api_key}"}
-        body = {
-            "model": settings.get("model") or constants.DEFAULT_OPENAI_MODEL,
-            "max_tokens": constants.LLM_MAX_TOKENS,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={**headers, "Content-Type": "application/json"},
-        method="POST",
-    )
-    data = json.loads(_http(req))
-    if provider == "anthropic":
-        return "".join(
-            block.get("text", "") for block in data.get("content", [])
-            if block.get("type") == "text"
-        )
-    return str(data["choices"][0]["message"]["content"])
-
-
 def suggest_llm(topic: str) -> list[str]:
     """Subreddit names suggested by one cheap LLM call, or [] if no key
     is configured."""
     api_key = config.llm_api_key()
     if not api_key:
         return []
-    prompt = (
-        f"List up to {MAX_LLM_RESULTS} subreddits where {topic!r} is "
-        "actively discussed. Include both dedicated communities and broader "
-        "ones where it comes up often. Reply with one subreddit name per "
-        "line, no r/ prefix, no commentary. Only real subreddits."
-    )
-    text = _llm_complete(prompt, api_key)
+    prompt = prompts.render("subreddits", count=str(MAX_LLM_RESULTS), topic=topic)
+    text = llm.complete(prompt, api_key)
     names = []
     for line in text.splitlines():
         name = line.strip().lstrip("-* ").removeprefix("r/").strip()

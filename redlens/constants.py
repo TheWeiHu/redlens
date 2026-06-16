@@ -9,15 +9,18 @@ here so they're easy to find and adjust. Large, frequently-edited lists
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 # --- external endpoints -----------------------------------------------------
 ARCTIC_BASE = "https://arctic-shift.photon-reddit.com"
 PULLPUSH_URL = "https://api.pullpush.io/reddit/search/submission/"
 DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+# redlens speaks the OpenAI chat-completions wire format. That's a de-facto
+# standard many providers (and local servers) implement, so a single client
+# covers them all — point `[llm] base_url` at a compatible endpoint and set
+# `[llm] model` to use something other than the OpenAI default.
+LLM_API_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_LLM_MODEL = "gpt-4o-mini"
 
 # --- arctic HTTP client -----------------------------------------------------
 HTTP_TIMEOUT_S = 60
@@ -43,6 +46,57 @@ NON_AUTHORS = frozenset({"[deleted]", "automoderator", "automod"})
 ARCTIC_PAGE_LIMIT = 100          # max rows per full-text search request
 PULLPUSH_SIZE = 100              # rows per PullPush global search
 LLM_MAX_TOKENS = 300            # cap on the discovery LLM call
+
+# --- profile summary (BYO LLM key) ------------------------------------------
+# Output budget. The profile is a JSON object — ranked gender/age/country/
+# state/city guesses (each with a reason), five Big Five traits (each with a
+# reason), and three short paragraphs. ~1200 tokens covers that with headroom;
+# truncated JSON won't parse, so we err generous (still a fraction of a cent).
+SUMMARY_MAX_TOKENS = 1200
+# Communities are a qualitative fact about a user (where they choose to spend
+# time), so we name their most-active subreddits. Ten is enough to show the
+# shape of their participation — a primary home or two plus the long tail —
+# without padding the prompt with subreddits they barely touch.
+SUMMARY_TOP_SUBS = 10
+
+
+class DepthPreset(NamedTuple):
+    """How much of the archive a ``--depth`` level samples. Named fields so the
+    numbers below aren't opaque positional magic at the call site."""
+    posts: int          # post titles sampled
+    comments: int       # comment snippets sampled
+    comment_chars: int  # chars kept per comment snippet (longer = more nuance)
+
+
+# Why these sizes. The binding constraint is NOT cost — even `deep` is ~11K
+# input tokens for a heavy user, about $0.0016 on gpt-4o-mini ($0.15/1M in).
+# It's two things: (1) the provider context window — `deep` must fit the
+# *smallest* key a user might bring (gpt-4o-mini, 128K), and ~11K leaves en
+# ormous headroom; (2) diminishing returns — a model writes a sharper profile
+# from a tight, representative sample than from a giant dump it skims ("lost in
+# the middle"), and a smaller prompt is faster. So the levels trade breadth for
+# focus/latency, not for money:
+#   quick    — a fast, cheap sketch from a user's headline content.
+#   standard — the default; enough range to characterize most users well.
+#   deep      — for prolific users whose range only shows over hundreds of items.
+# comment_chars grows with depth because at higher depth we're spending the
+# budget on nuance, not just count (a 400-char snippet keeps an argument intact).
+SUMMARY_DEPTHS: dict[str, DepthPreset] = {
+    "quick":    DepthPreset(posts=15,  comments=20,  comment_chars=200),
+    "standard": DepthPreset(posts=40,  comments=60,  comment_chars=300),
+    "deep":     DepthPreset(posts=100, comments=200, comment_chars=400),
+}
+SUMMARY_DEFAULT_DEPTH = "standard"
+# The sample blends top-by-score (most upvoted = most defining, drawn from the
+# user's whole history) with the most-recent items, so a profile reflects both
+# who they've been and what they're into now. ~1/3 recent is the balance point:
+# enough to catch a current phase or shift in interests, not so much that the
+# recency bias we're fixing creeps back in (empirically, recency-only gave
+# ~113x less signal — see PR #18). The remaining ~2/3 goes to top-voted.
+SUMMARY_RECENT_FRACTION = 0.34
+# Always keep at least one recent item even when 1/3 of a small sample rounds
+# to zero, so even a tiny depth still reflects current activity.
+SUMMARY_MIN_RECENT = 1
 
 # --- LDA topic modeling -----------------------------------------------------
 LDA_TOPICS = 6                   # themes to find
