@@ -15,10 +15,12 @@ from typing import Any
 
 from redlens.config import config_path, save_config
 
-# The keys this wizard collects are not consumed anywhere yet — flip this on
-# when the Reddit provider and `summarize` land (v0.3). While False, the
-# first-run offer is silent and the `setup` subcommand is not registered.
-ENABLED = False
+# The LLM key is live today — `summarize` and the `llm` discovery source both
+# read it. The Reddit key is collected ahead of the forthcoming Reddit provider
+# (queue task 0001); it is stored but not consumed until that lands. Enabled now
+# that there's a real payoff. While False, the first-run offer is silent and the
+# `setup` subcommand is not registered.
+ENABLED = True
 
 FIRST_RUN_MARKER = (
     "# redlens configuration — see `redlens setup` to add or change\n"
