@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
+from sqlalchemy import select, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
@@ -72,24 +73,46 @@ def session(engine: Engine) -> Session:
 
 
 def upsert(session: Session, items: list[T]) -> int:
+    """Insert ``items``, refreshing any whose primary key already exists.
+
+    Returns the number of rows **newly inserted** — rows that already existed
+    are updated but not counted, so re-syncing unchanged data returns 0. This
+    is what lets callers report net-new (e.g. the Reddit top-up) and is the
+    foundation for incremental sync.
+    """
     if not items:
         return 0
     table = type(items[0]).__table__  # type: ignore[attr-defined]
-    pk_cols = {c.name for c in table.primary_key.columns}
+    pk_names = [c.name for c in table.primary_key.columns]
     rows = [item.model_dump() for item in items]
+    new_count = _count_new(session, table, pk_names, rows)
     stmt = sqlite_insert(table).values(rows)
     update_cols = {
         c.name: stmt.excluded[c.name]
         for c in table.columns
-        if c.name not in pk_cols
+        if c.name not in set(pk_names)
     }
     if update_cols:
         session.execute(stmt.on_conflict_do_update(
-            index_elements=list(pk_cols),
+            index_elements=pk_names,
             set_=update_cols,
         ))
     else:
         # Every column is part of the key (pure join tables like topicpost):
         # nothing to rewrite on conflict.
         session.execute(stmt.on_conflict_do_nothing())
-    return len(items)
+    return new_count
+
+
+def _count_new(session: Session, table: Any, pk_names: list[str],
+               rows: list[dict[str, Any]]) -> int:
+    """How many of ``rows`` have a primary key not already in ``table``."""
+    pk_cols = [table.c[name] for name in pk_names]
+    keys = [tuple(r[name] for name in pk_names) for r in rows]
+    if len(pk_cols) == 1:
+        col = pk_cols[0]
+        found = session.execute(select(col).where(col.in_([k[0] for k in keys])))
+    else:
+        found = session.execute(select(*pk_cols).where(tuple_(*pk_cols).in_(keys)))
+    present = {tuple(row) for row in found}
+    return sum(1 for k in keys if k not in present)
