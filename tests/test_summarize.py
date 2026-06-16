@@ -10,7 +10,7 @@ from sqlmodel import Session
 from redlens import llm
 from redlens.cli import main
 from redlens.db import connect, init_schema, upsert
-from redlens.errors import MissingKey, NotFound
+from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.models import Comment, Post, Summary, User
 from redlens.summarize import summarize_user
 
@@ -119,7 +119,70 @@ def test_cli_summarize_json_and_no_key(tmp_path, monkeypatch, capsys):
     assert main(["--db", str(db), "summarize", "alice", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out == {
-        "username": "Alice", "model": "claude-haiku-4-5",
+        "username": "Alice", "model": "claude-haiku-4-5", "depth": "standard",
         "text": "a tidy summary", "created_at": out["created_at"],
     }
     assert isinstance(out["created_at"], int)
+
+
+def test_sample_is_top_voted_not_recency_only(db_session, monkeypatch):
+    """A high-score *old* comment beats a wall of recent low-score ones — the
+    sample represents the whole history, not just the tail."""
+    upsert(db_session, [User(username="alice")])
+    # One defining, heavily-upvoted comment from long ago...
+    upsert(db_session, [
+        Comment(comment_id="old", author_username="alice", subreddit_name="python",
+                link_id="x", parent_id=None, created_utc=1_000, score=9999,
+                body="DEFINING TAKE on language design"),
+    ])
+    # ...buried under many recent, low-score ones.
+    upsert(db_session, [
+        Comment(comment_id=f"r{i}", author_username="alice", subreddit_name="python",
+                link_id="x", parent_id=None, created_utc=2_000 + i, score=1,
+                body=f"filler comment {i}")
+        for i in range(30)
+    ])
+    db_session.commit()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    seen = {}
+    monkeypatch.setattr(llm, "complete",
+                        lambda prompt, key, *, max_tokens: seen.update(p=prompt) or "ok")
+
+    # quick depth samples only ~20 comments — recency-only would drop the old one.
+    summarize_user(db_session, "alice", depth="quick")
+    assert "DEFINING TAKE on language design" in seen["p"]
+
+
+def test_depth_is_stored_and_changing_it_regenerates(db_session, monkeypatch):
+    _seed(db_session)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    calls = []
+    monkeypatch.setattr(llm, "complete",
+                        lambda prompt, key, *, max_tokens: calls.append(1) or f"s{len(calls)}")
+
+    first = summarize_user(db_session, "alice", depth="quick")
+    assert first.depth == "quick"
+    # Same depth (and bare re-run) hit the cache; a different depth regenerates.
+    summarize_user(db_session, "alice", depth="quick")
+    summarize_user(db_session, "alice")                       # no depth -> cached
+    assert len(calls) == 1
+    deep = summarize_user(db_session, "alice", depth="deep")
+    assert len(calls) == 2
+    assert deep.depth == "deep"
+    assert db_session.get(Summary, "Alice").depth == "deep"   # overwritten
+
+
+def test_refresh_keeps_prior_depth(db_session, monkeypatch):
+    _seed(db_session)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(llm, "complete",
+                        lambda prompt, key, *, max_tokens: "ok")
+    summarize_user(db_session, "alice", depth="deep")
+    refreshed = summarize_user(db_session, "alice", refresh=True)  # no depth given
+    assert refreshed.depth == "deep"
+
+
+def test_unknown_depth_raises(db_session):
+    _seed(db_session)
+    with pytest.raises(RedlensError):
+        summarize_user(db_session, "alice", depth="exhaustive")

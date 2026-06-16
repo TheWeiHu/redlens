@@ -10,6 +10,7 @@ from pathlib import Path
 from redlens import __version__, discovery, onboarding
 from redlens.analytics import compute_user_analytics
 from redlens.config import llm_api_key, resolve_db
+from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
@@ -209,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--json", action="store_true")
     sm.add_argument("--refresh", action="store_true",
                     help="regenerate even if a cached summary exists")
+    sm.add_argument("--depth", choices=tuple(SUMMARY_DEPTHS),
+                    help="how much of the archive to sample (top-voted + recent): "
+                    f"{', '.join(SUMMARY_DEPTHS)} (default: {SUMMARY_DEFAULT_DEPTH}); "
+                    "a different depth than the cached one regenerates")
     e = sub.add_parser("explore")
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
@@ -329,11 +334,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out} ({len(html_doc):,} bytes)")
         elif args.verb == "summarize":
             with session(engine) as s:
-                summ = summarize_user(s, args.username, refresh=args.refresh)
+                summ = summarize_user(s, args.username, refresh=args.refresh,
+                                      depth=args.depth)
             if args.json:
                 print(summ.model_dump_json(indent=2))
             else:
-                print(f"u/{summ.username} (via {summ.model}, {_ts(summ.created_at)}):\n")
+                print(f"u/{summ.username} (via {summ.model}, {summ.depth} depth, "
+                      f"{_ts(summ.created_at)}):\n")
                 print(summ.text)
         else:
             with session(engine) as s:

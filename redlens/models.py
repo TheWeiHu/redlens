@@ -161,10 +161,13 @@ class Summary(SQLModel, table=True):
     Keyed on ``username`` (one summary per account): re-running ``summarize``
     returns the stored row unless ``--refresh`` regenerates it, which
     overwrites this row in place (new ``model``/``created_at``/``text``).
+    ``depth`` records how much of the archive was sampled so a request for a
+    different depth regenerates rather than returning a thinner cached row.
     """
 
     username: str = Field(primary_key=True)
     model: str                                   # which LLM produced it
+    depth: str = "standard"                      # sampling preset used
     text: str
     created_at: int = Field(default_factory=_now)
 
