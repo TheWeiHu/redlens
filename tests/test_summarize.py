@@ -7,11 +7,13 @@ network call (`llm.complete`) and check the parts redlens actually controls:
   - the payload we hand the model is built from a *representative* sample of
     the archive — top-voted content across the user's whole history, not just
     their newest rows — and describes the person, not raw counts/karma;
+  - the model's JSON is parsed into a structured Profile (and bad JSON fails
+    cleanly);
   - an unknown --depth is rejected.
 
 Each test drives the real `summarize_user` / CLI against a seeded SQLite DB,
-so it exercises the user lookup, sampling, and prompt assembly together rather
-than mocking them apart.
+so it exercises the user lookup, sampling, JSON parsing, and prompt assembly
+together rather than mocking them apart.
 """
 import json
 
@@ -66,28 +68,52 @@ def test_no_key_exits_2_with_setup_hint(db, capsys):
     assert "redlens setup" in capsys.readouterr().err
 
 
-def test_payload_is_representative_and_about_the_person(db, monkeypatch, capsys):
+_STUB_JSON = """```json
+{
+  "demographics": {
+    "gender": [{"label": "Female", "confidence": 55, "reason": "tone"}],
+    "country": [{"label": "Canada", "confidence": 60, "reason": "spelling"}]
+  },
+  "big_five": {"openness": {"score": 88, "reason": "varied interests"}},
+  "interests": "python and rust",
+  "beliefs": "open source",
+  "tone": "friendly"
+}
+```"""
+
+
+def test_representative_payload_and_structured_profile(db, monkeypatch, capsys):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     captured = {}
 
     def fake_complete(prompt, key, *, max_tokens):
         captured["prompt"] = prompt
-        return "  a profile of the person  "
+        return _STUB_JSON                       # fenced JSON, as a model might return
 
     monkeypatch.setattr(llm, "complete", fake_complete)
 
     assert main(["--db", str(db), "summarize", "alice", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out == {"username": "Alice", "model": "gpt-4o-mini",
-                   "depth": "standard", "text": "a profile of the person"}
+    # JSON (even fenced) parsed into the structured Profile; we set the metadata.
+    assert out["username"] == "Alice" and out["model"] == "gpt-4o-mini"
+    assert out["demographics"]["country"][0] == {
+        "label": "Canada", "confidence": 60, "reason": "spelling"}
+    assert out["big_five"]["openness"]["score"] == 88
 
-    prompt = captured["prompt"]
     # The data we feed sits before the instruction block; check that half.
-    data = prompt.split("Infer a profile", 1)[0]
-    assert "r/python" in data                          # communities, by name
-    assert "how I learned async" in data               # real content sampled
-    assert "DEFINING TAKE on language design" in data  # top-voted, not recency
+    data = captured["prompt"].split("Infer a profile", 1)[0]
+    assert "r/python" in data                           # communities, by name
+    assert "how I learned async" in data                # real content sampled
+    assert "DEFINING TAKE on language design" in data   # top-voted, not recency
     assert "karma" not in data and "posts," not in data  # no raw stats fed in
+
+
+def test_bad_json_fails_cleanly(db, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: "sorry, I can't do that")
+    from redlens.summarize import summarize_user
+    with Session(connect(str(db))) as s, pytest.raises(RedlensError):
+        summarize_user(s, "alice")
 
 
 def test_unknown_depth_is_rejected(db, monkeypatch):
