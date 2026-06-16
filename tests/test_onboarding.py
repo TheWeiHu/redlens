@@ -10,7 +10,7 @@ from redlens import config, onboarding
 def isolate_config(monkeypatch, tmp_path):
     monkeypatch.delenv("REDLENS_DB", raising=False)
     for var in ("REDLENS_REDDIT_CLIENT_ID", "REDLENS_REDDIT_CLIENT_SECRET",
-                "REDLENS_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+                "REDLENS_LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("REDLENS_CONFIG", str(tmp_path / "config.toml"))
     # Most tests exercise the wizard as it will behave once keys are wired up.

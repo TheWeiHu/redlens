@@ -128,7 +128,7 @@ def _choose_sources(*, assume_yes: bool) -> list[str]:
         chosen = [SOURCES[int(tok) - 1][0] for tok in line.split()
                   if tok.isdigit() and 1 <= int(tok) <= len(SOURCES)]
     if "llm" in chosen and not llm_ready:
-        print("  skipping llm: set ANTHROPIC_API_KEY/OPENAI_API_KEY or "
+        print("  skipping llm: set OPENAI_API_KEY/REDLENS_LLM_API_KEY or "
               "[llm] api_key in config.toml", file=sys.stderr)
         chosen.remove("llm")
     return chosen
