@@ -1,15 +1,20 @@
 """AI profile summaries — the "intelligent lens" the project is named for.
 
-``summarize_user`` builds a compact, token-budgeted payload from the locally
-archived data (the :class:`UserAnalytics` rollup + most-active subreddits + a
-bounded sample of recent post titles and comment snippets), asks one LLM for a
-prose summary, and caches it in the ``summary`` table. Re-running returns the
-cached row unless ``refresh`` regenerates it. The whole archive is never
-shipped to the model — only the bounded sample below.
+``summarize_user`` builds a representative, token-budgeted payload from the
+locally archived data (the :class:`UserAnalytics` rollup + most-active
+subreddits + a sample of the user's posts and comments) and asks one LLM for a
+prose summary, cached in the ``summary`` table. The sample is **not** the most
+recent items only: it blends top-by-score content (most upvoted = most
+defining, drawn from the whole history) with a slice of recent activity, so a
+prolific user's older, defining posts aren't invisible. How much is sampled is
+the ``depth`` knob (``quick``/``standard``/``deep`` — see
+:data:`redlens.constants.SUMMARY_DEPTHS`); even ``deep`` stays well under the
+smallest provider context window, and the whole archive is never shipped raw.
 """
 from __future__ import annotations
 
 from collections import Counter
+from typing import TypeVar
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -18,17 +23,30 @@ from redlens import constants, llm
 from redlens.analytics import compute_user_analytics
 from redlens.config import llm_api_key
 from redlens.db import upsert
-from redlens.errors import MissingKey, NotFound
+from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.models import Comment, Post, Summary, User
 
+_Activity = TypeVar("_Activity", Post, Comment)
 
-def summarize_user(session: Session, username: str, *,
-                   refresh: bool = False) -> Summary:
+
+def summarize_user(session: Session, username: str, *, refresh: bool = False,
+                   depth: str | None = None) -> Summary:
     """Return a cached or freshly generated profile summary for ``username``.
 
-    Raises :class:`NotFound` if the user isn't synced and :class:`MissingKey`
-    if a summary must be generated but no LLM key is configured.
+    ``depth`` picks a :data:`~redlens.constants.SUMMARY_DEPTHS` preset. When it
+    is ``None`` the cached row is returned as-is (any depth); an explicit depth
+    that differs from the cached row regenerates at that depth. ``refresh``
+    forces regeneration, keeping the prior depth unless one is given.
+
+    Raises :class:`NotFound` if the user isn't synced, :class:`RedlensError`
+    for an unknown depth, and :class:`MissingKey` if a summary must be
+    generated but no LLM key is configured.
     """
+    if depth is not None and depth not in constants.SUMMARY_DEPTHS:
+        raise RedlensError(
+            f"unknown depth {depth!r} "
+            f"(choose from {', '.join(constants.SUMMARY_DEPTHS)})")
+
     user = session.exec(
         select(User).where(func.lower(User.username) == username.lower())
     ).first()
@@ -36,10 +54,13 @@ def summarize_user(session: Session, username: str, *,
         raise NotFound(f"u/{username} not in DB — sync first")
     canon = user.username
 
-    if not refresh:
-        cached = session.get(Summary, canon)
-        if cached is not None:
-            return cached
+    cached = session.get(Summary, canon)
+    if cached is not None and not refresh and (depth is None or depth == cached.depth):
+        return cached
+
+    # No explicit depth: on refresh keep what was used before, else default.
+    resolved_depth = depth or (cached.depth if cached else None) \
+        or constants.SUMMARY_DEFAULT_DEPTH
 
     key = llm_api_key()
     if not key:
@@ -48,32 +69,59 @@ def summarize_user(session: Session, username: str, *,
             "ANTHROPIC_API_KEY / OPENAI_API_KEY / REDLENS_LLM_API_KEY"
         )
 
-    prompt = _build_prompt(session, canon)
+    prompt = _build_prompt(session, canon, resolved_depth)
     _, model = llm.provider_and_model(key)
     text = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS).strip()
 
-    summary = Summary(username=canon, model=model, text=text)
-    upsert(session, [summary])  # overwrites the prior row on --refresh
+    summary = Summary(username=canon, model=model, depth=resolved_depth, text=text)
+    upsert(session, [summary])  # overwrites the prior row in place
     session.commit()
     return summary
 
 
-def _build_prompt(session: Session, canon: str) -> str:
-    """A compact, bounded description of the user for the model to summarize."""
+def _sample(session: Session, model: type[_Activity], pk_attr: str,
+            canon: str, n: int) -> list[_Activity]:
+    """A representative ``n``-item sample of ``model`` rows for ``canon``.
+
+    Reserves a recent slice (``SUMMARY_RECENT_FRACTION``) then fills the rest
+    top-by-score, deduped — so the result spans the user's whole history
+    (their most-upvoted content) while still reflecting recent activity. Two
+    bounded ``LIMIT n`` queries, so it never loads the full archive.
+    """
+    if n <= 0:
+        return []
+    author = model.author_username
+    by_score = session.exec(
+        select(model).where(author == canon)
+        .order_by(model.score.desc())  # type: ignore[attr-defined]
+        .limit(n)
+    ).all()
+    by_recency = session.exec(
+        select(model).where(author == canon)
+        .order_by(model.created_utc.desc())  # type: ignore[attr-defined]
+        .limit(n)
+    ).all()
+
+    recent_quota = max(1, round(n * constants.SUMMARY_RECENT_FRACTION))
+    chosen: dict[str, _Activity] = {}
+    for item in by_recency[:recent_quota]:        # reserve recency slots
+        chosen[getattr(item, pk_attr)] = item
+    for pool in (by_score, by_recency):           # fill from top-score, then rest
+        for item in pool:
+            if len(chosen) >= n:
+                break
+            chosen.setdefault(getattr(item, pk_attr), item)
+    # Newest-first for a readable payload.
+    return sorted(chosen.values(), key=lambda x: x.created_utc, reverse=True)
+
+
+def _build_prompt(session: Session, canon: str, depth: str) -> str:
+    """A representative, bounded description of the user for the model."""
+    posts_n, comments_n, comment_chars = constants.SUMMARY_DEPTHS[depth]
     an = compute_user_analytics(session, canon)
 
-    posts = session.exec(
-        select(Post)
-        .where(Post.author_username == canon)
-        .order_by(Post.created_utc.desc())  # type: ignore[attr-defined]
-        .limit(constants.SUMMARY_POST_SAMPLE)
-    ).all()
-    comments = session.exec(
-        select(Comment)
-        .where(Comment.author_username == canon)
-        .order_by(Comment.created_utc.desc())  # type: ignore[attr-defined]
-        .limit(constants.SUMMARY_COMMENT_SAMPLE)
-    ).all()
+    posts = _sample(session, Post, "post_id", canon, posts_n)
+    comments = _sample(session, Comment, "comment_id", canon, comments_n)
 
     subs = Counter(
         session.exec(
@@ -97,13 +145,13 @@ def _build_prompt(session: Session, canon: str) -> str:
         f"active on {an.active_days} distinct days.",
         f"Most-active subreddits: {top_subs}.",
         "",
-        "Recent post titles:",
+        "Representative post titles (top-voted and recent):",
     ]
     lines += [f"- {p.title}" for p in posts if p.title] or ["(none)"]
     lines.append("")
-    lines.append("Recent comment snippets:")
+    lines.append("Representative comment snippets (top-voted and recent):")
     snippets = [
-        "- " + c.body.strip().replace("\n", " ")[:constants.SUMMARY_COMMENT_CHARS]
+        "- " + c.body.strip().replace("\n", " ")[:comment_chars]
         for c in comments if c.body and c.body.strip()
     ]
     lines += snippets or ["(none)"]

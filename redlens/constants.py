@@ -46,10 +46,23 @@ LLM_MAX_TOKENS = 300            # cap on the discovery LLM call
 
 # --- profile summary (BYO LLM key) ------------------------------------------
 SUMMARY_MAX_TOKENS = 700         # cap on the summarize completion
-SUMMARY_POST_SAMPLE = 25         # most-recent post titles fed to the model
-SUMMARY_COMMENT_SAMPLE = 25      # most-recent comment snippets fed to the model
-SUMMARY_COMMENT_CHARS = 240      # each comment snippet truncated to this many chars
 SUMMARY_TOP_SUBS = 10            # most-active subreddits named in the payload
+# How much of the archive to feed the model, per --depth preset:
+# (post titles, comment snippets, chars per comment). Sized so even `deep`
+# stays far under the smallest provider context window (gpt-4o-mini, 128K):
+# ~200 comments x 400 chars ~= 20K input tokens. Cost is trivial at these
+# sizes (gpt-4o-mini is $0.15/1M in), so the cap is about quality + window,
+# not money.
+SUMMARY_DEPTHS: dict[str, tuple[int, int, int]] = {
+    "quick":    (15, 20, 200),
+    "standard": (40, 60, 300),
+    "deep":     (100, 200, 400),
+}
+SUMMARY_DEFAULT_DEPTH = "standard"
+# Share of each sample reserved for the most-recent items; the rest is filled
+# top-by-score, so the payload is representative of the whole history (most
+# upvoted = most defining) rather than just the latest activity.
+SUMMARY_RECENT_FRACTION = 0.34
 
 # --- LDA topic modeling -----------------------------------------------------
 LDA_TOPICS = 6                   # themes to find
