@@ -3,8 +3,10 @@
 ``summarize_user`` builds a representative, token-budgeted payload from the
 locally archived data (the user's most-active communities + a sample of their
 actual posts and comments — content, not raw counts/karma, which ``analytics``
-reports separately) and asks one LLM for a prose character profile, cached in
-the ``summary`` table. The sample is **not** the most
+reports separately) and asks one LLM to infer a profile — likely
+gender/age/location (with confidence), Big Five personality, interests and
+beliefs, tone — cached in the ``summary`` table. Inferences are evidence-based
+guesses over public posts, not certainties. The sample is **not** the most
 recent items only: it blends top-by-score content (most upvoted = most
 defining, drawn from the whole history) with a slice of recent activity, so a
 prolific user's older, defining posts aren't invisible. How much is sampled is
@@ -160,12 +162,20 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
     lines += snippets or ["(none)"]
     lines += [
         "",
-        "Write a profile of this person: who they are, what they care about, "
-        "their apparent expertise, opinions, and beliefs, and how they engage "
-        "with others (tone, recurring themes). Ground every claim in the posts "
-        "and comments above. Do NOT recite statistics — post or comment counts, "
-        "karma, dates, and subreddit tallies are reported elsewhere; write about "
-        "the person, not the numbers. Two or three short paragraphs. Do not "
-        "invent facts or speculate about their real-world identity.",
+        "Infer a profile of this person, grounded only in the posts and "
+        "comments above. Cover, in this order:",
+        "- Likely gender, age range, and location/region — give each as an "
+        "inference with a confidence (low / medium / high) and the evidence "
+        'behind it; say "unclear" when the signal is too thin.',
+        "- Big Five personality (openness, conscientiousness, extraversion, "
+        "agreeableness, neuroticism) — rate each high / medium / low with a "
+        "one-line reason drawn from their writing.",
+        "- Their interests and expertise, and any notable beliefs or values.",
+        "- Their tone and how they engage with others.",
+        "Treat the demographic and personality read as evidence-based "
+        "inferences, not certainties, and flag uncertainty honestly rather "
+        "than inventing detail. Do not recite raw statistics (post or comment "
+        "counts, karma, dates) — those are reported elsewhere; describe the "
+        "person.",
     ]
     return "\n".join(lines)

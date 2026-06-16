@@ -46,9 +46,11 @@ PULLPUSH_SIZE = 100              # rows per PullPush global search
 LLM_MAX_TOKENS = 300            # cap on the discovery LLM call
 
 # --- profile summary (BYO LLM key) ------------------------------------------
-# Output budget: ~700 tokens is two or three tight paragraphs — enough for a
-# qualitative character sketch, short enough to stay cheap and skimmable.
-SUMMARY_MAX_TOKENS = 700
+# Output budget. The profile is structured — inferred gender/age/location each
+# with confidence, the five Big Five traits each rated with a reason, then
+# interests/beliefs and tone — so it needs more room than a plain paragraph.
+# ~900 tokens covers that comfortably while staying cheap and skimmable.
+SUMMARY_MAX_TOKENS = 900
 # Communities are a qualitative fact about a user (where they choose to spend
 # time), so we name their most-active subreddits. Ten is enough to show the
 # shape of their participation — a primary home or two plus the long tail —
