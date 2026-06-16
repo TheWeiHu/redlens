@@ -38,19 +38,21 @@ several discovery sources you pick from, plus a curating picker. Run
 No setup needed — the schema is created (and migrated) automatically on
 first use. No API keys are needed — arctic-shift is a free, open mirror.
 
-## Optional API keys
+## Optional API key
 
-Two keys unlock more. The first interactive run offers to collect them once,
-or run the wizard anytime with `redlens setup`:
+An optional **LLM API key** (OpenAI or any OpenAI-compatible endpoint) powers
+`redlens summarize` and the `llm` discovery source in `track`. The first
+interactive run offers to collect it once, or run the wizard anytime with
+`redlens setup`. It's stored (mode 600) in your per-user config dir
+(`REDLENS_CONFIG` to override; env vars override the file) — see
+[DESIGN.md](DESIGN.md).
 
-- **LLM API key** (OpenAI or any OpenAI-compatible endpoint) — powers
-  `redlens summarize` and the `llm` discovery source in `track`.
-- **Reddit API key** — fresh-data top-ups via Reddit's official API
-  (collected now; used once the Reddit provider lands).
-
-Keys are stored (mode 600) in your per-user config dir (`redlens setup` writes
-it; `REDLENS_CONFIG` to override); environment variables override the file. See
-[DESIGN.md](DESIGN.md) for the variable names.
+> **No Reddit official-API integration.** As of late 2025 Reddit gates its API
+> behind a pre-approval process and no longer hands out keys on request, so
+> redlens doesn't integrate it — the keyless arctic-shift mirror is the data
+> source. If you already hold Reddit API credentials and want fresh-from-Reddit
+> sync, [open an issue](https://github.com/TheWeiHu/redlens/issues) and we'll
+> build the provider around your key.
 
 ## Data
 

@@ -70,15 +70,19 @@ one round by following authors of matching posts.
 ## Configuration
 
 DB path resolves with this precedence: `--db` flag → `REDLENS_DB` env →
-`[storage] db` in `config.toml` → the per-user data directory. Optional API
-keys (LLM for summaries/`llm` discovery; Reddit for future fresh-data sync)
-live in `config.toml` (mode 600) or environment variables, which always win
-over the file. Everything works with no config at all.
+`[storage] db` in `config.toml` → the per-user data directory. An optional LLM
+key (for summaries and the `llm` discovery source) lives in `config.toml`
+(mode 600) or the environment, which always wins over the file. Everything
+works with no config at all.
 
-The file uses `[storage] db`, `[llm] api_key`, and `[reddit] client_id` /
-`client_secret`. The matching env vars are `REDLENS_DB`, `REDLENS_LLM_API_KEY`
-(falling back to `OPENAI_API_KEY`), `REDLENS_REDDIT_CLIENT_ID`, and
-`REDLENS_REDDIT_CLIENT_SECRET`.
+The file uses `[storage] db` and `[llm] api_key`; the matching env vars are
+`REDLENS_DB` and `REDLENS_LLM_API_KEY` (falling back to `OPENAI_API_KEY`).
+
+**Fresh data / Reddit's official API.** Not integrated: as of late 2025 Reddit
+gates its API behind pre-approval and no longer issues keys on request, so the
+keyless arctic-shift mirror is the only data source (it lags live Reddit by
+weeks). A BYO-key fresh-data provider could be built if a user supplies working
+Reddit credentials.
 
 ## Development
 
