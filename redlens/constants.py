@@ -15,10 +15,12 @@ from typing import NamedTuple
 ARCTIC_BASE = "https://arctic-shift.photon-reddit.com"
 PULLPUSH_URL = "https://api.pullpush.io/reddit/search/submission/"
 DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+# redlens speaks the OpenAI chat-completions wire format. That's a de-facto
+# standard many providers (and local servers) implement, so a single client
+# covers them all — point `[llm] base_url` at a compatible endpoint and set
+# `[llm] model` to use something other than the OpenAI default.
+LLM_API_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_LLM_MODEL = "gpt-4o-mini"
 
 # --- arctic HTTP client -----------------------------------------------------
 HTTP_TIMEOUT_S = 60

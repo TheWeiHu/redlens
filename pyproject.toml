@@ -42,7 +42,7 @@ include = ["redlens*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-redlens = ["data/*.txt"]
+redlens = ["data/*.txt", "prompts/*.txt"]
 
 [tool.ruff]
 line-length = 100

@@ -1,18 +1,18 @@
-"""AI profile summaries — the "intelligent lens" the project is named for.
+"""AI profile inference — the "intelligent lens" the project is named for.
 
 ``summarize_user`` builds a representative, token-budgeted payload from the
 locally archived data (the user's most-active communities + a sample of their
-actual posts and comments — content, not raw counts/karma, which ``analytics``
-reports separately) and asks one LLM to infer a profile — likely
-gender/age/location (with confidence), Big Five personality, interests and
-beliefs, tone — cached in the ``summary`` table. Inferences are evidence-based
-guesses over public posts, not certainties. The sample is **not** the most
-recent items only: it blends top-by-score content (most upvoted = most
-defining, drawn from the whole history) with a slice of recent activity, so a
-prolific user's older, defining posts aren't invisible. How much is sampled is
-the ``depth`` knob (``quick``/``standard``/``deep`` — see
-:data:`redlens.constants.SUMMARY_DEPTHS`); even ``deep`` stays well under the
-smallest provider context window, and the whole archive is never shipped raw.
+actual posts and comments — content, not raw counts/karma) and asks one LLM to
+infer a profile: likely gender/age/location (with confidence), Big Five
+personality, interests, beliefs, and tone. The result is generated on demand
+and returned for printing — nothing is persisted (summaries are cheap and
+depend on the changing archive, so there's nothing worth caching).
+
+The sample is **not** the most recent items only: it blends top-by-score
+content (most upvoted = most defining, drawn from the whole history) with a
+slice of recent activity. How much is sampled is the ``depth`` knob — see
+:data:`redlens.constants.SUMMARY_DEPTHS`. The prompt wording lives in
+``redlens/prompts/profile.txt``.
 """
 from __future__ import annotations
 
@@ -22,32 +22,28 @@ from typing import TypeVar
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from redlens import constants, llm
+from redlens import constants, llm, prompts
 from redlens.config import llm_api_key
-from redlens.db import upsert
 from redlens.errors import MissingKey, NotFound, RedlensError
-from redlens.models import Comment, Post, Summary, User
+from redlens.models import Comment, Post, Profile, User
 
 _Activity = TypeVar("_Activity", Post, Comment)
 
 
-def summarize_user(session: Session, username: str, *, refresh: bool = False,
-                   depth: str | None = None) -> Summary:
-    """Return a cached or freshly generated profile summary for ``username``.
+def summarize_user(session: Session, username: str, *,
+                   depth: str | None = None) -> Profile:
+    """Infer a profile for ``username`` from their archived activity.
 
-    ``depth`` picks a :data:`~redlens.constants.SUMMARY_DEPTHS` preset. When it
-    is ``None`` the cached row is returned as-is (any depth); an explicit depth
-    that differs from the cached row regenerates at that depth. ``refresh``
-    forces regeneration, keeping the prior depth unless one is given.
-
-    Raises :class:`NotFound` if the user isn't synced, :class:`RedlensError`
-    for an unknown depth, and :class:`MissingKey` if a summary must be
-    generated but no LLM key is configured.
+    ``depth`` picks a :data:`~redlens.constants.SUMMARY_DEPTHS` preset
+    (default ``standard``). Raises :class:`NotFound` if the user isn't synced,
+    :class:`RedlensError` for an unknown depth, and :class:`MissingKey` if no
+    LLM key is configured.
     """
     if depth is not None and depth not in constants.SUMMARY_DEPTHS:
         raise RedlensError(
             f"unknown depth {depth!r} "
             f"(choose from {', '.join(constants.SUMMARY_DEPTHS)})")
+    resolved_depth = depth or constants.SUMMARY_DEFAULT_DEPTH
 
     user = session.exec(
         select(User).where(func.lower(User.username) == username.lower())
@@ -56,29 +52,17 @@ def summarize_user(session: Session, username: str, *, refresh: bool = False,
         raise NotFound(f"u/{username} not in DB — sync first")
     canon = user.username
 
-    cached = session.get(Summary, canon)
-    if cached is not None and not refresh and (depth is None or depth == cached.depth):
-        return cached
-
-    # No explicit depth: on refresh keep what was used before, else default.
-    resolved_depth = depth or (cached.depth if cached else None) \
-        or constants.SUMMARY_DEFAULT_DEPTH
-
     key = llm_api_key()
     if not key:
         raise MissingKey(
             "no LLM API key — run `redlens setup` or set "
-            "ANTHROPIC_API_KEY / OPENAI_API_KEY / REDLENS_LLM_API_KEY"
+            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
         )
 
     prompt = _build_prompt(session, canon, resolved_depth)
-    _, model = llm.provider_and_model(key)
     text = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS).strip()
-
-    summary = Summary(username=canon, model=model, depth=resolved_depth, text=text)
-    upsert(session, [summary])  # overwrites the prior row in place
-    session.commit()
-    return summary
+    return Profile(username=canon, model=llm.model_name(), depth=resolved_depth,
+                   text=text)
 
 
 def _sample(session: Session, model: type[_Activity], pk_attr: str,
@@ -119,18 +103,15 @@ def _sample(session: Session, model: type[_Activity], pk_attr: str,
 
 
 def _build_prompt(session: Session, canon: str, depth: str) -> str:
-    """A representative, bounded description of the user for the model.
-
-    Deliberately content-first: the payload is the user's communities and a
-    sample of their actual posts/comments — not raw counts/karma/dates. Those
-    statistics are reported by ``analytics`` elsewhere, and feeding them here
-    just tempts the model to recite numbers instead of describing the person.
-    """
+    """Fill ``prompts/profile.txt`` with this user's communities and a
+    representative sample of their posts/comments. Deliberately content-first:
+    no raw counts/karma/dates (``analytics`` reports those, and feeding them
+    here just tempts the model to recite numbers instead of inferring)."""
     preset = constants.SUMMARY_DEPTHS[depth]
     posts = _sample(session, Post, "post_id", canon, preset.posts)
     comments = _sample(session, Comment, "comment_id", canon, preset.comments)
 
-    subs = Counter(
+    subs: Counter[str] = Counter(
         session.exec(
             select(Post.subreddit_name).where(Post.author_username == canon)
         ).all()
@@ -142,46 +123,20 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
     )
     # Names only, ranked by activity — the order conveys where they're most at
     # home without putting raw tallies in front of the model.
-    top_subs = ", ".join(
+    communities = ", ".join(
         f"r/{name}" for name, _ in subs.most_common(constants.SUMMARY_TOP_SUBS)
     ) or "—"
 
-    lines = [
-        f"Reddit user u/{canon}.",
-        f"Communities they participate in most (most active first): {top_subs}.",
-        "",
-        "Representative post titles (top-voted and recent):",
-    ]
-    lines += [f"- {p.title}" for p in posts if p.title] or ["(none)"]
-    lines.append("")
-    lines.append("Representative comment snippets (top-voted and recent):")
-    snippets = [
+    titles = "\n".join(f"- {p.title}" for p in posts if p.title) or "(none)"
+    snippets = "\n".join(
         "- " + c.body.strip().replace("\n", " ")[:preset.comment_chars]
         for c in comments if c.body and c.body.strip()
-    ]
-    lines += snippets or ["(none)"]
-    lines += [
-        "",
-        "Infer a profile of this person, grounded only in the posts and "
-        "comments above. Cover, in this order:",
-        "- Likely gender and age range — give each as an inference with a "
-        'confidence (low / medium / high) and the evidence behind it; say '
-        '"unclear" when the signal is too thin.',
-        "- Location/region — a ranked list of 3 to 6 specific guesses (country, "
-        "or a region/city when the evidence supports it), most likely first. "
-        "Format EACH guess exactly as `Place (NN%: brief reason)` — a percent "
-        "and a one-line justification. The percents are independent confidences "
-        "and need not sum to 100. Write `unclear` only if there is genuinely no "
-        "geographic signal at all.",
-        "- Big Five personality (openness, conscientiousness, extraversion, "
-        "agreeableness, neuroticism) — rate each high / medium / low with a "
-        "one-line reason drawn from their writing.",
-        "- Their interests and expertise, and any notable beliefs or values.",
-        "- Their tone and how they engage with others.",
-        "Treat the demographic and personality read as evidence-based "
-        "inferences, not certainties, and flag uncertainty honestly rather "
-        "than inventing detail. Do not recite raw statistics (post or comment "
-        "counts, karma, dates) — those are reported elsewhere; describe the "
-        "person.",
-    ]
-    return "\n".join(lines)
+    ) or "(none)"
+
+    return prompts.render(
+        "profile",
+        username=canon,
+        communities=communities,
+        post_titles=titles,
+        comment_snippets=snippets,
+    )

@@ -49,7 +49,7 @@ def test_key_getters_prefer_env(monkeypatch):
 
     monkeypatch.setenv("REDLENS_REDDIT_CLIENT_ID", "env-id")
     monkeypatch.setenv("REDLENS_REDDIT_CLIENT_SECRET", "env-secret")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     assert config.reddit_credentials() == ("env-id", "env-secret")
     assert config.llm_api_key() == "env-key"
 
