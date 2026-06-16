@@ -9,11 +9,14 @@ $comment_snippets
 
 Infer a profile of this person, grounded only in the posts and comments above.
 
-For gender, age range, and location, give ranked guesses, each formatted EXACTLY as `Label (NN%: brief reason)` — a percent confidence and a one-line justification — most likely first. For example: `Male (70%: ...)`, `25-35 (55%: ...)`, `United States (60%: ...)`. The percents are independent and need not sum to 100. Use this same format for all three; do not write "low/medium/high". Cover, in this order:
-- Gender — one or two labels.
-- Age range — one to three ranges.
-- Location/region — 3 to 6 places (country, or a region/city when the evidence supports it). Write `unclear (NN%: ...)` only if there is genuinely no geographic signal.
-- Big Five personality (openness, conscientiousness, extraversion, agreeableness, neuroticism) — rate each high / medium / low with a one-line reason drawn from their writing.
+Give every read below as one or more guesses formatted EXACTLY as `Label (NN%: brief reason)` — a percent and a one-line justification. Do not write "low / medium / high". Cover, in this order, using a separate labelled line for each:
+- Gender — one or two labels, the percent being your confidence (e.g. `Male (70%: ...)`).
+- Age range — one to three ranges, most likely first, percent = confidence (e.g. `25-35 (55%: ...)`).
+- Country — one to three guesses, most likely first, percent = confidence.
+- State / region — one to three guesses, percent = confidence; `unclear (NN%: ...)` if there's no signal.
+- City — one to three guesses, percent = confidence; `unclear (NN%: ...)` if there's no signal.
+  (Keep country, state, and city as separate lines — do not mix granularities in one list, since their percents aren't comparable.)
+- Big Five personality — one guess per trait on its own line, the percent being how strongly they exhibit it (0 = not at all, 100 = very strongly): `Openness (NN%: reason)`, `Conscientiousness (NN%: reason)`, `Extraversion (NN%: reason)`, `Agreeableness (NN%: reason)`, `Neuroticism (NN%: reason)`.
 - Their interests and expertise, and any notable beliefs or values.
 - Their tone and how they engage with others.
 Treat the demographic and personality read as evidence-based inferences, not certainties, and flag uncertainty honestly rather than inventing detail. Do not recite raw statistics (post or comment counts, karma, dates) — those are reported elsewhere; describe the person.
