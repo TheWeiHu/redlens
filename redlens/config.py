@@ -15,18 +15,13 @@ everything works with no config at all. Recognized so far:
     [storage]
     db = "/path/to/redlens.db"
 
-    [reddit]                  # optional: fresh data via Reddit's official API
-    client_id = "..."
-    client_secret = "..."
-
     [llm]                     # optional: AI profile summaries
     api_key = "..."
     model = "..."             # default: gpt-4o-mini
     base_url = "..."          # default: OpenAI; any OpenAI-compatible endpoint
 
-API keys can also come from the environment, which always wins over the
-file: ``REDLENS_REDDIT_CLIENT_ID`` / ``REDLENS_REDDIT_CLIENT_SECRET``
-and ``REDLENS_LLM_API_KEY`` (falling back to ``OPENAI_API_KEY``).
+The LLM key can also come from the environment, which always wins over the
+file: ``REDLENS_LLM_API_KEY`` (falling back to ``OPENAI_API_KEY``).
 """
 from __future__ import annotations
 
@@ -107,19 +102,6 @@ def save_config(updates: dict[str, dict[str, Any]]) -> Path:
     path.write_text(_toml_dump(merged), encoding="utf-8")
     path.chmod(0o600)  # also tighten files that predate us
     return path
-
-
-def reddit_credentials() -> tuple[str, str] | None:
-    """(client_id, client_secret) for Reddit's official API, or None."""
-    cid = os.environ.get("REDLENS_REDDIT_CLIENT_ID")
-    secret = os.environ.get("REDLENS_REDDIT_CLIENT_SECRET")
-    if not (cid and secret):
-        section = load_config().get("reddit", {})
-        cid = cid or section.get("client_id")
-        secret = secret or section.get("client_secret")
-    if cid and secret:
-        return str(cid), str(secret)
-    return None
 
 
 def llm_api_key() -> str | None:
