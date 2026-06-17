@@ -77,8 +77,8 @@ def upsert(session: Session, items: list[T]) -> int:
 
     Returns the number of rows **newly inserted** — rows that already existed
     are updated but not counted, so re-syncing unchanged data returns 0. This
-    is what lets callers report net-new (e.g. the Reddit top-up) and is the
-    foundation for incremental sync.
+    is what lets callers report net-new (how many rows a sync actually added)
+    and is the foundation for incremental sync.
     """
     if not items:
         return 0
