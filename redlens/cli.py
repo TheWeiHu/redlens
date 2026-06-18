@@ -9,14 +9,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from redlens import __version__, completions, discovery, export, onboarding
-from redlens.analytics import compute_user_analytics, list_users
+from redlens.analytics import (
+    compute_topic_analytics,
+    compute_user_analytics,
+    list_users,
+)
 from redlens.config import llm_api_key, resolve_db
 from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.models import Profile
+from redlens.models import Profile, TopicAnalytics
 from redlens.reporting import explore
 from redlens.reporting.page import render_topic_page
 from redlens.summarize import summarize_user
@@ -76,6 +80,23 @@ def _format_profile(p: Profile) -> str:
         if body:
             lines += ["", f"{heading}: {body}"]
     return "\n".join(lines)
+
+
+def _print_topic_analytics(ta: TopicAnalytics) -> None:
+    """Render a topic roll-up as readable terminal text (full ranked lists are
+    in ``--json``; here we show the headline numbers and the leaders)."""
+    print(f"{ta.name!r}: {ta.matched_posts:,} matched posts across "
+          f"{ta.distinct_subreddits:,}/{ta.net_size:,} subreddits · "
+          f"{ta.total_score:+,} score")
+    print(f"  keywords {', '.join(ta.keywords)!r} · "
+          f"dates {_ts(ta.first_post_at)} – {_ts(ta.last_post_at)} · "
+          f"tracked {_ts(ta.last_tracked_at)}")
+    if ta.top_subreddits:
+        print("  top subs: " + ", ".join(
+            f"r/{s.name} ({s.count:,})" for s in ta.top_subreddits[:5]))
+    if ta.top_authors:
+        print("  top authors: " + ", ".join(
+            f"u/{a.name} ({a.count:,})" for a in ta.top_authors[:5]))
 
 
 def _resolve_sources(sources_arg: str | None, *, assume_yes: bool) -> list[str]:
@@ -234,8 +255,9 @@ def build_parser() -> argparse.ArgumentParser:
     sy.add_argument("username")
     sy.add_argument("--full", action="store_true",
                     help="ignore saved cursors and re-pull the entire history")
-    sh = sub.add_parser("show", help="print a user's roll-up stats")
-    sh.add_argument("username")
+    sh = sub.add_parser("show", help="print a user's (or --topic's) roll-up stats")
+    sh.add_argument("username", nargs="?", help="user to roll up (omit when using --topic)")
+    sh.add_argument("--topic", help="roll up a tracked topic instead of a user")
     sh.add_argument("--json", action="store_true")
     # `analytics` is the old name for `show`; kept as a hidden alias for one
     # release (no help= so it stays out of `--help`).
@@ -441,10 +463,19 @@ def main(argv: list[str] | None = None) -> int:
                           f"to {args.out}", file=sys.stderr)
                 else:
                     export.export_user(s, args.username, args.format, sys.stdout)
-        else:  # "show" or its hidden alias "analytics"
+        elif getattr(args, "topic", None):  # show --topic <topic>
+            with session(engine) as s:
+                ta = compute_topic_analytics(s, args.topic)
+            if args.json:
+                print(ta.model_dump_json(indent=2))
+            else:
+                _print_topic_analytics(ta)
+        else:  # "show <user>" or its hidden alias "analytics"
             if args.verb == "analytics":
                 print("note: 'analytics' is deprecated; use 'show' "
                       "(this alias is kept for one release)", file=sys.stderr)
+            if not args.username:
+                raise RedlensError("show: give a username or --topic <topic>")
             with session(engine) as s:
                 an = compute_user_analytics(s, args.username)
             if args.json:

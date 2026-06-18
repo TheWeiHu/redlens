@@ -150,6 +150,24 @@ def test_cli_topics_text_and_json(engine, tmp_path, monkeypatch, capsys):
     assert payload[0]["matched_posts"] == 1
 
 
+def test_cli_show_topic(engine, tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "show", "--topic", "dua lipa", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["name"] == "dua lipa"
+    assert out["matched_posts"] == 1
+
+
+def test_cli_show_requires_user_or_topic(engine, tmp_path):
+    db = tmp_path / "t.db"
+    assert main(["--db", str(db), "show"]) == 1
+
+
 @pytest.mark.integration
 def test_track_against_real_arctic(tmp_path, monkeypatch):
     """Weekly canary: does arctic's scoped full-text search still answer in
