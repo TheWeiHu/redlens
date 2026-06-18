@@ -46,12 +46,20 @@ from redlens.constants import (
     NON_AUTHORS,
 )
 from redlens.db import upsert
-from redlens.errors import RedlensError
-from redlens.models import Comment, Post, Topic, TopicListing, TopicPost
+from redlens.errors import NotFound, RedlensError
+from redlens.models import Comment, Post, Topic, TopicListing, TopicPost, User
 
 
 def _now() -> int:
     return int(time.time())
+
+
+@dataclass
+class UntrackResult:
+    name: str
+    links_removed: int       # topicpost rows deleted for this topic
+    posts_deleted: int       # orphaned posts removed from the shared archive
+    comments_deleted: int    # orphaned comments removed alongside those posts
 
 
 @dataclass
@@ -386,3 +394,84 @@ def topic_comments(session: Session, name: str) -> list[Comment]:
         .where(func.lower(Topic.name) == name.lower())
         .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
     ))
+
+
+def _chunked(items: list[str], size: int = 400) -> list[list[str]]:
+    """Split an id list into SQLite-IN-safe chunks (the variadic limit is
+    ~999; 400 leaves headroom for other bound params)."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def untrack_topic(engine: Engine, name: str) -> UntrackResult:
+    """Remove a tracked topic and garbage-collect only the rows it alone kept.
+
+    Deletes the ``Topic`` row and its ``topicpost`` links, then drops a matched
+    post (and the comments riding under it via ``link_id``) only when this was
+    the *sole* reason to keep it: no other topic still tags the post, and its
+    author isn't a synced user. So posts shared across topics and posts/comments
+    belonging to a user-sync archive survive — only orphaned matches are dropped.
+    """
+    with Session(engine, expire_on_commit=False) as session:
+        topic = get_topic(session, name)
+        if topic is None:
+            raise NotFound(f"topic {name!r} is not tracked")
+        topic_id = topic.id
+        assert topic_id is not None
+        topic_name = topic.name
+
+        my_post_ids = set(session.exec(
+            select(TopicPost.post_id).where(TopicPost.topic_id == topic_id)
+        ).all())
+        # One topicpost row per (topic, post), so the link count is exactly
+        # how many posts this topic tagged.
+        links_removed = len(my_post_ids)
+
+        session.execute(
+            delete(TopicPost).where(TopicPost.topic_id == topic_id)  # type: ignore[arg-type]
+        )
+        session.delete(topic)
+        session.flush()
+
+        posts_deleted = 0
+        comments_deleted = 0
+        if my_post_ids:
+            # Posts still tagged by some *other* topic must stay; so must posts
+            # whose author is a synced user (part of that user's archive).
+            still_linked = set(session.exec(select(TopicPost.post_id)).all())
+            synced = set(session.exec(select(User.username)).all())
+            candidates = my_post_ids - still_linked
+
+            orphan_posts: list[str] = []
+            for chunk in _chunked(list(candidates)):
+                for pid, author in session.exec(
+                    select(Post.post_id, Post.author_username)
+                    .where(col(Post.post_id).in_(chunk))
+                ).all():
+                    if author not in synced:
+                        orphan_posts.append(pid)
+
+            for chunk in _chunked(orphan_posts):
+                orphan_comments = [
+                    cid for cid, author in session.exec(
+                        select(Comment.comment_id, Comment.author_username)
+                        .where(col(Comment.link_id).in_(chunk))
+                    ).all() if author not in synced
+                ]
+                for cchunk in _chunked(orphan_comments):
+                    session.execute(
+                        delete(Comment).where(col(Comment.comment_id).in_(cchunk))
+                    )
+                    comments_deleted += len(cchunk)
+                session.execute(
+                    delete(Post).where(col(Post.post_id).in_(chunk))
+                )
+                posts_deleted += len(chunk)
+
+        session.commit()
+
+    return UntrackResult(
+        name=topic_name,
+        links_removed=links_removed,
+        posts_deleted=posts_deleted,
+        comments_deleted=comments_deleted,
+    )

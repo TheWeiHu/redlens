@@ -32,6 +32,7 @@ from redlens.topics import (
     query_terms,
     search_subreddits,
     track_topic,
+    untrack_topic,
 )
 
 # Discovery sources for a topic's subreddit net, in display order.
@@ -54,6 +55,17 @@ def _ts(s: int | None) -> str:
 
 def _slug(name: str) -> str:
     return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
+
+
+def _confirm(prompt: str, *, assume_yes: bool) -> bool:
+    """Ask a destructive y/N question. --yes skips it; a non-interactive run
+    without --yes declines (so a pipe/cron never deletes by surprise)."""
+    if assume_yes:
+        return True
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    print(f"{prompt} [y/N] ", end="", file=sys.stderr, flush=True)
+    return input().strip().lower() in ("y", "yes")
 
 
 # Demographic fields in display order, with their headings.
@@ -333,6 +345,11 @@ def build_parser() -> argparse.ArgumentParser:
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
+    ut = sub.add_parser(
+        "untrack", help="stop tracking a topic and drop its orphaned matches")
+    ut.add_argument("topic")
+    ut.add_argument("-y", "--yes", action="store_true",
+                    help="delete without the confirmation prompt")
     c = sub.add_parser(
         "completions", help="print a shell completion script (eval or save it)")
     c.add_argument("shell", choices=completions.SHELLS)
@@ -418,6 +435,21 @@ def main(argv: list[str] | None = None) -> int:
             out = Path(args.out or f"{_slug(args.topic)}.html")
             out.write_text(html_doc, encoding="utf-8")
             print(f"wrote {out} ({len(html_doc):,} bytes)")
+        elif args.verb == "untrack":
+            with session(engine) as s:
+                if get_topic(s, args.topic) is None:
+                    raise NotFound(f"topic {args.topic!r} is not tracked")
+            if not _confirm(
+                f"delete topic {args.topic!r} and its orphaned posts/comments?",
+                assume_yes=args.yes,
+            ):
+                print("untrack: aborted (pass -y to confirm non-interactively)",
+                      file=sys.stderr)
+                return 1
+            ur = untrack_topic(engine, args.topic)
+            print(f"untracked {ur.name!r}: removed {ur.links_removed:,} topic "
+                  f"links, {ur.posts_deleted:,} orphaned posts, "
+                  f"{ur.comments_deleted:,} orphaned comments")
         elif args.verb == "summarize":
             with session(engine) as s:
                 summ = summarize_user(s, args.username, depth=args.depth)

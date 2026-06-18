@@ -18,9 +18,9 @@ from redlens import arctic
 from redlens.cli import main
 from redlens.db import connect, init_schema
 from redlens.errors import NotFound
-from redlens.models import TopicPost
+from redlens.models import Comment, Post, TopicPost, User
 from redlens.reporting.page import render_topic_page
-from redlens.topics import get_topic, list_topics, track_topic
+from redlens.topics import get_topic, list_topics, track_topic, untrack_topic
 
 NOW = int(time.time())
 
@@ -166,6 +166,69 @@ def test_cli_show_topic(engine, tmp_path, monkeypatch, capsys):
 def test_cli_show_requires_user_or_topic(engine, tmp_path):
     db = tmp_path / "t.db"
     assert main(["--db", str(db), "show"]) == 1
+
+
+def test_untrack_drops_topic_and_orphaned_matches(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa"), raw("p2", "dualipa")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    # A comment riding under a matched post, by a non-synced author.
+    with Session(engine) as s:
+        s.add(Comment(comment_id="c1", author_username="bob",
+                      subreddit_name="dualipa", link_id="p1", created_utc=NOW))
+        s.commit()
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert (res.links_removed, res.posts_deleted, res.comments_deleted) == (2, 2, 1)
+    with Session(engine) as s:
+        assert get_topic(s, "dua lipa") is None
+        assert s.exec(select(TopicPost)).all() == []
+        assert s.exec(select(Post)).all() == []
+        assert s.exec(select(Comment)).all() == []
+
+
+def test_untrack_keeps_posts_other_topics_reference(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa")], "popheads": [raw("p1", "popheads")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    track_topic(engine, "popheads", subreddits=["popheads"])   # also tags p1
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert res.posts_deleted == 0                              # p1 still tagged
+    with Session(engine) as s:
+        assert {p.post_id for p in s.exec(select(Post)).all()} == {"p1"}
+        assert get_topic(s, "popheads") is not None
+
+
+def test_untrack_keeps_synced_users_posts(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa")]}                 # author is "alice"
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    with Session(engine) as s:
+        s.add(User(username="alice"))                          # alice is synced
+        s.commit()
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert res.posts_deleted == 0                              # alice's post survives
+    with Session(engine) as s:
+        assert {p.post_id for p in s.exec(select(Post)).all()} == {"p1"}
+
+
+def test_cli_untrack_yes_and_unknown(engine, tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "untrack", "ghost", "-y"]) == 2  # NotFound
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "untrack", "dua lipa", "-y"]) == 0
+    assert "untracked 'dua lipa'" in capsys.readouterr().out
+    assert main(["--db", str(db), "topics", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
 
 
 @pytest.mark.integration
