@@ -72,6 +72,23 @@ redlens explore --port 9000 --no-browser
 
 The DB is opened read-only, so nothing here can mutate it.
 
+## Shell completions
+
+`redlens completions {bash|zsh|fish}` prints a completion script for your shell —
+generated from the CLI itself, so it never drifts from the real subcommands and
+flags. Install the one-liner for your shell:
+
+```bash
+# bash — add to ~/.bashrc
+redlens completions bash > ~/.local/share/bash-completion/completions/redlens
+
+# zsh — drop on your $fpath (then restart the shell)
+redlens completions zsh > "${fpath[1]}/_redlens"
+
+# fish
+redlens completions fish > ~/.config/fish/completions/redlens.fish
+```
+
 ---
 
 Architecture, configuration, and development: see [DESIGN.md](DESIGN.md).
