@@ -113,6 +113,37 @@ class Comment(SQLModel, table=True):
         )
 
 
+class SyncState(SQLModel, table=True):
+    """Per-user, per-stream cursors that make ``sync`` incremental.
+
+    A full re-pull of a user's whole history every run is wasteful and impolite
+    to arctic (a donation-funded mirror). This row records, for one
+    ``(username, kind, provider)`` stream, how far sync has reached:
+
+    - ``newest_seen_utc`` — the high-water mark; the next incremental sync asks
+      arctic only for items created *after* it.
+    - ``oldest_seen_utc`` — the low-water mark; if a backfill was interrupted
+      mid-walk (the stream pages newest-first), the next run resumes from here
+      instead of starting over.
+    - ``completed_backfill`` — True once the backward walk reached the end of
+      history. Until then sync keeps extending the backfill; after, it switches
+      to cheap forward-only incremental pulls.
+
+    ``provider`` is part of the key so a future second source can carry its own
+    cursors without colliding with arctic's.
+    """
+
+    __tablename__ = "sync_state"
+
+    username: str = Field(primary_key=True)
+    kind: str = Field(primary_key=True)          # "posts" | "comments"
+    provider: str = Field(primary_key=True, default="arctic")
+    newest_seen_utc: int | None = None
+    oldest_seen_utc: int | None = None
+    completed_backfill: bool = False
+    synced_at: int = Field(default_factory=_now)
+
+
 class Topic(SQLModel, table=True):
     """A tracked subject: a full-text query fanned out over a subreddit net.
 

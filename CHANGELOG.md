@@ -23,6 +23,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   rendering.
 - New `topic` and `topicpost` tables; posts stay in the shared `post`
   table so user archives and topic archives coexist in one DB.
+- New `sync_state` table (per-user, per-stream cursors): `redlens sync` is now
+  incremental — re-syncing an unchanged user costs one request per kind and
+  writes nothing, interrupted backfills resume from where they stopped instead
+  of starting over, and `--full` forces a complete re-pull. (#6)
 
 ### Changed
 - The first-run key-onboarding wizard (`redlens setup`) is now enabled. (#19)
