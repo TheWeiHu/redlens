@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from redlens import __version__, completions, discovery, onboarding
-from redlens.analytics import compute_user_analytics
+from redlens import __version__, completions, discovery, export, onboarding
+from redlens.analytics import compute_user_analytics, list_users
 from redlens.config import llm_api_key, resolve_db
 from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
@@ -232,9 +233,21 @@ def build_parser() -> argparse.ArgumentParser:
     sy.add_argument("username")
     sy.add_argument("--full", action="store_true",
                     help="ignore saved cursors and re-pull the entire history")
-    a = sub.add_parser("analytics")
-    a.add_argument("username")
-    a.add_argument("--json", action="store_true")
+    sh = sub.add_parser("show", help="print a user's roll-up stats")
+    sh.add_argument("username")
+    sh.add_argument("--json", action="store_true")
+    # `analytics` is the old name for `show`; kept as a hidden alias for one
+    # release (no help= so it stays out of `--help`).
+    al = sub.add_parser("analytics")
+    al.add_argument("username")
+    al.add_argument("--json", action="store_true")
+    ls = sub.add_parser("list", help="list every user in the DB")
+    ls.add_argument("--json", action="store_true")
+    ex = sub.add_parser("export", help="dump a user's posts and comments")
+    ex.add_argument("username")
+    ex.add_argument("--format", choices=export.FORMATS, default="json",
+                    help=f"output format: {', '.join(export.FORMATS)} (default: json)")
+    ex.add_argument("-o", "--out", help="write to PATH (default: stdout)")
     sm = sub.add_parser(
         "summarize", help="AI profile summary from the archived data (BYO LLM key)")
     sm.add_argument("username")
@@ -383,7 +396,34 @@ def main(argv: list[str] | None = None) -> int:
                 print(summ.model_dump_json(indent=2))
             else:
                 print(_format_profile(summ))
-        else:
+        elif args.verb == "list":
+            with session(engine) as s:
+                rows = list_users(s)
+            if args.json:
+                print(json.dumps([r.model_dump() for r in rows], indent=2))
+            elif not rows:
+                print("no users in DB — sync one with: redlens sync <user>",
+                      file=sys.stderr)
+            else:
+                for row in rows:
+                    print(f"u/{row.username}: {row.total_posts:,} posts, "
+                          f"{row.total_comments:,} comments · "
+                          f"last event {_ts(row.last_event_at)} · "
+                          f"synced {_ts(row.last_synced_at)}")
+        elif args.verb == "export":
+            with session(engine) as s:
+                if args.out:
+                    with open(args.out, "w", encoding="utf-8", newline="") as fh:
+                        n_posts, n_comments = export.export_user(
+                            s, args.username, args.format, fh)
+                    print(f"wrote {n_posts:,} posts + {n_comments:,} comments "
+                          f"to {args.out}", file=sys.stderr)
+                else:
+                    export.export_user(s, args.username, args.format, sys.stdout)
+        else:  # "show" or its hidden alias "analytics"
+            if args.verb == "analytics":
+                print("note: 'analytics' is deprecated; use 'show' "
+                      "(this alias is kept for one release)", file=sys.stderr)
             with session(engine) as s:
                 an = compute_user_analytics(s, args.username)
             if args.json:
