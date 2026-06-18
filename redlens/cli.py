@@ -305,6 +305,9 @@ def build_parser() -> argparse.ArgumentParser:
     doc = sub.add_parser(
         "doctor", help="diagnose the environment (DB, config, arctic-shift, LLM key)")
     doc.add_argument("--json", action="store_true")
+    doc.add_argument("--no-network", action="store_true",
+                     help="skip the arctic-shift reachability probe (offline "
+                     "diagnosis); reports it as skipped, not failed")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
@@ -327,7 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "setup":
             return onboarding.run_wizard()
         if args.verb == "doctor":
-            return run_doctor(args.db, as_json=args.json)
+            return run_doctor(args.db, as_json=args.json,
+                              no_network=args.no_network)
         onboarding.offer_setup_on_first_run()
         db = resolve_db(args.db)
         if args.verb == "explore":
