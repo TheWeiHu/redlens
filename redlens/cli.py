@@ -5,6 +5,7 @@ import dataclasses
 import json
 import re
 import sys
+import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -372,6 +373,10 @@ def build_parser() -> argparse.ArgumentParser:
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
+    g.add_argument("--open", action="store_true",
+                   help="open the rendered page in a browser after writing it")
+    g.add_argument("--no-browser", action="store_true",
+                   help="never open a browser, even with --open (for scripts/CI)")
     ut = sub.add_parser(
         "untrack", help="stop tracking a topic and drop its orphaned matches")
     ut.add_argument("topic")
@@ -462,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
             out = Path(args.out or f"{_slug(args.topic)}.html")
             out.write_text(html_doc, encoding="utf-8")
             print(f"wrote {out} ({len(html_doc):,} bytes)")
+            if args.open and not args.no_browser:
+                webbrowser.open(out.resolve().as_uri())
         elif args.verb == "untrack":
             with session(engine) as s:
                 if get_topic(s, args.topic) is None:
