@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import delete, func
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from redlens import arctic
 from redlens.constants import (
@@ -47,7 +47,7 @@ from redlens.constants import (
 )
 from redlens.db import upsert
 from redlens.errors import RedlensError
-from redlens.models import Comment, Post, Topic, TopicPost
+from redlens.models import Comment, Post, Topic, TopicListing, TopicPost
 
 
 def _now() -> int:
@@ -131,6 +131,37 @@ def get_topic(session: Session, name: str) -> Topic | None:
     return session.exec(
         select(Topic).where(func.lower(Topic.name) == name.lower())
     ).first()
+
+
+def list_topics(session: Session) -> list[TopicListing]:
+    """Roll up every tracked topic: keywords, net size, matched-post count,
+    and when each was last tracked. Sorted most-recently-tracked first.
+
+    The matched-post count comes from one grouped ``topicpost`` query (not a
+    per-topic scan) so this stays cheap as the archive grows; topics never
+    yet pulled simply count zero.
+    """
+    topics = session.exec(select(Topic)).all()
+    if not topics:
+        return []
+
+    counts: dict[int, int] = dict(session.exec(
+        select(col(TopicPost.topic_id), func.count())
+        .group_by(col(TopicPost.topic_id))
+    ).all())
+
+    listings = [
+        TopicListing(
+            name=t.name,
+            keywords=t.keyword_list,
+            subreddit_count=len(t.subreddit_list),
+            matched_posts=counts.get(t.id, 0) if t.id is not None else 0,
+            last_tracked_at=t.last_tracked_at,
+        )
+        for t in topics
+    ]
+    listings.sort(key=lambda r: (r.last_tracked_at or 0), reverse=True)
+    return listings
 
 
 def discover_subreddits(

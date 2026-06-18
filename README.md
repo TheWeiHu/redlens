@@ -34,6 +34,7 @@ Track a **topic** instead of a user, then render it as a page:
 
 ```bash
 redlens track "dua lipa"   # discover a subreddit net, archive every match
+redlens topics             # every tracked topic (keywords, net, match count)
 redlens page  "dua lipa"   # render a standalone HTML report
 ```
 
