@@ -89,6 +89,35 @@ redlens completions zsh > "${fpath[1]}/_redlens"
 redlens completions fish > ~/.config/fish/completions/redlens.fish
 ```
 
+## Dependencies
+
+redlens keeps its runtime footprint small — two direct dependencies, and the
+whole transitive tree is permissively licensed (MIT/BSD/PSF), so embedding or
+redistributing redlens carries no copyleft obligations.
+
+| Package             | License  | Why it's here                                    |
+| ------------------- | -------- | ------------------------------------------------ |
+| `platformdirs`      | MIT      | per-user data/config dir (direct)                |
+| `sqlmodel`          | MIT      | models + SQLite layer (direct)                   |
+| ↳ `pydantic`        | MIT      | validation, via sqlmodel                         |
+| ↳ `pydantic-core`   | MIT      | pydantic's compiled core                         |
+| ↳ `annotated-types` | MIT      | pydantic constraint types                        |
+| ↳ `typing-inspection` | MIT    | pydantic runtime typing helpers                  |
+| ↳ `SQLAlchemy`      | MIT      | SQL engine, via sqlmodel                         |
+| ↳ `greenlet`        | MIT      | SQLAlchemy async extra (platform-dependent)      |
+| ↳ `typing-extensions` | PSF-2.0 | backported typing, used throughout              |
+
+Dev-only extras (`pip install -e ".[dev]"`): `pytest`, `ruff`, `mypy` — all
+permissively licensed and never shipped to users.
+
+`sqlmodel` is still `0.0.x` and can break API on any patch bump, so it is pinned
+`>=0.0.14,<0.1` to keep redlens off a future `0.1` that may move things.
+
+## Contributing & releases
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup and how a new version is
+cut and published (tag-driven, PyPI trusted publishing).
+
 ---
 
 Architecture, configuration, and development: see [DESIGN.md](DESIGN.md).
