@@ -25,6 +25,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   table so user archives and topic archives coexist in one DB.
 
 ### Changed
+- `redlens sync` is now incremental: a per-user, per-kind `sync_state` cursor
+  table lets re-syncs fetch only items newer than what's stored and resume an
+  interrupted backfill from the tail, instead of re-pulling the whole history
+  every run. `--full` forces the old full re-pull. (#6)
 - The first-run key-onboarding wizard (`redlens setup`) is now enabled. (#19)
 - `upsert()` returns the net-new inserted rows. (#17)
 

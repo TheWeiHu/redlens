@@ -113,6 +113,35 @@ class Comment(SQLModel, table=True):
         )
 
 
+class SyncState(SQLModel, table=True):
+    """Per-user, per-kind cursor that makes ``redlens sync`` incremental.
+
+    Without it, every ``sync`` re-walks a user's whole history. One row per
+    ``(username, kind, provider)`` records how far the archive has been pulled,
+    so re-syncs fetch only what's new and resume interrupted backfills:
+
+    - ``newest_seen_utc`` — head cursor; the next sync fetches only items
+      newer than this (arctic's ``after``), so an unchanged user costs one
+      empty request and writes nothing.
+    - ``oldest_seen_utc`` — tail cursor; when a backfill was cut short, the
+      next sync resumes downward from here (arctic's ``before``) instead of
+      re-fetching the rows already stored.
+    - ``completed_backfill`` — set once the walk reached the start of the
+      user's history; while false, each sync keeps backfilling from the tail.
+
+    ``provider`` is part of the key so a second source (e.g. a future
+    PullPush ingest) tracks its own cursors without colliding with arctic's.
+    """
+
+    username: str = Field(primary_key=True)
+    kind: str = Field(primary_key=True)            # "posts" | "comments"
+    provider: str = Field(default="arctic", primary_key=True)
+    newest_seen_utc: int | None = None
+    oldest_seen_utc: int | None = None
+    completed_backfill: bool = False
+    synced_at: int = Field(default_factory=_now)
+
+
 class Topic(SQLModel, table=True):
     """A tracked subject: a full-text query fanned out over a subreddit net.
 

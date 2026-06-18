@@ -61,13 +61,25 @@ def search_subreddits(prefix: str, limit: int = 25) -> list[dict[str, Any]]:
     return arr
 
 
-def _iter_kind(kind: str, username: str) -> Iterator[dict[str, Any]]:
-    before: int | None = None
+def _iter_kind(
+    kind: str,
+    username: str,
+    after: int | None = None,
+    before: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield a user's posts or comments newest-first, walking back via the
+    ``before`` cursor. ``after``/``before`` are epoch-second bounds on
+    ``created_utc``: ``after`` caps the walk at the bottom (incremental head
+    pulls pass the last-seen timestamp so only newer items come back), while
+    ``before`` seeds the starting point at the top (resuming an interrupted
+    backfill passes the oldest stored timestamp)."""
+    cursor = before
     yielded = 0
     while True:
         batch = (
             _get(f"/api/{kind}/search",
-                 author=username, limit="auto", sort="desc", before=before)
+                 author=username, limit="auto", sort="desc",
+                 after=after, before=cursor)
             .get("data") or []
         )
         if not batch:
@@ -80,9 +92,9 @@ def _iter_kind(kind: str, username: str) -> Iterator[dict[str, Any]]:
         if len(batch) < 50:
             return
         oldest = min(int(b.get("created_utc") or 0) for b in batch)
-        if not oldest or oldest == before:
+        if not oldest or oldest == cursor:
             return
-        before = oldest
+        cursor = oldest
         time.sleep(PAGINATION_SLEEP_S)
 
 
@@ -149,12 +161,16 @@ def iter_author_query(
     return _iter_scoped_query({"author": author}, query, after, before)
 
 
-def iter_posts(username: str) -> Iterator[dict[str, Any]]:
-    return _iter_kind("posts", username)
+def iter_posts(
+    username: str, after: int | None = None, before: int | None = None
+) -> Iterator[dict[str, Any]]:
+    return _iter_kind("posts", username, after, before)
 
 
-def iter_comments(username: str) -> Iterator[dict[str, Any]]:
-    return _iter_kind("comments", username)
+def iter_comments(
+    username: str, after: int | None = None, before: int | None = None
+) -> Iterator[dict[str, Any]]:
+    return _iter_kind("comments", username, after, before)
 
 
 def iter_post_comments(post_id: str) -> Iterator[dict[str, Any]]:

@@ -227,7 +227,10 @@ def main(argv: list[str] | None = None) -> int:
                    "config.toml, or the per-user data dir)")
     sub = p.add_subparsers(dest="verb", required=True)
     sub.add_parser("init")
-    sub.add_parser("sync").add_argument("username")
+    sy = sub.add_parser("sync")
+    sy.add_argument("username")
+    sy.add_argument("--full", action="store_true",
+                    help="re-fetch the entire history, ignoring saved sync cursors")
     a = sub.add_parser("analytics")
     a.add_argument("username")
     a.add_argument("--json", action="store_true")
@@ -302,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "init":
             print(f"schema applied to {db}")
         elif args.verb == "sync":
-            r = sync_user(args.username, engine)
+            r = sync_user(args.username, engine, full=args.full)
             print(f"u/{r.user.username}: "
                   f"{r.posts_written:,} posts, {r.comments_written:,} comments")
         elif args.verb == "track":
