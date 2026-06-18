@@ -37,6 +37,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   `-o PATH`) as `--format json|csv|jsonl`. (#8)
 
 ### Changed
+- `redlens doctor`: an unreachable arctic-shift probe is now a "⚠" (exit 0)
+  rather than a "✗" (exit 1) — a third party's transient downtime isn't a fault
+  in your environment, and the exit code gates only on what you can fix (storage
+  and config). New `--no-network` skips the probe entirely (reported as a "–
+  skipped") so DB/config/LLM-key diagnosis still runs offline. (#17)
 - `redlens analytics` is now `redlens show`. `analytics` is kept as a hidden
   alias for one release (it prints a deprecation note); switch to `show`. (#8)
 - The first-run key-onboarding wizard (`redlens setup`) is now enabled. (#19)

@@ -9,6 +9,10 @@ import pytest
 from redlens import doctor
 from redlens.db import SCHEMA_VERSION, connect, init_schema
 
+# Captured at import, before the autouse fixture stubs the module attribute, so
+# a test can exercise the *real* probe (e.g. its offline → "warn" behaviour).
+_REAL_CHECK_ARCTIC = doctor._check_arctic
+
 
 @pytest.fixture(autouse=True)
 def isolate_and_offline(monkeypatch, tmp_path):
@@ -70,11 +74,41 @@ def test_db_flag_is_honored(monkeypatch, tmp_path):
     assert str(flagged) in checks["database"].detail
 
 
-def test_arctic_unreachable_fails(monkeypatch):
-    monkeypatch.setattr(
-        doctor, "_check_arctic",
-        lambda: doctor.Check("arctic-shift", "fail", "unreachable: boom"))
-    assert doctor.run_doctor() == 1
+def test_arctic_unreachable_warns_but_does_not_fail(monkeypatch, tmp_path):
+    """A third party being down is not a fault in your environment: an
+    unreachable probe is a "warn" that still exits 0, so a transient outage
+    doesn't make doctor look like a misconfiguration."""
+    import urllib.error
+
+    monkeypatch.setenv("REDLENS_DB", str(tmp_path / "redlens.db"))
+
+    def boom(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(doctor.urllib.request, "urlopen", boom)
+    check = _REAL_CHECK_ARCTIC()
+    assert check.status == "warn"
+    assert "unreachable" in check.detail
+
+    # Restore the real probe over the fixture's stub and confirm exit 0.
+    monkeypatch.setattr(doctor, "_check_arctic", _REAL_CHECK_ARCTIC)
+    assert doctor.run_doctor() == 0
+
+
+def test_no_network_skips_arctic_probe(monkeypatch, tmp_path):
+    """--no-network must not touch the network at all and reports a "skip"."""
+    monkeypatch.setenv("REDLENS_DB", str(tmp_path / "redlens.db"))
+
+    def explode() -> doctor.Check:
+        raise AssertionError("the arctic probe must not run with --no-network")
+
+    monkeypatch.setattr(doctor, "_check_arctic", explode)
+    checks = _by_name(doctor.run_checks(no_network=True))
+    assert checks["arctic-shift"].status == "skip"
+    assert "--no-network" in checks["arctic-shift"].detail
+    # Offline-resolvable checks still ran, and the skip doesn't fail the run.
+    assert checks["database"].status == "ok"
+    assert doctor.run_doctor(no_network=True) == 0
 
 
 def test_malformed_config_fails(monkeypatch, tmp_path):

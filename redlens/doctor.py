@@ -9,6 +9,14 @@ same results for scripting.
 Exit code is 0 when every *required* check passes — an absent optional key (the
 LLM key) is a "–", not a failure — and 1 when any required check fails.
 
+The arctic-shift reachability probe is deliberately *not* required. arctic-shift
+is a keyless third-party service; a transient outage (or simply being offline)
+is not a fault in *your* environment, so an unreachable probe is a "⚠" (worth
+noting — sync will fail until it's back) rather than a "✗" that exits 1. The
+checks that gate the exit code are the ones you can fix: storage location and a
+valid config. ``--no-network`` skips the probe entirely (reported as "–
+skipped"), so DB/config/LLM-key diagnosis still runs offline.
+
 redlens reaches Reddit only through arctic-shift, which is keyless, so there are
 no Reddit API credentials to diagnose (the official-API surface was dropped);
 the keys that matter are storage location and the optional LLM key.
@@ -129,7 +137,9 @@ def _check_config() -> Check:
 
 def _check_arctic() -> Check:
     """Probe arctic-shift with one short-timeout HEAD. Any HTTP response means
-    the host is up; only a transport error (DNS/timeout/refused) is a failure.
+    the host is up; a transport error (DNS/timeout/refused) is a "warn", not a
+    "fail" — a third party's transient downtime is not a fault in your setup, so
+    it must not drive a non-zero exit (see module docstring).
     Monkeypatched in tests so the default test run never touches the network."""
     req = urllib.request.Request(ARCTIC_BASE, method="HEAD",
                                  headers={"User-Agent": UA})
@@ -139,7 +149,9 @@ def _check_arctic() -> Check:
     except urllib.error.HTTPError as exc:
         return Check("arctic-shift", "ok", f"reachable (HTTP {exc.code}) {ARCTIC_BASE}")
     except Exception as exc:  # URLError, timeout, …
-        return Check("arctic-shift", "fail", f"unreachable: {exc}")
+        return Check("arctic-shift", "warn",
+                     f"unreachable: {exc} — transient outage or you're offline; "
+                     "sync needs it, but your local setup is fine")
 
 
 def _check_llm() -> Check:
@@ -161,20 +173,29 @@ def _check_llm() -> Check:
     return Check("LLM key", "ok", f"configured (provider: {provider}) — no paid call made")
 
 
-def run_checks(db_flag: str | None = None) -> list[Check]:
+def run_checks(db_flag: str | None = None, *, no_network: bool = False) -> list[Check]:
     """Run every diagnostic. Network checks live behind module functions so
-    tests can monkeypatch them; this is the single ordered list of checks."""
+    tests can monkeypatch them; this is the single ordered list of checks.
+
+    ``no_network`` skips the arctic-shift probe (reporting it as "skip") so the
+    offline-resolvable checks still run when the network is down or unwanted."""
+    arctic = (
+        Check("arctic-shift", "skip",
+              f"network probe skipped (--no-network) — {ARCTIC_BASE} not verified")
+        if no_network else _check_arctic()
+    )
     return [
         _check_database(db_flag),
         _check_schema(db_flag),
         _check_config(),
-        _check_arctic(),
+        arctic,
         _check_llm(),
     ]
 
 
-def run_doctor(db_flag: str | None = None, *, as_json: bool = False) -> int:
-    checks = run_checks(db_flag)
+def run_doctor(db_flag: str | None = None, *, as_json: bool = False,
+               no_network: bool = False) -> int:
+    checks = run_checks(db_flag, no_network=no_network)
     ok = not any(c.status == "fail" for c in checks)
     if as_json:
         print(json.dumps({"ok": ok, "checks": [asdict(c) for c in checks]}, indent=2))
