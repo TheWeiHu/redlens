@@ -7,6 +7,7 @@ import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 from redlens import __version__, completions, discovery, export, onboarding
 from redlens.analytics import (
@@ -268,8 +269,13 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--json", action="store_true")
     tp = sub.add_parser("topics", help="list every tracked topic")
     tp.add_argument("--json", action="store_true")
-    ex = sub.add_parser("export", help="dump a user's posts and comments")
-    ex.add_argument("username")
+    ex = sub.add_parser(
+        "export", help="dump a user's — or a tracked topic's — posts and comments")
+    ex.add_argument("username", nargs="?",
+                    help="the user to export (omit when using --topic)")
+    ex.add_argument("--topic",
+                    help="export this tracked topic's matched posts/comments "
+                    "instead of a user")
     ex.add_argument("--format", choices=export.FORMATS, default="json",
                     help=f"output format: {', '.join(export.FORMATS)} (default: json)")
     ex.add_argument("-o", "--out", help="write to PATH (default: stdout)")
@@ -454,15 +460,24 @@ def main(argv: list[str] | None = None) -> int:
                           f"keywords {', '.join(trow.keywords)!r} · "
                           f"tracked {_ts(trow.last_tracked_at)}")
         elif args.verb == "export":
+            if bool(args.username) == bool(args.topic):
+                raise RedlensError(
+                    "export needs exactly one of <username> or --topic")
+
+            def _do_export(out: TextIO) -> tuple[int, int]:
+                if args.topic:
+                    return export.export_topic(s, args.topic, args.format, out)
+                return export.export_user(s, args.username, args.format, out)
+
+            scope = f"topic {args.topic!r}" if args.topic else f"u/{args.username}"
             with session(engine) as s:
                 if args.out:
                     with open(args.out, "w", encoding="utf-8", newline="") as fh:
-                        n_posts, n_comments = export.export_user(
-                            s, args.username, args.format, fh)
+                        n_posts, n_comments = _do_export(fh)
                     print(f"wrote {n_posts:,} posts + {n_comments:,} comments "
-                          f"to {args.out}", file=sys.stderr)
+                          f"for {scope} to {args.out}", file=sys.stderr)
                 else:
-                    export.export_user(s, args.username, args.format, sys.stdout)
+                    _do_export(sys.stdout)
         elif getattr(args, "topic", None):  # show --topic <topic>
             with session(engine) as s:
                 ta = compute_topic_analytics(s, args.topic)

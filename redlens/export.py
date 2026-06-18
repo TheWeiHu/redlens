@@ -20,39 +20,28 @@ from sqlmodel import Session, select
 
 from redlens.errors import NotFound, RedlensError
 from redlens.models import Comment, Post, User
+from redlens.topics import get_topic, topic_comments, topic_posts
 
 FORMATS = ("json", "csv", "jsonl")
 
 
-def export_user(session: Session, username: str, fmt: str, out: TextIO) -> tuple[int, int]:
-    """Write ``username``'s posts and comments to ``out`` in ``fmt``.
-
-    Returns ``(posts_written, comments_written)``. Raises ``NotFound`` if the
-    user isn't in the DB yet.
-    """
+def _dump(
+    header: dict[str, object],
+    posts: list[Post],
+    comments: list[Comment],
+    fmt: str,
+    out: TextIO,
+) -> tuple[int, int]:
+    """Write ``posts`` + ``comments`` to ``out`` in ``fmt``, prefixed with the
+    scope ``header`` (e.g. ``{"username": ...}`` or ``{"topic": ...}``). Shared
+    by the user and topic exports so the three formats stay identical."""
     if fmt not in FORMATS:
         raise RedlensError(f"unknown export format {fmt!r} (choose from {', '.join(FORMATS)})")
-
-    user = session.exec(
-        select(User).where(func.lower(User.username) == username.lower())
-    ).first()
-    if user is None:
-        raise NotFound(f"u/{username} not in DB — sync first")
-    canon = user.username
-
-    posts = session.exec(
-        select(Post).where(Post.author_username == canon)
-        .order_by(Post.created_utc.asc())  # type: ignore[attr-defined]
-    ).all()
-    comments = session.exec(
-        select(Comment).where(Comment.author_username == canon)
-        .order_by(Comment.created_utc.asc())  # type: ignore[attr-defined]
-    ).all()
 
     if fmt == "json":
         json.dump(
             {
-                "username": canon,
+                **header,
                 "posts": [p.model_dump() for p in posts],
                 "comments": [c.model_dump() for c in comments],
             },
@@ -78,3 +67,46 @@ def export_user(session: Session, username: str, fmt: str, out: TextIO) -> tuple
         writer.writerows(rows)
 
     return len(posts), len(comments)
+
+
+def export_user(session: Session, username: str, fmt: str, out: TextIO) -> tuple[int, int]:
+    """Write ``username``'s posts and comments to ``out`` in ``fmt``.
+
+    Returns ``(posts_written, comments_written)``. Raises ``NotFound`` if the
+    user isn't in the DB yet.
+    """
+    user = session.exec(
+        select(User).where(func.lower(User.username) == username.lower())
+    ).first()
+    if user is None:
+        raise NotFound(f"u/{username} not in DB — sync first")
+    canon = user.username
+
+    posts = list(session.exec(
+        select(Post).where(Post.author_username == canon)
+        .order_by(Post.created_utc.asc())  # type: ignore[attr-defined]
+    ).all())
+    comments = list(session.exec(
+        select(Comment).where(Comment.author_username == canon)
+        .order_by(Comment.created_utc.asc())  # type: ignore[attr-defined]
+    ).all())
+
+    return _dump({"username": canon}, posts, comments, fmt, out)
+
+
+def export_topic(session: Session, name: str, fmt: str, out: TextIO) -> tuple[int, int]:
+    """Write a tracked topic's matched posts (and any pulled comments) to
+    ``out`` in ``fmt``.
+
+    Returns ``(posts_written, comments_written)``. Raises ``NotFound`` if the
+    topic isn't tracked yet.
+    """
+    topic = get_topic(session, name)
+    if topic is None:
+        raise NotFound(f"topic {name!r} not tracked — run `redlens track` first")
+    canon = topic.name
+
+    posts = topic_posts(session, canon)
+    comments = topic_comments(session, canon)
+
+    return _dump({"topic": canon}, posts, comments, fmt, out)

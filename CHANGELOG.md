@@ -11,6 +11,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   matched-post volume, total score, top subreddits, top authors, and date
   range, computed in SQL (the topic-side mirror of `show <user>`). `--json`
   emits the full ranked lists.
+- `redlens export --topic <topic>` — dump a tracked topic's matched posts
+  (and any pulled comments) in the existing export formats (json/jsonl/csv),
+  the machine-readable counterpart to the HTML `page`. Mirrors
+  `export <user>`; `username` and `--topic` are mutually exclusive.
 - `redlens track <topic>` — follow a subject across public discussion: a
   full-text query fanned out over a subreddit net, with user-selectable
   discovery sources (name match via arctic, DuckDuckGo web search, a

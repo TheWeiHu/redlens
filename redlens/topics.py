@@ -377,6 +377,18 @@ def pull_topic_comments(
     return written
 
 
+def topic_posts(session: Session, name: str) -> list[Post]:
+    """Posts matched to a topic, highest-scoring first (post_id tie-break
+    keeps the order deterministic, matching the rendered page)."""
+    return list(session.exec(
+        select(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower())
+        .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
+    ))
+
+
 def topic_comments(session: Session, name: str) -> list[Comment]:
     """Comments under a topic's matched posts (the link_id bridge)."""
     return list(session.exec(
