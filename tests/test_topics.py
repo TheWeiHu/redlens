@@ -106,6 +106,31 @@ def test_cli_track_then_page(engine, tmp_path, monkeypatch):
     assert (tmp_path / "dua-lipa.html").exists()
 
 
+def test_cli_page_open_launches_browser(engine, tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    monkeypatch.chdir(tmp_path)
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+
+    opened: list[str] = []
+    monkeypatch.setattr("redlens.cli.webbrowser.open", opened.append)
+
+    # default: file written, no browser launched.
+    assert main(["--db", str(db), "page", "dua lipa"]) == 0
+    assert opened == []
+
+    # --open launches the browser pointed at the written file's URI.
+    assert main(["--db", str(db), "page", "dua lipa", "--open"]) == 0
+    assert opened == [(tmp_path / "dua-lipa.html").resolve().as_uri()]
+
+    # --no-browser suppresses the launch even with --open (scripts/CI).
+    assert main(["--db", str(db), "page", "dua lipa", "--open",
+                 "--no-browser"]) == 0
+    assert len(opened) == 1
+
+
 def test_list_topics_rollup_and_recency(engine, monkeypatch):
     data = {"dualipa": [raw("p1", "dualipa"), raw("p2", "dualipa")],
             "Ozempic": [raw("p3", "Ozempic")]}
