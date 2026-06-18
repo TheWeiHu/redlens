@@ -264,3 +264,30 @@ class TopicListing(BaseModel):
     subreddit_count: int         # size of the topic's subreddit net
     matched_posts: int           # posts tagged to this topic in topicpost
     last_tracked_at: int | None  # when track last ran for this topic
+
+
+class NameCount(BaseModel):
+    """A named tally — one ranked (subreddit|author, count) pair."""
+    name: str
+    count: int
+
+
+class TopicAnalytics(BaseModel):
+    """A tracked topic's roll-up: the topic-side mirror of ``UserAnalytics``.
+
+    Counts cover the topic's *matched* posts (the ``topicpost`` join), not the
+    whole archive. ``net_size`` is how many subreddits the net casts over;
+    ``distinct_subreddits`` is how many of them actually produced a match.
+    """
+
+    name: str
+    keywords: list[str]
+    net_size: int                       # subreddits in the cast net
+    matched_posts: int
+    total_score: int
+    distinct_subreddits: int            # net subs with at least one match
+    first_post_at: int | None
+    last_post_at: int | None
+    last_tracked_at: int | None
+    top_subreddits: list[NameCount]
+    top_authors: list[NameCount]

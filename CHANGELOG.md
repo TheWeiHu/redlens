@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `redlens show --topic <topic>` — a topic's roll-up stats to the terminal:
+  matched-post volume, total score, top subreddits, top authors, and date
+  range, computed in SQL (the topic-side mirror of `show <user>`). `--json`
+  emits the full ranked lists.
 - `redlens track <topic>` — follow a subject across public discussion: a
   full-text query fanned out over a subreddit net, with user-selectable
   discovery sources (name match via arctic, DuckDuckGo web search, a
