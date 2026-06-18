@@ -28,7 +28,14 @@ adheres to [Semantic Versioning](https://semver.org/).
   writes nothing, interrupted backfills resume from where they stopped instead
   of starting over, and `--full` forces a complete re-pull. (#6)
 
+- `redlens list` — every archived user at a glance: post/comment counts,
+  last activity, and when each was last synced; `--json` for scripting. (#8)
+- `redlens export <username>` — dump a user's posts and comments to stdout (or
+  `-o PATH`) as `--format json|csv|jsonl`. (#8)
+
 ### Changed
+- `redlens analytics` is now `redlens show`. `analytics` is kept as a hidden
+  alias for one release (it prints a deprecation note); switch to `show`. (#8)
 - The first-run key-onboarding wizard (`redlens setup`) is now enabled. (#19)
 - `upsert()` returns the net-new inserted rows. (#17)
 

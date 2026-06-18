@@ -233,3 +233,18 @@ class UserAnalytics(BaseModel):
     distinct_subreddits: int
     top_subreddit: str | None
     top_subreddit_event_count: int
+
+
+class UserListing(BaseModel):
+    """One row of ``redlens list`` — a lightweight per-user roll-up.
+
+    Cheaper than ``UserAnalytics``: just the counts and the two timestamps a
+    human scanning the archive cares about (when the account was last active,
+    and when redlens last synced it).
+    """
+
+    username: str
+    total_posts: int
+    total_comments: int
+    last_event_at: int | None    # newest post/comment created_utc
+    last_synced_at: int | None   # most recent sync for this user

@@ -19,10 +19,16 @@ pip install -e ".[dev]"
 
 ```bash
 redlens sync KimJongFunk              # archive a user's public history
-redlens analytics KimJongFunk         # print rollup
-redlens analytics KimJongFunk --json  # or as JSON
+redlens show KimJongFunk              # print rollup
+redlens show KimJongFunk --json       # or as JSON
+redlens list                          # every archived user (counts, last activity)
+redlens export KimJongFunk --format csv > kim.csv   # dump posts + comments
 redlens explore                       # browse the DB in your browser
 ```
+
+`show` was previously called `analytics`; the old name still works for one
+release. `export` writes to stdout by default (pipeable) — pass `-o PATH` to
+write a file, and `--format json|csv|jsonl` (default `json`) to pick the shape.
 
 Track a **topic** instead of a user, then render it as a page:
 

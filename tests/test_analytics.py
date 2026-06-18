@@ -1,10 +1,10 @@
 import pytest
 from sqlmodel import Session
 
-from redlens.analytics import compute_user_analytics
+from redlens.analytics import compute_user_analytics, list_users
 from redlens.db import connect, init_schema, upsert
 from redlens.errors import NotFound
-from redlens.models import Comment, Post, User
+from redlens.models import Comment, Post, SyncState, User
 
 
 @pytest.fixture
@@ -91,3 +91,38 @@ def test_username_lookup_is_case_insensitive(db_session):
     a = compute_user_analytics(db_session, "alice")
     assert a.username == "Alice"
     assert a.total_posts == 1
+
+
+def test_list_users_empty_db(db_session):
+    assert list_users(db_session) == []
+
+
+def test_list_users_counts_and_last_event(db_session):
+    upsert(db_session, [User(username="alice")])
+    upsert(db_session, [
+        _post("alice", "p1", ts=1_700_000_000),
+        _post("alice", "p2", ts=1_700_100_000),
+    ])
+    upsert(db_session, [_comment("alice", "c1", ts=1_700_050_000)])
+    upsert(db_session, [SyncState(username="alice", kind="posts",
+                                  newest_seen_utc=1_700_100_000, synced_at=1_700_200_000)])
+    rows = list_users(db_session)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.username == "alice"
+    assert r.total_posts == 2
+    assert r.total_comments == 1
+    assert r.last_event_at == 1_700_100_000  # newest across posts + comments
+    assert r.last_synced_at == 1_700_200_000
+
+
+def test_list_users_sorted_by_recency_and_handles_no_activity(db_session):
+    upsert(db_session, [User(username="quiet"), User(username="active")])
+    upsert(db_session, [_post("active", "p1", ts=1_700_000_000)])
+    rows = list_users(db_session)
+    assert [r.username for r in rows] == ["active", "quiet"]
+    quiet = rows[1]
+    assert quiet.total_posts == 0
+    assert quiet.total_comments == 0
+    assert quiet.last_event_at is None
+    assert quiet.last_synced_at is not None  # falls back to the user row's fetched_at
