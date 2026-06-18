@@ -46,6 +46,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   alias for one release (it prints a deprecation note); switch to `show`. (#8)
 - The first-run key-onboarding wizard (`redlens setup`) is now enabled. (#19)
 - `upsert()` returns the net-new inserted rows. (#17)
+- README gains a worked topic-tracking walkthrough (`track` → `topics` →
+  `page`) with a real `--query`/`--exclude`/`--sources` example and expected
+  output. (#18)
 
 ### Removed
 - The un-buildable Reddit official-API surface. (#21)
