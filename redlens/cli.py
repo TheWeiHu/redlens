@@ -385,6 +385,11 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser(
         "completions", help="print a shell completion script (eval or save it)")
     c.add_argument("shell", choices=completions.SHELLS)
+    # Hidden helper the generated completion scripts shell out to for DB-backed
+    # value completion (usernames / topic names). No help= and a `__` prefix so
+    # it stays out of `--help` and out of the completion scripts themselves.
+    cmp = sub.add_parser(completions.HELPER_VERB)
+    cmp.add_argument("kind", choices=("users", "topics"))
     if onboarding.ENABLED:
         sub.add_parser("setup")
     return p
@@ -397,6 +402,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.verb == "completions":
             print(completions.generate(args.shell, p), end="")
+            return 0
+        if args.verb == completions.HELPER_VERB:
+            # Read-only value completion for the generated scripts; resolve the
+            # DB path but never create it (completion has no side effects).
+            for value in completions.complete(args.kind, resolve_db(args.db)):
+                print(value)
             return 0
         if args.verb == "setup":
             return onboarding.run_wizard()
