@@ -220,6 +220,32 @@ class Profile(BaseModel):
     tone: str = ""
 
 
+class Theme(BaseModel):
+    """One recurring thread of a topic's discussion: a short title + a gloss."""
+    title: str
+    summary: str = ""
+
+
+class TopicSummary(BaseModel):
+    """An AI narrative of what a tracked topic's archived discussion is about.
+
+    The topic-side parallel to :class:`Profile`: generated on demand from the
+    topic's matched posts/comments and returned as structured JSON (not prose)
+    so the CLI, ``--json``, and any HTML view render it deterministically.
+    ``themes`` are the most prominent threads; the three paragraphs cover what
+    the discussion is about, its mood, and where opinion splits. Cheap to
+    regenerate from the changing archive, so nothing is cached.
+    """
+
+    topic: str
+    model: str   # which LLM produced it
+    depth: str   # sampling preset used
+    overview: str = ""
+    themes: list[Theme] = []
+    sentiment: str = ""
+    viewpoints: str = ""
+
+
 class UserAnalytics(BaseModel):
     username: str
     total_posts: int
