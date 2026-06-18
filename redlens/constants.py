@@ -24,6 +24,7 @@ DEFAULT_LLM_MODEL = "gpt-4o-mini"
 
 # --- arctic HTTP client -----------------------------------------------------
 HTTP_TIMEOUT_S = 60
+DOCTOR_PROBE_TIMEOUT_S = 5        # `doctor` reachability probe — fail fast, don't hang
 PAGINATION_SLEEP_S = 0.25
 MAX_RETRIES = 6
 BACKOFF_BASE_S = 1.0
