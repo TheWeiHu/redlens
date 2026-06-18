@@ -7,7 +7,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from redlens import __version__, discovery, onboarding
+from redlens import __version__, completions, discovery, onboarding
 from redlens.analytics import compute_user_analytics
 from redlens.config import llm_api_key, resolve_db
 from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
@@ -221,7 +221,7 @@ def _pick_subreddits(
               file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="redlens")
     p.add_argument("--version", action="version", version=f"redlens {__version__}")
     p.add_argument("--db", default=None, help="SQLite file (default: REDLENS_DB, "
@@ -292,11 +292,22 @@ def main(argv: list[str] | None = None) -> int:
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
+    c = sub.add_parser(
+        "completions", help="print a shell completion script (eval or save it)")
+    c.add_argument("shell", choices=completions.SHELLS)
     if onboarding.ENABLED:
         sub.add_parser("setup")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = build_parser()
     args = p.parse_args(argv)
 
     try:
+        if args.verb == "completions":
+            print(completions.generate(args.shell, p), end="")
+            return 0
         if args.verb == "setup":
             return onboarding.run_wizard()
         if args.verb == "doctor":
