@@ -131,6 +131,32 @@ def test_cli_page_open_launches_browser(engine, tmp_path, monkeypatch):
     assert len(opened) == 1
 
 
+def test_cli_page_all_renders_index_and_skips_empty(engine, tmp_path,
+                                                    monkeypatch):
+    db = tmp_path / "t.db"
+    # dua lipa matches a post; ozempic's net yields nothing → skipped.
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    assert main(["--db", str(db), "track", "ozempic",
+                 "--subreddits", "Ozempic", "--yes"]) == 0
+
+    out = tmp_path / "reports"
+    assert main(["--db", str(db), "page", "--all", "-o", str(out)]) == 0
+
+    assert (out / "dua-lipa.html").exists()
+    assert not (out / "ozempic.html").exists()        # zero matches: skipped
+    index = (out / "index.html").read_text()
+    assert "dua-lipa.html" in index                   # links the rendered page
+    assert "ozempic" in index                          # but noted as skipped
+
+
+def test_cli_page_needs_topic_or_all(engine, tmp_path):
+    db = tmp_path / "t.db"
+    assert main(["--db", str(db), "page"]) == 1        # neither topic nor --all
+
+
 def test_list_topics_rollup_and_recency(engine, monkeypatch):
     data = {"dualipa": [raw("p1", "dualipa"), raw("p2", "dualipa")],
             "Ozempic": [raw("p3", "Ozempic")]}

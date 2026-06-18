@@ -15,7 +15,9 @@ import html
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 
 from sqlalchemy.engine import Engine
@@ -25,7 +27,7 @@ from redlens import constants
 from redlens.errors import NotFound
 from redlens.models import Comment, Post, Topic, TopicPost
 from redlens.reporting import lda
-from redlens.topics import get_topic, topic_comments
+from redlens.topics import get_topic, list_topics, topic_comments
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -228,6 +230,72 @@ def _by(posts: list[Post], key: Callable[[Post], str]) -> dict[str, list[Post]]:
         if k := key(p):
             groups[k].append(p)
     return groups
+
+
+def slug(name: str) -> str:
+    """A filesystem-safe, lowercase slug for a topic name (``Dua Lipa`` →
+    ``dua-lipa``); the per-topic page filename derives from it."""
+    return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
+
+
+@dataclass(frozen=True)
+class PageResult:
+    """One topic's outcome from ``render_all``: ``written`` is False when the
+    topic had zero matched posts and was skipped (noted on the index)."""
+    name: str
+    slug: str
+    matched: int
+    written: bool
+
+
+def render_all(engine: Engine, out_dir: Path) -> list[PageResult]:
+    """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
+    links them. Topics with zero matched posts are skipped (and noted on the
+    index) since there is nothing to chart. Returns one result per topic,
+    in the same most-recently-tracked-first order as the index."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with Session(engine) as session:
+        listings = list_topics(session)
+    results: list[PageResult] = []
+    for listing in listings:
+        s = slug(listing.name)
+        if listing.matched_posts == 0:
+            results.append(PageResult(listing.name, s, 0, written=False))
+            continue
+        doc = render_topic_page(engine, listing.name)
+        (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
+        results.append(
+            PageResult(listing.name, s, listing.matched_posts, written=True))
+    (out_dir / "index.html").write_text(
+        render_index(results), encoding="utf-8")
+    return results
+
+
+def render_index(results: list[PageResult]) -> str:
+    """A small overview page linking each rendered topic's report, with a note
+    listing any topics skipped for having no matched posts."""
+    written = [r for r in results if r.written]
+    skipped = [r for r in results if not r.written]
+    rows = "\n".join(
+        f"<tr><td><a href='{r.slug}.html'>{html.escape(r.name)}</a></td>"
+        f"<td class='n'>{r.matched:,} posts</td></tr>"
+        for r in written
+    )
+    body = (f"<table>{rows}</table>" if written
+            else '<p class="muted">no tracked topics with matched posts yet</p>')
+    skip_note = ""
+    if skipped:
+        names = ", ".join(html.escape(r.name) for r in skipped)
+        skip_note = (f'<p class="muted">skipped (no matched posts yet): '
+                     f'{names}</p>')
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tracked topics · redlens</title><style>{_CSS}</style></head><body>
+<h1>tracked topics</h1>
+<p class="muted">{len(written):,} report{"" if len(written) == 1 else "s"}</p>
+{body}
+{skip_note}
+</body></html>"""
 
 
 def render_topic_page(engine: Engine, name: str) -> str:

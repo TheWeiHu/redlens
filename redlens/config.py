@@ -48,6 +48,12 @@ def default_db_path() -> Path:
     return Path(user_data_dir(APP_NAME)) / "redlens.db"
 
 
+def default_report_dir() -> Path:
+    """Where ``page --all`` writes the index plus per-topic pages by default —
+    a ``reports`` folder under the per-user data dir, kept apart from the DB."""
+    return Path(user_data_dir(APP_NAME)) / "reports"
+
+
 def load_config() -> dict[str, Any]:
     """The parsed config file, or {} if there is none."""
     path = config_path()
