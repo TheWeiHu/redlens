@@ -30,6 +30,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - `redlens list` — every archived user at a glance: post/comment counts,
   last activity, and when each was last synced; `--json` for scripting. (#8)
+- `redlens topics` — the topic-surface parallel to `list`: every tracked
+  topic with its keywords, subreddit-net size, matched-post count, and
+  last-tracked date; `--json` for scripting. (#14)
 - `redlens export <username>` — dump a user's posts and comments to stdout (or
   `-o PATH`) as `--format json|csv|jsonl`. (#8)
 

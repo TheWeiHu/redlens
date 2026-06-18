@@ -23,6 +23,7 @@ from redlens.summarize import summarize_user
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
+    list_topics,
     pull_topic_comments,
     query_terms,
     search_subreddits,
@@ -243,6 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
     al.add_argument("--json", action="store_true")
     ls = sub.add_parser("list", help="list every user in the DB")
     ls.add_argument("--json", action="store_true")
+    tp = sub.add_parser("topics", help="list every tracked topic")
+    tp.add_argument("--json", action="store_true")
     ex = sub.add_parser("export", help="dump a user's posts and comments")
     ex.add_argument("username")
     ex.add_argument("--format", choices=export.FORMATS, default="json",
@@ -410,6 +413,20 @@ def main(argv: list[str] | None = None) -> int:
                           f"{row.total_comments:,} comments · "
                           f"last event {_ts(row.last_event_at)} · "
                           f"synced {_ts(row.last_synced_at)}")
+        elif args.verb == "topics":
+            with session(engine) as s:
+                topic_rows = list_topics(s)
+            if args.json:
+                print(json.dumps([r.model_dump() for r in topic_rows], indent=2))
+            elif not topic_rows:
+                print("no topics tracked — start one with: redlens track <topic>",
+                      file=sys.stderr)
+            else:
+                for trow in topic_rows:
+                    print(f"{trow.name}: {trow.matched_posts:,} posts across "
+                          f"{trow.subreddit_count:,} subreddits · "
+                          f"keywords {', '.join(trow.keywords)!r} · "
+                          f"tracked {_ts(trow.last_tracked_at)}")
         elif args.verb == "export":
             with session(engine) as s:
                 if args.out:

@@ -8,6 +8,7 @@ Kept deliberately small — the essential, stable contract:
   - the page renders from a tracked topic and refuses an unknown one.
 Arctic is stubbed; one integration test (network, weekly) is marked.
 """
+import json
 import time
 
 import pytest
@@ -19,7 +20,7 @@ from redlens.db import connect, init_schema
 from redlens.errors import NotFound
 from redlens.models import TopicPost
 from redlens.reporting.page import render_topic_page
-from redlens.topics import get_topic, track_topic
+from redlens.topics import get_topic, list_topics, track_topic
 
 NOW = int(time.time())
 
@@ -103,6 +104,50 @@ def test_cli_track_then_page(engine, tmp_path, monkeypatch):
                  "--subreddits", "dualipa", "--yes"]) == 0
     assert main(["--db", str(db), "page", "dua lipa"]) == 0
     assert (tmp_path / "dua-lipa.html").exists()
+
+
+def test_list_topics_rollup_and_recency(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa"), raw("p2", "dualipa")],
+            "Ozempic": [raw("p3", "Ozempic")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa", "dua_lipa"])
+    time.sleep(1.1)  # ensure a later last_tracked_at for the second topic
+    track_topic(engine, "ozempic", query="ozempic, glp-1", subreddits=["Ozempic"])
+
+    with Session(engine) as s:
+        rows = list_topics(s)
+
+    assert [r.name for r in rows] == ["ozempic", "dua lipa"]  # most-recent first
+    by_name = {r.name: r for r in rows}
+    assert by_name["dua lipa"].matched_posts == 2
+    assert by_name["dua lipa"].subreddit_count == 2
+    assert by_name["dua lipa"].keywords == ["dua lipa"]
+    assert by_name["ozempic"].matched_posts == 1
+    assert by_name["ozempic"].keywords == ["ozempic", "glp-1"]
+    assert by_name["ozempic"].last_tracked_at is not None
+
+
+def test_list_topics_empty_db(engine):
+    with Session(engine) as s:
+        assert list_topics(s) == []
+
+
+def test_cli_topics_text_and_json(engine, tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "topics"]) == 0      # empty queue: no crash
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "topics"]) == 0
+    out = capsys.readouterr().out
+    assert "dua lipa" in out and "1 posts" in out
+
+    assert main(["--db", str(db), "topics", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["name"] == "dua lipa"
+    assert payload[0]["matched_posts"] == 1
 
 
 @pytest.mark.integration

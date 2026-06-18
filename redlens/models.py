@@ -248,3 +248,19 @@ class UserListing(BaseModel):
     total_comments: int
     last_event_at: int | None    # newest post/comment created_utc
     last_synced_at: int | None   # most recent sync for this user
+
+
+class TopicListing(BaseModel):
+    """One row of ``redlens topics`` — a lightweight per-topic roll-up.
+
+    The topic-surface parallel to :class:`UserListing`: the few facts a
+    human scanning their tracked topics cares about — the keywords being
+    queried, how wide the subreddit net is, how many posts have matched,
+    and when it was last tracked.
+    """
+
+    name: str
+    keywords: list[str]
+    subreddit_count: int         # size of the topic's subreddit net
+    matched_posts: int           # posts tagged to this topic in topicpost
+    last_tracked_at: int | None  # when track last ran for this topic
