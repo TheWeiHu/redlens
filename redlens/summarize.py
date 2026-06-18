@@ -25,11 +25,21 @@ from typing import Any, TypeVar
 from pydantic import ValidationError
 from sqlalchemy import func
 from sqlmodel import Session, select
+from sqlmodel.sql.expression import SelectOfScalar
 
 from redlens import constants, llm, prompts
 from redlens.config import llm_api_key
 from redlens.errors import MissingKey, NotFound, RedlensError
-from redlens.models import Comment, Post, Profile, User
+from redlens.models import (
+    Comment,
+    Post,
+    Profile,
+    Topic,
+    TopicPost,
+    TopicSummary,
+    User,
+)
+from redlens.topics import get_topic
 
 _Activity = TypeVar("_Activity", Post, Comment)
 
@@ -43,11 +53,7 @@ def summarize_user(session: Session, username: str, *,
     :class:`RedlensError` for an unknown depth, and :class:`MissingKey` if no
     LLM key is configured.
     """
-    if depth is not None and depth not in constants.SUMMARY_DEPTHS:
-        raise RedlensError(
-            f"unknown depth {depth!r} "
-            f"(choose from {', '.join(constants.SUMMARY_DEPTHS)})")
-    resolved_depth = depth or constants.SUMMARY_DEFAULT_DEPTH
+    resolved_depth = _resolve_depth(depth)
 
     user = session.exec(
         select(User).where(func.lower(User.username) == username.lower())
@@ -75,6 +81,51 @@ def summarize_user(session: Session, username: str, *,
             f"LLM profile didn't match the expected shape: {exc}") from exc
 
 
+def summarize_topic(session: Session, name: str, *,
+                    depth: str | None = None) -> TopicSummary:
+    """Infer a narrative of what tracked topic ``name``'s discussion is about.
+
+    Samples the topic's matched posts/comments (the same top-voted + recent
+    blend as :func:`summarize_user`, sized by ``depth``) and asks one LLM for a
+    structured summary: an overview, the prominent themes, overall sentiment,
+    and where opinion splits. Raises :class:`NotFound` if the topic isn't
+    tracked, :class:`RedlensError` for an unknown depth, and :class:`MissingKey`
+    if no LLM key is configured.
+    """
+    resolved_depth = _resolve_depth(depth)
+
+    topic = get_topic(session, name)
+    if topic is None:
+        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+
+    key = llm_api_key()
+    if not key:
+        raise MissingKey(
+            "no LLM API key — run `redlens setup` or set "
+            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
+        )
+
+    prompt = _build_topic_prompt(session, topic, resolved_depth)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    data = _parse_json(raw)
+    try:
+        return TopicSummary.model_validate(
+            {"topic": topic.name, "model": llm.model_name(),
+             "depth": resolved_depth, **data})
+    except ValidationError as exc:
+        raise RedlensError(
+            f"LLM topic summary didn't match the expected shape: {exc}") from exc
+
+
+def _resolve_depth(depth: str | None) -> str:
+    """Validate an optional ``--depth`` and fall back to the default."""
+    if depth is not None and depth not in constants.SUMMARY_DEPTHS:
+        raise RedlensError(
+            f"unknown depth {depth!r} "
+            f"(choose from {', '.join(constants.SUMMARY_DEPTHS)})")
+    return depth or constants.SUMMARY_DEFAULT_DEPTH
+
+
 def _parse_json(raw: str) -> dict[str, Any]:
     """The JSON object from a completion, tolerant of markdown fences/prose
     around it (we take the outermost ``{...}``)."""
@@ -91,25 +142,23 @@ def _parse_json(raw: str) -> dict[str, Any]:
 
 
 def _sample(session: Session, model: type[_Activity], pk_attr: str,
-            canon: str, n: int) -> list[_Activity]:
-    """A representative ``n``-item sample of ``model`` rows for ``canon``.
+            base: SelectOfScalar[_Activity], n: int) -> list[_Activity]:
+    """A representative ``n``-item sample drawn from ``base`` (a select already
+    filtered to the membership set — a user's rows, or a topic's matched rows).
 
     Reserves a recent slice (``SUMMARY_RECENT_FRACTION``) then fills the rest
-    top-by-score, deduped — so the result spans the user's whole history
-    (their most-upvoted content) while still reflecting recent activity. Two
-    bounded ``LIMIT n`` queries, so it never loads the full archive.
+    top-by-score, deduped — so the result spans the whole history (the
+    most-upvoted content) while still reflecting recent activity. Two bounded
+    ``LIMIT n`` queries, so it never loads the full archive.
     """
     if n <= 0:
         return []
-    author = model.author_username
     by_score = session.exec(
-        select(model).where(author == canon)
-        .order_by(model.score.desc())  # type: ignore[attr-defined]
+        base.order_by(model.score.desc())  # type: ignore[attr-defined]
         .limit(n)
     ).all()
     by_recency = session.exec(
-        select(model).where(author == canon)
-        .order_by(model.created_utc.desc())  # type: ignore[attr-defined]
+        base.order_by(model.created_utc.desc())  # type: ignore[attr-defined]
         .limit(n)
     ).all()
 
@@ -133,8 +182,12 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
     no raw counts/karma/dates (``analytics`` reports those, and feeding them
     here just tempts the model to recite numbers instead of inferring)."""
     preset = constants.SUMMARY_DEPTHS[depth]
-    posts = _sample(session, Post, "post_id", canon, preset.posts)
-    comments = _sample(session, Comment, "comment_id", canon, preset.comments)
+    posts = _sample(session, Post, "post_id",
+                    select(Post).where(Post.author_username == canon),
+                    preset.posts)
+    comments = _sample(session, Comment, "comment_id",
+                       select(Comment).where(Comment.author_username == canon),
+                       preset.comments)
 
     subs: Counter[str] = Counter(
         session.exec(
@@ -161,6 +214,57 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
     return prompts.render(
         "profile",
         username=canon,
+        communities=communities,
+        post_titles=titles,
+        comment_snippets=snippets,
+    )
+
+
+def _build_topic_prompt(session: Session, topic: Topic, depth: str) -> str:
+    """Fill ``prompts/topic.txt`` with the topic's keywords, the communities
+    discussing it, and a representative sample of its matched posts/comments.
+
+    Membership mirrors the topic page / comment bridge: posts via the
+    ``topicpost`` join, comments via ``topicpost.post_id == comment.link_id``.
+    Like the profile prompt, it feeds content (titles + snippets), not raw
+    stats — ``show --topic`` reports the numbers."""
+    topic_id = topic.id
+    assert topic_id is not None
+    preset = constants.SUMMARY_DEPTHS[depth]
+    post_base = (
+        select(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .where(TopicPost.topic_id == topic_id)
+    )
+    comment_base = (
+        select(Comment)
+        .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
+        .where(TopicPost.topic_id == topic_id)
+    )
+    posts = _sample(session, Post, "post_id", post_base, preset.posts)
+    comments = _sample(session, Comment, "comment_id", comment_base, preset.comments)
+
+    subs: Counter[str] = Counter(
+        session.exec(
+            select(Post.subreddit_name)
+            .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+            .where(TopicPost.topic_id == topic_id)
+        ).all()
+    )
+    communities = ", ".join(
+        f"r/{name}" for name, _ in subs.most_common(constants.SUMMARY_TOP_SUBS)
+    ) or "—"
+
+    titles = "\n".join(f"- {p.title}" for p in posts if p.title) or "(none)"
+    snippets = "\n".join(
+        "- " + c.body.strip().replace("\n", " ")[:preset.comment_chars]
+        for c in comments if c.body and c.body.strip()
+    ) or "(none)"
+
+    return prompts.render(
+        "topic",
+        topic=topic.name,
+        keywords=", ".join(topic.keyword_list) or topic.name,
         communities=communities,
         post_titles=titles,
         comment_snippets=snippets,

@@ -21,10 +21,10 @@ from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.models import Profile, TopicAnalytics
+from redlens.models import Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
 from redlens.reporting.page import render_topic_page
-from redlens.summarize import summarize_user
+from redlens.summarize import summarize_topic, summarize_user
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
@@ -90,6 +90,22 @@ def _format_profile(p: Profile) -> str:
             f"{trait.capitalize()} {t.score}%" for trait, t in p.big_five.items())]
     for heading, body in (("Interests", p.interests), ("Beliefs", p.beliefs),
                           ("Tone", p.tone)):
+        if body:
+            lines += ["", f"{heading}: {body}"]
+    return "\n".join(lines)
+
+
+def _format_topic_summary(s: TopicSummary) -> str:
+    """Render a structured TopicSummary as readable terminal text (the same
+    fields are in ``--json``)."""
+    lines = [f"{s.topic!r} (via {s.model}, {s.depth} depth):", ""]
+    if s.overview:
+        lines += [s.overview]
+    if s.themes:
+        lines += ["", "Themes:"]
+        lines += [f"  • {t.title}: {t.summary}".rstrip(": ") for t in s.themes]
+    for heading, body in (("Sentiment", s.sentiment),
+                          ("Viewpoints", s.viewpoints)):
         if body:
             lines += ["", f"{heading}: {body}"]
     return "\n".join(lines)
@@ -292,8 +308,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"output format: {', '.join(export.FORMATS)} (default: json)")
     ex.add_argument("-o", "--out", help="write to PATH (default: stdout)")
     sm = sub.add_parser(
-        "summarize", help="AI profile summary from the archived data (BYO LLM key)")
-    sm.add_argument("username")
+        "summarize",
+        help="AI summary from the archived data: a user's profile, or "
+             "--topic's discussion (BYO LLM key)")
+    sm.add_argument("username", nargs="?",
+                    help="user to profile (omit when using --topic)")
+    sm.add_argument("--topic", help="summarize a tracked topic's discussion "
+                    "instead of a user")
     sm.add_argument("--json", action="store_true")
     sm.add_argument("--depth", choices=tuple(SUMMARY_DEPTHS),
                     help="how much of the archive to sample (top-voted + recent): "
@@ -457,12 +478,23 @@ def main(argv: list[str] | None = None) -> int:
                   f"links, {ur.posts_deleted:,} orphaned posts, "
                   f"{ur.comments_deleted:,} orphaned comments")
         elif args.verb == "summarize":
-            with session(engine) as s:
-                summ = summarize_user(s, args.username, depth=args.depth)
-            if args.json:
-                print(summ.model_dump_json(indent=2))
+            if args.topic:
+                with session(engine) as s:
+                    tsumm = summarize_topic(s, args.topic, depth=args.depth)
+                if args.json:
+                    print(tsumm.model_dump_json(indent=2))
+                else:
+                    print(_format_topic_summary(tsumm))
             else:
-                print(_format_profile(summ))
+                if not args.username:
+                    raise RedlensError(
+                        "summarize: give a username or --topic <topic>")
+                with session(engine) as s:
+                    summ = summarize_user(s, args.username, depth=args.depth)
+                if args.json:
+                    print(summ.model_dump_json(indent=2))
+                else:
+                    print(_format_profile(summ))
         elif args.verb == "list":
             with session(engine) as s:
                 rows = list_users(s)
