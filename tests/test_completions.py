@@ -14,7 +14,9 @@ def _subcommands() -> list[str]:
     parser = build_parser()
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
-            return list(action.choices)
+            # Internal helper verbs (``__``-prefixed, e.g. __complete) are kept
+            # out of the generated scripts on purpose, so don't require them.
+            return [n for n in action.choices if not n.startswith("__")]
     raise AssertionError("parser has no subcommands")
 
 
@@ -48,3 +50,62 @@ def test_cli_completions_verb_prints_script(shell: str, capsys: pytest.CaptureFi
     out = capsys.readouterr().out
     assert "redlens" in out
     assert "completions" in out  # the verb completes itself
+
+
+@pytest.mark.parametrize("shell", completions.SHELLS)
+def test_helper_verb_stays_out_of_scripts(shell: str) -> None:
+    # The internal helper is invoked *by* the scripts but must never be offered
+    # to the user as a completion candidate.
+    script = completions.generate(shell, build_parser())
+    assert completions.HELPER_VERB in script  # the scripts call it...
+    assert f"-a {completions.HELPER_VERB}" not in script  # ...but never list it (fish)
+    assert f" {completions.HELPER_VERB})" not in script  # ...nor as a case label (bash/zsh)
+
+
+@pytest.mark.parametrize("shell", completions.SHELLS)
+def test_scripts_wire_db_value_completion(shell: str) -> None:
+    script = completions.generate(shell, build_parser())
+    # positional username completion (show/export/summarize) and topic
+    # completion (page positional + --topic value) both shell out to the helper
+    assert f"{completions.HELPER_VERB} users" in script
+    assert f"{completions.HELPER_VERB} topics" in script
+
+
+def test_complete_lists_usernames_and_topics(tmp_path) -> None:
+    from redlens.db import connect, init_schema, session
+    from redlens.models import Topic, User
+
+    db = tmp_path / "redlens.db"
+    engine = connect(db)
+    init_schema(engine)
+    with session(engine) as s:
+        s.add(User(username="alice"))
+        s.add(User(username="bob"))
+        s.add(Topic(name="ubi"))
+        s.commit()
+
+    assert completions.complete("users", db) == ["alice", "bob"]
+    assert completions.complete("topics", db) == ["ubi"]
+
+
+def test_complete_silent_when_db_missing(tmp_path) -> None:
+    missing = tmp_path / "nope.db"
+    assert completions.complete("users", missing) == []
+    assert completions.complete("topics", missing) == []
+    assert not missing.exists()  # completion must not create a DB
+
+
+def test_cli_complete_verb_prints_names(tmp_path, capsys: pytest.CaptureFixture[str]) -> None:
+    from redlens.db import connect, init_schema, session
+    from redlens.models import User
+
+    db = tmp_path / "redlens.db"
+    engine = connect(db)
+    init_schema(engine)
+    with session(engine) as s:
+        s.add(User(username="carol"))
+        s.commit()
+
+    rc = main(["--db", str(db), completions.HELPER_VERB, "users"])
+    assert rc == 0
+    assert capsys.readouterr().out.splitlines() == ["carol"]
