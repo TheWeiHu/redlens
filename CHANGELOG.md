@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `redlens untrack <topic>` — stop tracking a topic and garbage-collect only
+  the rows it alone kept: deletes the topic and its `topicpost` links, then
+  drops a matched post (and its comments) only when no other topic still tags
+  it and its author isn't a synced user. Confirms before deleting; `-y/--yes`
+  skips the prompt (a non-interactive run without `-y` declines, never deletes
+  by surprise).
 - `redlens show --topic <topic>` — a topic's roll-up stats to the terminal:
   matched-post volume, total score, top subreddits, top authors, and date
   range, computed in SQL (the topic-side mirror of `show <user>`). `--json`
