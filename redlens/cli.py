@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +14,7 @@ from redlens.analytics import (
     compute_user_analytics,
     list_users,
 )
-from redlens.config import llm_api_key, resolve_db
+from redlens.config import default_report_dir, llm_api_key, resolve_db
 from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
@@ -23,7 +22,7 @@ from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.models import Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
-from redlens.reporting.page import render_topic_page
+from redlens.reporting.page import render_all, render_topic_page, slug
 from redlens.summarize import summarize_topic, summarize_user
 from redlens.topics import (
     SubredditCandidate,
@@ -52,10 +51,6 @@ def _ts(s: int | None) -> str:
     if not s:
         return "—"
     return datetime.fromtimestamp(s, tz=UTC).strftime("%Y-%m-%d %H:%MZ")
-
-
-def _slug(name: str) -> str:
-    return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
 
 
 def _confirm(prompt: str, *, assume_yes: bool) -> bool:
@@ -370,8 +365,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="skip the arctic-shift reachability probe (offline "
                      "diagnosis); reports it as skipped, not failed")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
-    g.add_argument("topic")
-    g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
+    g.add_argument("topic", nargs="?", help="topic to render (omit with --all)")
+    g.add_argument("--all", action="store_true", dest="all_topics",
+                   help="render every tracked topic plus an index.html into -o "
+                   "(a directory)")
+    g.add_argument("-o", "--out", help="single topic: output file "
+                   "(default: ./<topic>.html); --all: output directory "
+                   "(default: the per-user reports dir)")
     ut = sub.add_parser(
         "untrack", help="stop tracking a topic and drop its orphaned matches")
     ut.add_argument("topic")
@@ -458,10 +458,27 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{res.topic.name!r}: {n:,} comments stored")
             print(f"next: redlens page {res.topic.name!r}")
         elif args.verb == "page":
-            html_doc = render_topic_page(engine, args.topic)
-            out = Path(args.out or f"{_slug(args.topic)}.html")
-            out.write_text(html_doc, encoding="utf-8")
-            print(f"wrote {out} ({len(html_doc):,} bytes)")
+            if args.all_topics:
+                out_dir = Path(args.out) if args.out else default_report_dir()
+                results = render_all(engine, out_dir)
+                written = [pg for pg in results if pg.written]
+                skipped = [pg for pg in results if not pg.written]
+                for pg in written:
+                    print(f"wrote {out_dir / (pg.slug + '.html')}")
+                if skipped:
+                    print(f"skipped {len(skipped)} topic(s) with no matched "
+                          f"posts: {', '.join(pg.name for pg in skipped)}",
+                          file=sys.stderr)
+                index = out_dir / "index.html"
+                print(f"index: {index} "
+                      f"({len(written)} topic{'' if len(written) == 1 else 's'})")
+            elif args.topic:
+                html_doc = render_topic_page(engine, args.topic)
+                out = Path(args.out or f"{slug(args.topic)}.html")
+                out.write_text(html_doc, encoding="utf-8")
+                print(f"wrote {out} ({len(html_doc):,} bytes)")
+            else:
+                raise RedlensError("page: give a topic or pass --all")
         elif args.verb == "untrack":
             with session(engine) as s:
                 if get_topic(s, args.topic) is None:
