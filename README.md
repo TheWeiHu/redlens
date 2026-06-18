@@ -45,6 +45,60 @@ several discovery sources you pick from, plus a curating picker. Run
 No setup needed — the schema is created (and migrated) automatically on
 first use. No API keys are needed — arctic-shift is a free, open mirror.
 
+## Walkthrough: track a topic
+
+A worked example — track an ambiguous topic, inspect it, then render a page.
+We follow `ubi` (universal basic income), which collides with *Ubisoft* and the
+game *Rainbow Six*, so we steer the keywords and drop the noise:
+
+```bash
+redlens track ubi \
+  --query 'ubi, universal basic income' \
+  --exclude 'ubisoft, rainbow six' \
+  --sources name,global \
+  --yes
+```
+
+`--query` terms are comma-separated and OR'd; `--exclude` drops any post
+containing one of its terms; `--sources name,global` picks the discovery net
+non-interactively (instead of the picker); `--yes` accepts the found subreddits
+without curating. `track` first builds that subreddit *net* (arctic has no
+global text search), then archives every matching post across it. Progress
+streams to stderr, and the result line lands on stdout:
+
+```
+  r/BasicIncome: 412 new
+  r/economy: 1209 new
+  ...
+'ubi': 1,847 new posts across 9 subreddits (keywords 'ubi, universal basic income', last 180 days)
+next: redlens page 'ubi'
+```
+
+Inspect what's tracked — `topics` rolls up every topic (keywords, net size,
+match count, last run):
+
+```bash
+redlens topics
+```
+```
+ubi: 1,847 posts across 9 subreddits · keywords 'ubi, universal basic income' · tracked 2m ago
+```
+
+Re-running `track ubi` is incremental — the net is remembered and only new
+posts are pulled. Add `--comments` to also archive the comment threads under
+matched posts. Finally, render a standalone, dependency-free HTML report:
+
+```bash
+redlens page ubi          # writes ./ubi.html  (-o PATH to choose the path)
+```
+```
+wrote ubi.html (84,210 bytes)
+```
+
+See `redlens track --help` for every discovery source (`name`, `global`, `web`,
+`popular`, `llm`) and `--discover`, which widens the net by following the
+authors of matched posts.
+
 ## Optional API key
 
 An optional **LLM API key** (OpenAI or any OpenAI-compatible endpoint) powers
