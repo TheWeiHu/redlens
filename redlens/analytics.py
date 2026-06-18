@@ -3,8 +3,20 @@ from __future__ import annotations
 from sqlalchemy import case, func, literal, union_all
 from sqlmodel import Session, col, select
 
+from redlens import constants
 from redlens.errors import NotFound
-from redlens.models import Comment, Post, SyncState, User, UserAnalytics, UserListing
+from redlens.models import (
+    Comment,
+    NameCount,
+    Post,
+    SyncState,
+    TopicAnalytics,
+    TopicPost,
+    User,
+    UserAnalytics,
+    UserListing,
+)
+from redlens.topics import get_topic
 
 
 def compute_user_analytics(session: Session, username: str) -> UserAnalytics:
@@ -81,6 +93,73 @@ def compute_user_analytics(session: Session, username: str) -> UserAnalytics:
         distinct_subreddits=row.distinct_subreddits,
         top_subreddit=top.subreddit_name if top else None,
         top_subreddit_event_count=top.n if top else 0,
+    )
+
+
+def compute_topic_analytics(session: Session, name: str) -> TopicAnalytics:
+    """Roll up a tracked topic's matched posts — the topic-side mirror of
+    :func:`compute_user_analytics`. Every measure is a SQL aggregate over the
+    ``topicpost`` join (the 0007 in-SQL convention); nothing is loaded into
+    Python row-by-row.
+    """
+    topic = get_topic(session, name)
+    if topic is None:
+        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+
+    # Every measure below is a SQL aggregate over the topic's matched posts
+    # (the topicpost join), so nothing is loaded into Python row-by-row.
+    row = session.execute(
+        select(
+            *[
+                func.count().label("matched_posts"),
+                func.coalesce(func.sum(Post.score), 0).label("total_score"),
+                func.min(Post.created_utc).label("first_post_at"),
+                func.max(Post.created_utc).label("last_post_at"),
+                func.count(func.distinct(Post.subreddit_name)).label(
+                    "distinct_subreddits"),
+            ]
+        )
+        .select_from(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .where(TopicPost.topic_id == topic.id)
+    ).one()
+
+    top_subreddits = session.execute(
+        select(col(Post.subreddit_name), func.count().label("n"))
+        .select_from(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .where(TopicPost.topic_id == topic.id)
+        .group_by(Post.subreddit_name)
+        .order_by(func.count().desc(), Post.subreddit_name)
+        .limit(constants.TOP_SUBREDDITS)
+    ).all()
+
+    # Drop bot/placeholder names so "top authors" reflects real voices.
+    top_authors = session.execute(
+        select(col(Post.author_username), func.count().label("n"))
+        .select_from(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .where(
+            TopicPost.topic_id == topic.id,
+            func.lower(Post.author_username).notin_(constants.NON_AUTHORS),
+        )
+        .group_by(Post.author_username)
+        .order_by(func.count().desc(), Post.author_username)
+        .limit(constants.TOP_AUTHORS)
+    ).all()
+
+    return TopicAnalytics(
+        name=topic.name,
+        keywords=topic.keyword_list,
+        net_size=len(topic.subreddit_list),
+        matched_posts=row.matched_posts,
+        total_score=row.total_score,
+        distinct_subreddits=row.distinct_subreddits,
+        first_post_at=row.first_post_at,
+        last_post_at=row.last_post_at,
+        last_tracked_at=topic.last_tracked_at,
+        top_subreddits=[NameCount(name=n, count=c) for n, c in top_subreddits],
+        top_authors=[NameCount(name=a, count=c) for a, c in top_authors],
     )
 
 

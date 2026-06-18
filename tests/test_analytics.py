@@ -1,10 +1,16 @@
+import json
+
 import pytest
 from sqlmodel import Session
 
-from redlens.analytics import compute_user_analytics, list_users
+from redlens.analytics import (
+    compute_topic_analytics,
+    compute_user_analytics,
+    list_users,
+)
 from redlens.db import connect, init_schema, upsert
 from redlens.errors import NotFound
-from redlens.models import Comment, Post, SyncState, User
+from redlens.models import Comment, Post, SyncState, Topic, TopicPost, User
 
 
 @pytest.fixture
@@ -126,3 +132,85 @@ def test_list_users_sorted_by_recency_and_handles_no_activity(db_session):
     assert quiet.total_comments == 0
     assert quiet.last_event_at is None
     assert quiet.last_synced_at is not None  # falls back to the user row's fetched_at
+
+
+def _topic(session, name, *, net, posts):
+    """Create a tracked topic over ``net`` subreddits and tag ``posts`` to it."""
+    topic = Topic(name=name, keywords=json.dumps([name]),
+                  subreddits=json.dumps(net), last_tracked_at=1_700_300_000)
+    session.add(topic)
+    session.flush()
+    upsert(session, posts)
+    upsert(session, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
+    session.commit()
+    return topic
+
+
+def test_topic_analytics_not_found(db_session):
+    with pytest.raises(NotFound):
+        compute_topic_analytics(db_session, "ghost")
+
+
+def test_topic_analytics_empty_topic(db_session):
+    _topic(db_session, "ubi", net=["basicincome", "ubi"], posts=[])
+    a = compute_topic_analytics(db_session, "ubi")
+    assert a.matched_posts == 0
+    assert a.total_score == 0
+    assert a.net_size == 2
+    assert a.distinct_subreddits == 0
+    assert a.first_post_at is None
+    assert a.top_subreddits == []
+    assert a.top_authors == []
+
+
+def test_topic_analytics_rolls_up_matched_posts(db_session):
+    posts = [
+        _post("alice", "p1", sub="basicincome", score=50, ts=1_700_000_000),
+        _post("alice", "p2", sub="basicincome", score=30, ts=1_700_100_000),
+        _post("bob", "p3", sub="economics", score=10, ts=1_700_050_000),
+    ]
+    _topic(db_session, "ubi", net=["basicincome", "economics", "futurology"],
+           posts=posts)
+    a = compute_topic_analytics(db_session, "ubi")
+    assert a.name == "ubi"
+    assert a.keywords == ["ubi"]
+    assert a.matched_posts == 3
+    assert a.total_score == 90
+    assert a.net_size == 3                       # futurology cast but unmatched
+    assert a.distinct_subreddits == 2
+    assert a.first_post_at == 1_700_000_000
+    assert a.last_post_at == 1_700_100_000
+    assert a.last_tracked_at == 1_700_300_000
+    assert [(s.name, s.count) for s in a.top_subreddits] == [
+        ("basicincome", 2), ("economics", 1)]
+    assert [(x.name, x.count) for x in a.top_authors] == [
+        ("alice", 2), ("bob", 1)]
+
+
+def test_topic_analytics_excludes_bot_authors(db_session):
+    posts = [
+        _post("AutoModerator", "p1", sub="basicincome"),
+        _post("[deleted]", "p2", sub="basicincome"),
+        _post("realuser", "p3", sub="basicincome"),
+    ]
+    _topic(db_session, "ubi", net=["basicincome"], posts=posts)
+    a = compute_topic_analytics(db_session, "ubi")
+    assert a.matched_posts == 3                  # all posts still counted
+    assert [x.name for x in a.top_authors] == ["realuser"]  # bots filtered out
+
+
+def test_topic_analytics_is_case_insensitive(db_session):
+    _topic(db_session, "UBI", net=["basicincome"],
+           posts=[_post("alice", "p1", sub="basicincome")])
+    a = compute_topic_analytics(db_session, "ubi")
+    assert a.name == "UBI"
+    assert a.matched_posts == 1
+
+
+def test_topic_analytics_only_counts_its_own_posts(db_session):
+    _topic(db_session, "ubi", net=["basicincome"],
+           posts=[_post("alice", "p1", sub="basicincome", score=5)])
+    _topic(db_session, "crypto", net=["bitcoin"],
+           posts=[_post("bob", "p2", sub="bitcoin", score=100)])
+    assert compute_topic_analytics(db_session, "ubi").matched_posts == 1
+    assert compute_topic_analytics(db_session, "ubi").total_score == 5
