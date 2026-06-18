@@ -12,6 +12,7 @@ from redlens.analytics import compute_user_analytics
 from redlens.config import llm_api_key, resolve_db
 from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
+from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.models import Profile
@@ -285,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--sources", help="comma-separated discovery sources "
                    "(name, global, web, popular, llm) — lets you request "
                    "web/global non-interactively; default is the picker")
+    doc = sub.add_parser(
+        "doctor", help="diagnose the environment (DB, config, arctic-shift, LLM key)")
+    doc.add_argument("--json", action="store_true")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
     g.add_argument("topic")
     g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
@@ -295,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.verb == "setup":
             return onboarding.run_wizard()
+        if args.verb == "doctor":
+            return run_doctor(args.db, as_json=args.json)
         onboarding.offer_setup_on_first_run()
         db = resolve_db(args.db)
         if args.verb == "explore":
