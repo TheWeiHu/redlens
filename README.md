@@ -36,6 +36,7 @@ Track a **topic** instead of a user, then render it as a page:
 redlens track "dua lipa"   # discover a subreddit net, archive every match
 redlens topics             # every tracked topic (keywords, net, match count)
 redlens page  "dua lipa"   # render a standalone HTML report
+redlens page  --all        # render every topic + an index.html linking them
 ```
 
 `track` builds a subreddit net (arctic has no global text search) from
@@ -94,6 +95,11 @@ redlens page ubi          # writes ./ubi.html  (-o PATH to choose the path)
 ```
 wrote ubi.html (84,210 bytes)
 ```
+
+Tracking several topics? `redlens page --all` renders each one plus a small
+`index.html` that links them, into a directory (`-o DIR`, default the per-user
+reports dir); topics with no matched posts yet are skipped and noted on the
+index.
 
 See `redlens track --help` for every discovery source (`name`, `global`, `web`,
 `popular`, `llm`) and `--discover`, which widens the net by following the
