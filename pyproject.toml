@@ -24,7 +24,8 @@ classifiers = [
 ]
 dependencies = [
     "platformdirs>=4",
-    "sqlmodel>=0.0.14",
+    # sqlmodel is 0.0.x and can break API on any bump; cap below 0.1.
+    "sqlmodel>=0.0.14,<0.1",
 ]
 
 [project.urls]
