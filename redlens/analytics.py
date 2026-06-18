@@ -4,7 +4,7 @@ from sqlalchemy import case, func, literal, union_all
 from sqlmodel import Session, col, select
 
 from redlens.errors import NotFound
-from redlens.models import Comment, Post, User, UserAnalytics
+from redlens.models import Comment, Post, SyncState, User, UserAnalytics, UserListing
 
 
 def compute_user_analytics(session: Session, username: str) -> UserAnalytics:
@@ -82,3 +82,47 @@ def compute_user_analytics(session: Session, username: str) -> UserAnalytics:
         top_subreddit=top.subreddit_name if top else None,
         top_subreddit_event_count=top.n if top else 0,
     )
+
+
+def list_users(session: Session) -> list[UserListing]:
+    """Roll up every user in the DB: post/comment counts, last activity, and
+    when each was last synced. Sorted most-recently-active first.
+
+    Counts and last-event come from grouped SQL (one query per stream) so this
+    stays cheap as the archive grows; ``last_synced_at`` uses the newest
+    ``sync_state`` row for the user, falling back to when the row was fetched.
+    """
+    users = session.exec(select(User)).all()
+    if not users:
+        return []
+
+    def _agg(model: type[Post] | type[Comment]) -> dict[str, tuple[int, int | None]]:
+        rows: list[tuple[str, int, int | None]] = list(session.exec(
+            select(model.author_username, func.count(), func.max(model.created_utc))
+            .group_by(model.author_username)
+        ).all())
+        return {author: (count, newest) for author, count, newest in rows}
+
+    posts = _agg(Post)
+    comments = _agg(Comment)
+    synced_rows: list[tuple[str, int | None]] = list(session.exec(
+        select(SyncState.username, func.max(SyncState.synced_at))
+        .group_by(SyncState.username)
+    ).all())
+    synced = dict(synced_rows)
+
+    listings = []
+    for u in users:
+        post_count, post_newest = posts.get(u.username, (0, None))
+        comment_count, comment_newest = comments.get(u.username, (0, None))
+        last_event = max((t for t in (post_newest, comment_newest) if t is not None),
+                         default=None)
+        listings.append(UserListing(
+            username=u.username,
+            total_posts=post_count,
+            total_comments=comment_count,
+            last_event_at=last_event,
+            last_synced_at=synced.get(u.username) or u.fetched_at,
+        ))
+    listings.sort(key=lambda r: (r.last_event_at or 0), reverse=True)
+    return listings
