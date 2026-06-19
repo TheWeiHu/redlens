@@ -7,7 +7,7 @@ import sys
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from redlens import __version__, completions, discovery, export, onboarding
 from redlens.analytics import (
@@ -52,6 +52,14 @@ def _ts(s: int | None) -> str:
     if not s:
         return "—"
     return datetime.fromtimestamp(s, tz=UTC).strftime("%Y-%m-%d %H:%MZ")
+
+
+def _emit_json(obj: Any) -> None:
+    """Print a pydantic model — or a list of them — as indented JSON to stdout."""
+    if isinstance(obj, list):
+        print(json.dumps([r.model_dump() for r in obj], indent=2))
+    else:
+        print(obj.model_dump_json(indent=2))
 
 
 def _confirm(prompt: str, *, assume_yes: bool) -> bool:
@@ -523,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
                 with session(engine) as s:
                     tsumm = summarize_topic(s, args.topic, depth=args.depth)
                 if args.json:
-                    print(tsumm.model_dump_json(indent=2))
+                    _emit_json(tsumm)
                 else:
                     print(_format_topic_summary(tsumm))
             else:
@@ -533,14 +541,14 @@ def main(argv: list[str] | None = None) -> int:
                 with session(engine) as s:
                     summ = summarize_user(s, args.username, depth=args.depth)
                 if args.json:
-                    print(summ.model_dump_json(indent=2))
+                    _emit_json(summ)
                 else:
                     print(_format_profile(summ))
         elif args.verb == "list":
             with session(engine) as s:
                 rows = list_users(s)
             if args.json:
-                print(json.dumps([r.model_dump() for r in rows], indent=2))
+                _emit_json(rows)
             elif not rows:
                 print("no users in DB — sync one with: redlens sync <user>",
                       file=sys.stderr)
@@ -554,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:
             with session(engine) as s:
                 topic_rows = list_topics(s)
             if args.json:
-                print(json.dumps([r.model_dump() for r in topic_rows], indent=2))
+                _emit_json(topic_rows)
             elif not topic_rows:
                 print("no topics tracked — start one with: redlens track <topic>",
                       file=sys.stderr)
@@ -597,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
             with session(engine) as s:
                 ta = compute_topic_analytics(s, args.topic)
             if args.json:
-                print(ta.model_dump_json(indent=2))
+                _emit_json(ta)
             else:
                 _print_topic_analytics(ta)
         else:  # "show <user>" or its hidden alias "analytics"
@@ -609,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
             with session(engine) as s:
                 an = compute_user_analytics(s, args.username)
             if args.json:
-                print(an.model_dump_json(indent=2))
+                _emit_json(an)
             else:
                 print(f"u/{an.username}: {an.total_posts:,} posts, "
                       f"{an.total_comments:,} comments, "

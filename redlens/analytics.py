@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import case, func, literal, union_all
 from sqlmodel import Session, col, select
 
@@ -108,45 +110,36 @@ def compute_topic_analytics(session: Session, name: str) -> TopicAnalytics:
 
     # Every measure below is a SQL aggregate over the topic's matched posts
     # (the topicpost join), so nothing is loaded into Python row-by-row.
-    row = session.execute(
-        select(
-            *[
-                func.count().label("matched_posts"),
-                func.coalesce(func.sum(Post.score), 0).label("total_score"),
-                func.min(Post.created_utc).label("first_post_at"),
-                func.max(Post.created_utc).label("last_post_at"),
-                func.count(func.distinct(Post.subreddit_name)).label(
-                    "distinct_subreddits"),
-            ]
+    def _scoped(*columns: Any) -> Any:
+        return (
+            select(*columns)
+            .select_from(Post)
+            .join(TopicPost, TopicPost.post_id == Post.post_id)
+            .where(TopicPost.topic_id == topic.id)
         )
-        .select_from(Post)
-        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic.id)
-    ).one()
 
-    top_subreddits = session.execute(
-        select(col(Post.subreddit_name), func.count().label("n"))
-        .select_from(Post)
-        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic.id)
-        .group_by(Post.subreddit_name)
-        .order_by(func.count().desc(), Post.subreddit_name)
-        .limit(constants.TOP_SUBREDDITS)
-    ).all()
+    def _top(column: Any, limit: int, extra_where: Any = None) -> list[Any]:
+        q = _scoped(column, func.count().label("n"))
+        if extra_where is not None:
+            q = q.where(extra_where)
+        return list(session.execute(
+            q.group_by(column).order_by(func.count().desc(), column).limit(limit)
+        ).all())
 
+    row = session.execute(_scoped(
+        func.count().label("matched_posts"),
+        func.coalesce(func.sum(Post.score), 0).label("total_score"),
+        func.min(Post.created_utc).label("first_post_at"),
+        func.max(Post.created_utc).label("last_post_at"),
+        func.count(func.distinct(Post.subreddit_name)).label("distinct_subreddits"),
+    )).one()
+
+    top_subreddits = _top(col(Post.subreddit_name), constants.TOP_SUBREDDITS)
     # Drop bot/placeholder names so "top authors" reflects real voices.
-    top_authors = session.execute(
-        select(col(Post.author_username), func.count().label("n"))
-        .select_from(Post)
-        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(
-            TopicPost.topic_id == topic.id,
-            func.lower(Post.author_username).notin_(constants.NON_AUTHORS),
-        )
-        .group_by(Post.author_username)
-        .order_by(func.count().desc(), Post.author_username)
-        .limit(constants.TOP_AUTHORS)
-    ).all()
+    top_authors = _top(
+        col(Post.author_username), constants.TOP_AUTHORS,
+        func.lower(Post.author_username).notin_(constants.NON_AUTHORS),
+    )
 
     return TopicAnalytics(
         name=topic.name,
