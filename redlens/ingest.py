@@ -93,18 +93,21 @@ def _sync_kind(
     elif state is not None:
         after = state.newest_seen_utc       # cheap forward-only top-up
 
+    incremental = after is not None
     newest = state.newest_seen_utc if state else None
     oldest = state.oldest_seen_utc if state else None
 
     batch: list[T] = []
     written = 0
     count = 0
+    run_oldest: int | None = None   # oldest item fetched in THIS call only
     for raw in iter_fn(username, after=after, before=before):
         count += 1
         obj = parse(raw)
         cu: int = obj.created_utc  # type: ignore[attr-defined]
         newest = cu if newest is None else max(newest, cu)
         oldest = cu if oldest is None else min(oldest, cu)
+        run_oldest = cu if run_oldest is None else min(run_oldest, cu)
         batch.append(obj)
         if len(batch) >= BATCH_SIZE:
             written += upsert(session, batch)
@@ -112,13 +115,21 @@ def _sync_kind(
     if batch:
         written += upsert(session, batch)
 
-    # The stream ran to exhaustion either way; the only way it stops short of
-    # history is the MAX_ITEMS_PER_STREAM cap (the interruption hook used in
-    # tests — in production it is None, so streams always complete). A forward
-    # incremental pull is by definition already past the backfill.
+    # A stream stops short of history only when the MAX_ITEMS_PER_STREAM cap
+    # trips (the interruption hook used in tests — in production it is None, so
+    # streams run to exhaustion). Streams are newest-first: a capped *backfill*
+    # leaves the bottom unfinished, and a capped *incremental* top-up leaves a
+    # gap between the old cursor and the oldest item it managed to fetch. Both
+    # are unfinished backfills — drop oldest_seen_utc to this run's floor so the
+    # next sync resumes downward from there and closes the gap (re-pulled rows
+    # dedup on upsert). Only a stream that exhausted is "completed".
     cap = arctic.MAX_ITEMS_PER_STREAM
     capped = cap is not None and count >= cap
-    completed = (state is not None and state.completed_backfill) or not capped
+    if incremental and capped and run_oldest is not None:
+        completed = False
+        oldest = run_oldest
+    else:
+        completed = (state is not None and state.completed_backfill) or not capped
 
     upsert(session, [SyncState(
         username=username,

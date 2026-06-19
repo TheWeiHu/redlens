@@ -68,6 +68,21 @@ adheres to [Semantic Versioning](https://semver.org/).
   `page`) with a real `--query`/`--exclude`/`--sources` example and expected
   output. (#18)
 
+### Fixed
+- Incremental `sync`: a top-up cut short by `MAX_ITEMS_PER_STREAM` no longer
+  strands the items between the old cursor and the oldest one it fetched — the
+  pull is marked an unfinished backfill so the next sync resumes downward and
+  closes the gap (re-pulled rows dedup).
+- `track`: the per-topic incremental cursor no longer advances when a subreddit
+  in the net fails transiently, so that subreddit's older posts are still
+  re-fetched on the next track instead of being silently skipped.
+- `page --all`: topic names that reduce to the same slug (e.g. `C++` and `C#`
+  → `c`) no longer overwrite each other's page or share an index link —
+  colliding slugs are suffixed (`c`, `c-2`).
+- Shell completions now complete topic names for `untrack <topic>`.
+- The `analytics` deprecation alias and the internal `__complete` helper no
+  longer appear in `redlens --help` (they were leaking into the usage line).
+
 ### Removed
 - The un-buildable Reddit official-API surface. (#21)
 

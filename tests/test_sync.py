@@ -144,6 +144,46 @@ def test_interrupted_backfill_resumes_without_refetch(monkeypatch):
     assert st.oldest_seen_utc == 1000
 
 
+# --- capped incremental top-up must not strand a forward gap ---------------
+
+def test_capped_incremental_pull_does_not_lose_the_gap(monkeypatch):
+    """A capped forward top-up fetches only the newest items; everything between
+    the old cursor and the oldest item it reached must still be recoverable, not
+    silently skipped on the next sync."""
+    fake = FakeArctic(_posts(10, start=1000), [], meta={"author": "alice", "id": "t2_a"})
+    _install(monkeypatch, fake)
+    engine = _mem()
+
+    # Baseline: the first 10 items (1000..1009), fully backfilled.
+    assert sync_user("alice", engine).posts_written == 10
+    with Session(engine) as s:
+        st = _get_sync_state(s, "alice", "posts")
+        assert st is not None and st.completed_backfill is True
+        assert st.newest_seen_utc == 1009
+
+    # 100 newer items arrive (1010..1109); a capped pull reaches only the top 30.
+    fake.posts = _posts(110, start=1000)
+    _install(monkeypatch, fake, cap=30)
+    assert sync_user("alice", engine).posts_written == 30      # 1080..1109
+    with Session(engine) as s:
+        total = s.exec(select(func.count()).select_from(Post)).one()
+        st = _get_sync_state(s, "alice", "posts")
+    assert total == 40
+    # The capped top-up left a gap (1010..1079) -> backfill is NOT complete, and
+    # the cursor drops to this run's floor so the next sync resumes downward.
+    assert st is not None and st.completed_backfill is False
+    assert st.oldest_seen_utc == 1080
+
+    # Next (uncapped) sync closes the gap instead of querying past it.
+    _install(monkeypatch, fake, cap=None)
+    sync_user("alice", engine)
+    with Session(engine) as s:
+        total = s.exec(select(func.count()).select_from(Post)).one()
+        st = _get_sync_state(s, "alice", "posts")
+    assert total == 110                                         # nothing lost
+    assert st is not None and st.completed_backfill is True
+
+
 # --- --full override -------------------------------------------------------
 
 def test_full_flag_re_walks_the_whole_history(monkeypatch):

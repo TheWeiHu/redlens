@@ -35,6 +35,7 @@ POSITIONAL_KIND: dict[str, str] = {
     "export": "users",
     "summarize": "users",
     "page": "topics",
+    "untrack": "topics",
 }
 # Flags whose VALUE names a DB entity (the flag name itself still completes via
 # the normal flag list); flag → entity kind.
