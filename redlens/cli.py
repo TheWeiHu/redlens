@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
 import webbrowser
 from datetime import UTC, datetime
@@ -135,9 +136,14 @@ def _print_topic_analytics(ta: TopicAnalytics) -> None:
 def _resolve_sources(sources_arg: str | None, *, assume_yes: bool) -> list[str]:
     """Discovery sources for a new topic: an explicit --sources list wins
     (the only way to request web/global/llm non-interactively), otherwise
-    fall back to the interactive picker / name-only default."""
+    fall back to the interactive picker / name-only default.
+
+    ``--sources none`` (or ``skip``) means run no discovery at all — track only
+    the explicit ``--subreddits``, the non-interactive 'just these subs' path."""
     if sources_arg is None:
         return _choose_sources(assume_yes=assume_yes)
+    if sources_arg.strip().lower() in ("none", "skip", ""):
+        return []
     valid = {key for key, _, _ in SOURCES}
     chosen: list[str] = []
     unknown: list[str] = []
@@ -286,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     # `__complete` helper, both registered without help=) out of the usage
     # line's {choices} brace; they're already absent from the command list.
     sub = p.add_subparsers(dest="verb", required=True, metavar="<command>")
-    sub.add_parser("init")
+    sub.add_parser("init", help="create or migrate the database, then exit")
     sy = sub.add_parser("sync", help="archive a user's history (incremental by default)")
     sy.add_argument("username")
     sy.add_argument("--full", action="store_true",
@@ -369,7 +375,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="accept the found subreddit list without the picker")
     t.add_argument("--sources", help="comma-separated discovery sources "
                    "(name, global, web, popular, llm) — lets you request "
-                   "web/global non-interactively; default is the picker")
+                   "web/global non-interactively; 'none' runs no discovery "
+                   "(track only --subreddits); default is the picker")
     doc = sub.add_parser(
         "doctor", help="diagnose the environment (DB, config, arctic-shift, LLM key)")
     doc.add_argument("--json", action="store_true")
@@ -389,6 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
                    "browser after writing it")
     g.add_argument("--no-browser", action="store_true",
                    help="never open a browser, even with --open (for scripts/CI)")
+    g.add_argument("--summary", action="store_true",
+                   help="embed an AI narrative of the discussion in the page "
+                   "(one LLM call per topic; BYO key)")
+    g.add_argument("--depth", choices=SUMMARY_DEPTHS, default=SUMMARY_DEFAULT_DEPTH,
+                   help="how much of the archive the --summary samples "
+                   f"(default: {SUMMARY_DEFAULT_DEPTH})")
     ut = sub.add_parser(
         "untrack", help="stop tracking a topic and drop its orphaned matches")
     ut.add_argument("topic")
@@ -486,9 +499,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{res.topic.name!r}: {n:,} comments stored")
             print(f"next: redlens page {res.topic.name!r}")
         elif args.verb == "page":
+            # An optional AI-narrative provider, shared by the single and --all
+            # paths. Each call is one LLM request against the topic's archive.
+            def _summary(topic_name: str) -> TopicSummary | None:
+                if not args.summary:
+                    return None
+                with session(engine) as s:
+                    return summarize_topic(s, topic_name, depth=args.depth)
+
             if args.all_topics:
                 out_dir = Path(args.out) if args.out else default_report_dir()
-                results = render_all(engine, out_dir)
+                results = render_all(
+                    engine, out_dir, summarize=_summary if args.summary else None)
                 written = [pg for pg in results if pg.written]
                 skipped = [pg for pg in results if not pg.written]
                 for pg in written:
@@ -503,7 +525,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.open and not args.no_browser:
                     webbrowser.open(index.resolve().as_uri())
             elif args.topic:
-                html_doc = render_topic_page(engine, args.topic)
+                html_doc = render_topic_page(
+                    engine, args.topic, summary=_summary(args.topic))
                 out = Path(args.out or f"{slug(args.topic)}.html")
                 out.write_text(html_doc, encoding="utf-8")
                 print(f"wrote {out} ({len(html_doc):,} bytes)")
@@ -628,6 +651,12 @@ def main(argv: list[str] | None = None) -> int:
                       f"top r/{an.top_subreddit} "
                       f"({an.top_subreddit_event_count:,} events)")
                 print(f"  first {_ts(an.first_event_at)} · last {_ts(an.last_event_at)}")
+        return 0
+    except BrokenPipeError:
+        # A downstream reader (head, less, a closed pager) shut the pipe early.
+        # Point stdout at devnull so the interpreter's final flush can't re-raise
+        # and exit 120 — a clean exit for a tool meant to be piped.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
     except NotFound as e:
         print(f"not found: {e}", file=sys.stderr)
