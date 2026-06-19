@@ -176,31 +176,28 @@ def _sample(session: Session, model: type[_Activity], pk_attr: str,
     return sorted(chosen.values(), key=lambda x: x.created_utc, reverse=True)
 
 
-def _build_prompt(session: Session, canon: str, depth: str) -> str:
-    """Fill ``prompts/profile.txt`` with this user's communities and a
-    representative sample of their posts/comments. Deliberately content-first:
-    no raw counts/karma/dates (``analytics`` reports those, and feeding them
-    here just tempts the model to recite numbers instead of inferring)."""
-    preset = constants.SUMMARY_DEPTHS[depth]
-    posts = _sample(session, Post, "post_id",
-                    select(Post).where(Post.author_username == canon),
-                    preset.posts)
-    comments = _sample(session, Comment, "comment_id",
-                       select(Comment).where(Comment.author_username == canon),
-                       preset.comments)
+def _render_sample_prompt(
+    session: Session, *, template: str, depth: str,
+    post_base: SelectOfScalar[Post], comment_base: SelectOfScalar[Comment],
+    sub_bases: list[SelectOfScalar[str]], **extra: str,
+) -> str:
+    """Sample posts/comments from the given membership selects and render
+    ``template`` with the shared communities/titles/snippets fields plus any
+    caller-specific ``extra`` kwargs.
 
-    subs: Counter[str] = Counter(
-        session.exec(
-            select(Post.subreddit_name).where(Post.author_username == canon)
-        ).all()
-    )
-    subs.update(
-        session.exec(
-            select(Comment.subreddit_name).where(Comment.author_username == canon)
-        ).all()
-    )
-    # Names only, ranked by activity — the order conveys where they're most at
-    # home without putting raw tallies in front of the model.
+    Deliberately content-first: titles + snippets, not raw counts/karma/dates
+    (``analytics`` / ``show --topic`` report those, and feeding numbers here just
+    tempts the model to recite them instead of inferring). ``sub_bases`` are the
+    one-or-more ``subreddit_name`` selects whose rows, ranked by activity, name
+    the communities — order conveys where the discussion lives without tallies.
+    """
+    preset = constants.SUMMARY_DEPTHS[depth]
+    posts = _sample(session, Post, "post_id", post_base, preset.posts)
+    comments = _sample(session, Comment, "comment_id", comment_base, preset.comments)
+
+    subs: Counter[str] = Counter()
+    for base in sub_bases:
+        subs.update(session.exec(base).all())
     communities = ", ".join(
         f"r/{name}" for name, _ in subs.most_common(constants.SUMMARY_TOP_SUBS)
     ) or "—"
@@ -212,60 +209,51 @@ def _build_prompt(session: Session, canon: str, depth: str) -> str:
     ) or "(none)"
 
     return prompts.render(
-        "profile",
-        username=canon,
+        template,
         communities=communities,
         post_titles=titles,
         comment_snippets=snippets,
+        **extra,
+    )
+
+
+def _build_prompt(session: Session, canon: str, depth: str) -> str:
+    """Fill ``prompts/profile.txt`` for a user — their communities and a
+    representative sample of their posts/comments."""
+    return _render_sample_prompt(
+        session, template="profile", depth=depth,
+        post_base=select(Post).where(Post.author_username == canon),
+        comment_base=select(Comment).where(Comment.author_username == canon),
+        sub_bases=[
+            select(Post.subreddit_name).where(Post.author_username == canon),
+            select(Comment.subreddit_name).where(Comment.author_username == canon),
+        ],
+        username=canon,
     )
 
 
 def _build_topic_prompt(session: Session, topic: Topic, depth: str) -> str:
-    """Fill ``prompts/topic.txt`` with the topic's keywords, the communities
-    discussing it, and a representative sample of its matched posts/comments.
+    """Fill ``prompts/topic.txt`` for a tracked topic — its keywords, the
+    communities discussing it, and a sample of its matched posts/comments.
 
     Membership mirrors the topic page / comment bridge: posts via the
     ``topicpost`` join, comments via ``topicpost.post_id == comment.link_id``.
-    Like the profile prompt, it feeds content (titles + snippets), not raw
-    stats — ``show --topic`` reports the numbers."""
+    """
     topic_id = topic.id
     assert topic_id is not None
-    preset = constants.SUMMARY_DEPTHS[depth]
-    post_base = (
-        select(Post)
+    return _render_sample_prompt(
+        session, template="topic", depth=depth,
+        post_base=select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id)
-    )
-    comment_base = (
-        select(Comment)
+        .where(TopicPost.topic_id == topic_id),
+        comment_base=select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id)
-    )
-    posts = _sample(session, Post, "post_id", post_base, preset.posts)
-    comments = _sample(session, Comment, "comment_id", comment_base, preset.comments)
-
-    subs: Counter[str] = Counter(
-        session.exec(
+        .where(TopicPost.topic_id == topic_id),
+        sub_bases=[
             select(Post.subreddit_name)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_id == topic_id)
-        ).all()
-    )
-    communities = ", ".join(
-        f"r/{name}" for name, _ in subs.most_common(constants.SUMMARY_TOP_SUBS)
-    ) or "—"
-
-    titles = "\n".join(f"- {p.title}" for p in posts if p.title) or "(none)"
-    snippets = "\n".join(
-        "- " + c.body.strip().replace("\n", " ")[:preset.comment_chars]
-        for c in comments if c.body and c.body.strip()
-    ) or "(none)"
-
-    return prompts.render(
-        "topic",
+            .where(TopicPost.topic_id == topic_id),
+        ],
         topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,
-        communities=communities,
-        post_titles=titles,
-        comment_snippets=snippets,
     )
