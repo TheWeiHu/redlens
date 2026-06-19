@@ -14,8 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   handles sarcasm and negation ("X no longer works" is negative); without a key
   it falls back to an offline, deterministic lexicon scorer
   (`redlens/sentiment.py`, valences from the VADER lexicon) — keyless but rough.
-  `summarize.weekly_topic_sentiment()` does the LLM scoring in a single call
-  over per-week title samples.
+  When comment threads have been pulled (`track --comments`), both paths fold
+  the comments into each week's score alongside the posts; the chart tooltip
+  shows the post and comment counts behind each week.
 - `redlens page --all` — render every tracked topic plus a small `index.html`
   linking them, into a directory (`-o DIR`, default the per-user reports dir).
   Reuses the existing per-topic renderer; topics with zero matched posts are
