@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `redlens page --all` — render every tracked topic plus a small `index.html`
+  linking them, into a directory (`-o DIR`, default the per-user reports dir).
+  Reuses the existing per-topic renderer; topics with zero matched posts are
+  skipped and noted on the index.
 - `redlens untrack <topic>` — stop tracking a topic and garbage-collect only
   the rows it alone kept: deletes the topic and its `topicpost` links, then
   drops a matched post (and its comments) only when no other topic still tags
