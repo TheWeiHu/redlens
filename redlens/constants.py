@@ -118,6 +118,7 @@ MIN_POST_ENGAGEMENT = 5          # score + COMMENT_WEIGHT*comments below = didn'
 COMMENT_WEIGHT = 2              # a comment counts this many votes toward engagement
 TITLE_MAX = 110                 # chars of a post title shown before truncating
 DRILL_POSTS = 25                # posts listed inside each expandable group
+SENTIMENT_WEEK_SAMPLE = 8       # most-engaged titles per week sent to the LLM scorer
 ACCENT = "#d93a00"             # redlens red — the page's one accent color
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"

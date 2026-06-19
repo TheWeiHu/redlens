@@ -215,4 +215,55 @@ def test_topic_representative_payload_and_structured_summary(
     assert "r/climate" in data                            # communities, by name
     assert "carbon tax debate heats up" in data          # matched post sampled
     assert "DEFINING ARGUMENT about policy tradeoffs" in data  # top-voted comment
-    assert "score" not in data and "posts," not in data   # no raw stats fed in
+
+
+def test_weekly_topic_sentiment_no_key_raises(topic_db):
+    from redlens.errors import MissingKey
+    from redlens.summarize import weekly_topic_sentiment
+    with Session(connect(str(topic_db))) as s, pytest.raises(MissingKey):
+        weekly_topic_sentiment(s, "climate")
+
+
+def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
+    """Posts are bucketed by week, the week's titles are handed to the model,
+    and the returned -100..100 scores map to [-1,1] with gaps zero-filled."""
+    from datetime import UTC, datetime
+
+    from redlens.sentiment import _week_start
+    from redlens.summarize import weekly_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    t1 = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())   # week Mon 2024-01-01
+    t2 = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())  # week Mon 2024-01-15
+    w1, w2 = _week_start(t1), _week_start(t2)
+    with Session(connect(str(db))) as s:
+        topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
+                      subreddits=json.dumps(["vpn"]), last_tracked_at=t2)
+        s.add(topic)
+        s.flush()
+        posts = [
+            Post(post_id="a", author_username="x", subreddit_name="vpn",
+                 created_utc=t1, title="works great", score=5),
+            Post(post_id="b", author_username="y", subreddit_name="vpn",
+                 created_utc=t2, title="keeps crashing", score=9),
+        ]
+        upsert(s, posts)
+        upsert(s, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
+        s.commit()
+
+    seen = {}
+
+    def fake_complete(prompt, key, *, max_tokens):
+        seen["prompt"] = prompt
+        return json.dumps({"weeks": [{"week": w1, "score": 80},
+                                     {"week": w2, "score": -60}]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        weeks = weekly_topic_sentiment(s, "vpn")
+
+    assert [w.week for w in weeks] == ["2024-01-01", "2024-01-08", "2024-01-15"]
+    assert weeks[0].mean == 0.8 and weeks[0].total == 1
+    assert weeks[1].total == 0 and weeks[1].mean == 0.0      # gap zero-filled
+    assert weeks[2].mean == -0.6 and weeks[2].total == 1
+    assert "works great" in seen["prompt"] and "keeps crashing" in seen["prompt"]

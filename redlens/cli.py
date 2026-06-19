@@ -25,7 +25,12 @@ from redlens.ingest import sync_user
 from redlens.models import Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
 from redlens.reporting.page import render_all, render_topic_page, slug
-from redlens.summarize import summarize_topic, summarize_user
+from redlens.sentiment import WeekSentiment
+from redlens.summarize import (
+    summarize_topic,
+    summarize_user,
+    weekly_topic_sentiment,
+)
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
@@ -507,10 +512,20 @@ def main(argv: list[str] | None = None) -> int:
                 with session(engine) as s:
                     return summarize_topic(s, topic_name, depth=args.depth)
 
+            # The sentiment-over-time trend: LLM-scored under --summary (handles
+            # sarcasm/negation), else None so the page uses the offline lexicon.
+            def _sentiment(topic_name: str) -> list[WeekSentiment] | None:
+                if not args.summary:
+                    return None
+                with session(engine) as s:
+                    return weekly_topic_sentiment(s, topic_name)
+
             if args.all_topics:
                 out_dir = Path(args.out) if args.out else default_report_dir()
                 results = render_all(
-                    engine, out_dir, summarize=_summary if args.summary else None)
+                    engine, out_dir,
+                    summarize=_summary if args.summary else None,
+                    sentiment=_sentiment if args.summary else None)
                 written = [pg for pg in results if pg.written]
                 skipped = [pg for pg in results if not pg.written]
                 for pg in written:
@@ -526,7 +541,8 @@ def main(argv: list[str] | None = None) -> int:
                     webbrowser.open(index.resolve().as_uri())
             elif args.topic:
                 html_doc = render_topic_page(
-                    engine, args.topic, summary=_summary(args.topic))
+                    engine, args.topic, summary=_summary(args.topic),
+                    sentiment_weeks=_sentiment(args.topic))
                 out = Path(args.out or f"{slug(args.topic)}.html")
                 out.write_text(html_doc, encoding="utf-8")
                 print(f"wrote {out} ({len(html_doc):,} bytes)")

@@ -8,12 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - **Sentiment over time** on the topic page — a new "Sentiment over time"
-  section charts each week's mean post sentiment (−1 to +1) as diverging bars
-  (green positive / red negative), bucketed from the archive's post timestamps.
-  Scoring is offline and deterministic via a bundled lexicon
-  (`redlens/sentiment.py`, word valences from the VADER lexicon), so the page
-  stays keyless; a light negation rule flips "not good". Posts with no sentiment
-  words are neutral and excluded rather than dragging the mean to zero.
+  section charts each week's sentiment (−1 to +1) as diverging bars (green
+  positive / red negative), bucketed from the archive's post timestamps. With
+  `page --summary` (LLM, key required) each week is scored by one LLM call that
+  handles sarcasm and negation ("X no longer works" is negative); without a key
+  it falls back to an offline, deterministic lexicon scorer
+  (`redlens/sentiment.py`, valences from the VADER lexicon) — keyless but rough.
+  `summarize.weekly_topic_sentiment()` does the LLM scoring in a single call
+  over per-week title samples.
 - `redlens page --all` — render every tracked topic plus a small `index.html`
   linking them, into a directory (`-o DIR`, default the per-user reports dir).
   Reuses the existing per-topic renderer; topics with zero matched posts are

@@ -19,7 +19,8 @@ slice of recent activity. How much is sampled is the ``depth`` knob — see
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, defaultdict
+from datetime import date, timedelta
 from typing import Any, TypeVar
 
 from pydantic import ValidationError
@@ -39,6 +40,7 @@ from redlens.models import (
     TopicSummary,
     User,
 )
+from redlens.sentiment import WeekSentiment, _week_start
 from redlens.topics import get_topic
 
 _Activity = TypeVar("_Activity", Post, Comment)
@@ -115,6 +117,83 @@ def summarize_topic(session: Session, name: str, *,
     except ValidationError as exc:
         raise RedlensError(
             f"LLM topic summary didn't match the expected shape: {exc}") from exc
+
+
+def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
+    """LLM-scored weekly sentiment trend for a tracked topic.
+
+    Buckets the topic's matched posts into UTC ISO weeks, samples each week's
+    most-engaged titles, and asks ONE LLM call to score every week from -100 to
+    +100 — handling the sarcasm and negation a lexicon can't ("X no longer
+    works" is negative; "another amazing feature" may be sarcastic). Returns one
+    :class:`~redlens.sentiment.WeekSentiment` per week (``mean`` in [-1, 1]),
+    gaps zero-filled. Raises :class:`NotFound`/:class:`MissingKey` like
+    :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
+    topic = get_topic(session, name)
+    if topic is None:
+        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+
+    key = llm_api_key()
+    if not key:
+        raise MissingKey(
+            "no LLM API key — run `redlens setup` or set "
+            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
+        )
+
+    topic_id = topic.id
+    assert topic_id is not None
+    posts = list(session.exec(
+        select(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .where(TopicPost.topic_id == topic_id)
+    ))
+    if not posts:
+        return []
+
+    buckets: dict[str, list[Post]] = defaultdict(list)
+    for p in posts:
+        buckets[_week_start(p.created_utc)].append(p)
+    weeks = sorted(buckets)
+
+    def _engagement(p: Post) -> int:
+        return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
+
+    blocks = []
+    for wk in weeks:
+        sample = sorted(buckets[wk], key=lambda p: -_engagement(p)
+                        )[:constants.SENTIMENT_WEEK_SAMPLE]
+        titles = "\n".join(
+            f"- {p.title.strip()[:140]}"
+            for p in sample if p.title and p.title.strip()
+        ) or "- (no titles)"
+        blocks.append(f"Week {wk} ({len(buckets[wk])} posts):\n{titles}")
+
+    prompt = prompts.render(
+        "sentiment", topic=topic.name,
+        keywords=", ".join(topic.keyword_list) or topic.name,
+        weeks="\n\n".join(blocks))
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    data = _parse_json(raw)
+
+    rows = data.get("weeks")
+    scores: dict[str, float] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        wk = str(row.get("week", ""))
+        val = row.get("score")
+        if wk in buckets and isinstance(val, (int, float)) and not isinstance(val, bool):
+            scores[wk] = max(-1.0, min(1.0, float(val) / 100.0))
+
+    out: list[WeekSentiment] = []
+    cur, end = date.fromisoformat(weeks[0]), date.fromisoformat(weeks[-1])
+    while cur <= end:
+        wk = cur.isoformat()
+        total = len(buckets.get(wk, []))
+        out.append(WeekSentiment(wk, scores.get(wk, 0.0) if total else 0.0,
+                                 total, total))
+        cur += timedelta(days=7)
+    return out
 
 
 def _resolve_depth(depth: str | None) -> str:
