@@ -26,7 +26,7 @@ from sqlmodel import Session, select
 
 from redlens import constants
 from redlens.errors import NotFound
-from redlens.models import Comment, Post, Topic, TopicPost, TopicSummary
+from redlens.models import Brand, Comment, Post, Topic, TopicPost, TopicSummary
 from redlens.reporting import lda
 from redlens.sentiment import WeekSentiment, weekly_sentiment
 from redlens.topics import get_topic, list_topics, topic_comments
@@ -260,6 +260,53 @@ def _themes_html(themes: list[tuple[float, list[str]]],
     return "\n".join(out)
 
 
+def _brand_mentions(
+    brands: list[Brand], posts: list[Post], comments: list[Comment],
+) -> list[tuple[str, int, list[Post], list[Comment]]]:
+    """Count how many posts and comments mention each LLM-identified brand —
+    deterministic, case-insensitive, whole-word over the brand's spelling
+    variants. Returns (name, mention count, matching posts, matching comments)
+    for brands that appear at least once, most-mentioned first. The LLM only
+    recognized the brands; the frequency is counted here so it's exact."""
+    rows: list[tuple[str, int, list[Post], list[Comment]]] = []
+    for brand in brands:
+        terms = [t for t in (brand.aliases or [brand.name]) if t]
+        if not terms:
+            continue
+        pat = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in terms) + r")\b",
+                         re.IGNORECASE)
+        mp = [p for p in posts if pat.search(f"{p.title or ''} {p.selftext or ''}")]
+        mc = [c for c in comments if pat.search(c.body or "")]
+        if mp or mc:
+            rows.append((brand.name, len(mp) + len(mc), mp, mc))
+    rows.sort(key=lambda r: (-r[1], r[0].lower()))
+    return rows
+
+
+def _brands_section(
+    rows: list[tuple[str, int, list[Post], list[Comment]]],
+) -> str:
+    """Render the 'Other brands mentioned' section: a mention-count bar per
+    brand that expands to the posts and comments naming it. '' when none."""
+    if not rows:
+        return ""
+    rows = rows[:constants.TOP_BRANDS]
+    peak = max(n for _, n, _, _ in rows)
+    out = []
+    for name, n, mp, mc in rows:
+        aposts = sorted(mp, key=lambda p: (-p.score, p.post_id))[:constants.DRILL_POSTS]
+        acomments = sorted(mc, key=lambda c: (-c.score, c.comment_id)
+                           )[:constants.DRILL_POSTS]
+        items = ("".join(_post_li(p) for p in aposts)
+                 + "".join(_comment_li(c) for c in acomments))
+        out.append(f"<details><summary>{_bar(name, n, peak)}</summary>"
+                   f"<ul>{items}</ul></details>")
+    return ('<h2>Other brands mentioned</h2>\n'
+            '<p class="muted">competitors and alternatives named in the '
+            'discussion, by posts + comments mentioning them · click to read</p>\n'
+            + "\n".join(out))
+
+
 def _influential(posts: list[Post],
                  comments: list[Comment]) -> list[tuple[str, int, str]]:
     """Authors by engagement index: per post sqrt(score + COMMENT_WEIGHT x
@@ -400,6 +447,7 @@ def render_all(engine: Engine, out_dir: Path,
                summarize: Callable[[str], TopicSummary | None] | None = None,
                sentiment: Callable[[str], list[WeekSentiment] | None] | None = None,
                theme_labeler: Callable[[str, list[list[str]]], list[str]] | None = None,
+               brands: Callable[[str], list[Brand] | None] | None = None,
                ) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
@@ -409,8 +457,9 @@ def render_all(engine: Engine, out_dir: Path,
     ``summarize`` is an optional per-topic AI-narrative provider (one LLM call
     each). ``sentiment`` is an optional per-topic LLM sentiment-trend provider;
     without it each page falls back to the offline lexicon. ``theme_labeler``
-    turns each page's LDA clusters into readable labels. When given, every
-    rendered page gets those."""
+    turns each page's LDA clusters into readable labels. ``brands`` surfaces the
+    other brands named in each topic's discussion. When given, every rendered
+    page gets those."""
     out_dir.mkdir(parents=True, exist_ok=True)
     with Session(engine) as session:
         listings = list_topics(session)
@@ -426,8 +475,10 @@ def render_all(engine: Engine, out_dir: Path,
             continue
         summary = summarize(listing.name) if summarize else None
         weeks = sentiment(listing.name) if sentiment else None
+        found_brands = brands(listing.name) if brands else None
         doc = render_topic_page(engine, listing.name, summary=summary,
-                                sentiment_weeks=weeks, theme_labeler=theme_labeler)
+                                sentiment_weeks=weeks, theme_labeler=theme_labeler,
+                                brands=found_brands)
         (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
         results.append(
             PageResult(listing.name, s, listing.matched_posts, written=True))
@@ -467,7 +518,8 @@ def render_topic_page(engine: Engine, name: str,
                       summary: TopicSummary | None = None,
                       sentiment_weeks: list[WeekSentiment] | None = None,
                       theme_labeler: Callable[[str, list[list[str]]], list[str]]
-                      | None = None) -> str:
+                      | None = None,
+                      brands: list[Brand] | None = None) -> str:
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
     optional — when given, an AI-narrative section is added. ``sentiment_weeks``
     (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
@@ -499,7 +551,11 @@ def render_topic_page(engine: Engine, name: str,
         labels = (theme_labeler(topic.name, [words for _, words in themes])
                   if theme_labeler and themes else None)
         themes_html = _themes_html(themes, labels)
-        return _render(topic, posts, comments, summary, section, themes_html)
+
+        brands_html = _brands_section(
+            _brand_mentions(brands, posts, comments)) if brands else ""
+        return _render(topic, posts, comments, summary, section, themes_html,
+                       brands_html)
 
 
 def _sentiment_section(series: list[WeekSentiment], *, is_llm: bool) -> str:
@@ -516,7 +572,8 @@ def _sentiment_section(series: list[WeekSentiment], *, is_llm: bool) -> str:
 
 def _render(topic: Topic, posts: list[Post], comments: list[Comment],
             summary: TopicSummary | None = None,
-            sentiment_section: str = "", themes_html: str = "") -> str:
+            sentiment_section: str = "", themes_html: str = "",
+            brands_html: str = "") -> str:
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
     keywords = ", ".join(topic.keyword_list)
@@ -566,6 +623,7 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 {infl_html}
 <h2>Themes</h2>
 {themes_html}
+{brands_html}
 <h2>Links</h2>
 {domains or '<div class="muted">no external links</div>'}
 <h2>Top posts</h2>

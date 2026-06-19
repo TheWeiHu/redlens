@@ -298,6 +298,14 @@ class NameCount(BaseModel):
     count: int
 
 
+class Brand(BaseModel):
+    """An other brand/product the LLM spotted in a topic's discussion, with the
+    spelling variants used to count its mentions (canonical name is also tried
+    as an alias when the list is empty)."""
+    name: str
+    aliases: list[str] = []
+
+
 class TopicAnalytics(BaseModel):
     """A tracked topic's roll-up: the topic-side mirror of ``UserAnalytics``.
 
