@@ -54,9 +54,22 @@ def test_weekly_sentiment_buckets_and_zero_fill():
     weeks = weekly_sentiment(items)
     assert [w.week for w in weeks] == ["2024-01-01", "2024-01-08", "2024-01-15"]
     first, gap, last = weeks
-    assert first.mean > 0 and first.scored == 2 and first.total == 2
-    assert gap.mean == 0.0 and gap.scored == 0 and gap.total == 0  # zero-filled
-    assert last.mean < 0 and last.scored == 1 and last.total == 2  # 1 of 2 scored
+    assert first.mean > 0 and first.posts == 2 and first.comments == 0
+    assert gap.mean == 0.0 and gap.posts == 0 and gap.comments == 0  # zero-filled
+    assert last.mean < 0 and last.posts == 2                         # 1 of 2 scored
+
+
+def test_weekly_sentiment_includes_comments():
+    posts = [(_ts(2024, 1, 3), "great and wonderful")]      # positive post
+    comments = [
+        (_ts(2024, 1, 3), "this is awful and broken"),       # negative comments
+        (_ts(2024, 1, 4), "terrible, hate it"),              # drag the week down
+    ]
+    [week] = weekly_sentiment(posts, comments)
+    assert week.posts == 1 and week.comments == 2
+    # the post alone is positive; folding in the two negative comments flips it
+    assert week.mean < weekly_sentiment(posts)[0].mean
+    assert week.mean < 0
 
 
 def test_weekly_sentiment_empty():

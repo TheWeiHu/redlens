@@ -41,7 +41,7 @@ from redlens.models import (
     User,
 )
 from redlens.sentiment import WeekSentiment, _week_start
-from redlens.topics import get_topic
+from redlens.topics import get_topic, topic_comments
 
 _Activity = TypeVar("_Activity", Post, Comment)
 
@@ -149,24 +149,36 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
     ))
     if not posts:
         return []
+    comments = topic_comments(session, topic.name)
 
-    buckets: dict[str, list[Post]] = defaultdict(list)
+    posts_by_week: dict[str, list[Post]] = defaultdict(list)
     for p in posts:
-        buckets[_week_start(p.created_utc)].append(p)
-    weeks = sorted(buckets)
+        posts_by_week[_week_start(p.created_utc)].append(p)
+    comments_by_week: dict[str, list[Comment]] = defaultdict(list)
+    for c in comments:
+        comments_by_week[_week_start(c.created_utc)].append(c)
+    weeks = sorted(posts_by_week)
 
     def _engagement(p: Post) -> int:
         return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
 
+    def _snip(text: str) -> str:
+        return text.strip().replace("\n", " ")[:140]
+
     blocks = []
     for wk in weeks:
-        sample = sorted(buckets[wk], key=lambda p: -_engagement(p)
-                        )[:constants.SENTIMENT_WEEK_SAMPLE]
-        titles = "\n".join(
-            f"- {p.title.strip()[:140]}"
-            for p in sample if p.title and p.title.strip()
-        ) or "- (no titles)"
-        blocks.append(f"Week {wk} ({len(buckets[wk])} posts):\n{titles}")
+        wkp = sorted(posts_by_week[wk], key=lambda p: -_engagement(p)
+                     )[:constants.SENTIMENT_WEEK_SAMPLE]
+        wkc = sorted(comments_by_week.get(wk, []), key=lambda c: -c.score
+                     )[:constants.SENTIMENT_WEEK_SAMPLE]
+        lines = [f"Week {wk} ({len(posts_by_week[wk])} posts, "
+                 f"{len(comments_by_week.get(wk, []))} comments):", "posts:"]
+        lines += [f"- {_snip(p.title)}" for p in wkp
+                  if p.title and p.title.strip()] or ["- (none)"]
+        if any(c.body and c.body.strip() for c in wkc):
+            lines.append("comments:")
+            lines += [f"- {_snip(c.body)}" for c in wkc if c.body and c.body.strip()]
+        blocks.append("\n".join(lines))
 
     prompt = prompts.render(
         "sentiment", topic=topic.name,
@@ -182,16 +194,18 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
             continue
         wk = str(row.get("week", ""))
         val = row.get("score")
-        if wk in buckets and isinstance(val, (int, float)) and not isinstance(val, bool):
+        if (wk in posts_by_week and isinstance(val, (int, float))
+                and not isinstance(val, bool)):
             scores[wk] = max(-1.0, min(1.0, float(val) / 100.0))
 
     out: list[WeekSentiment] = []
     cur, end = date.fromisoformat(weeks[0]), date.fromisoformat(weeks[-1])
     while cur <= end:
         wk = cur.isoformat()
-        total = len(buckets.get(wk, []))
-        out.append(WeekSentiment(wk, scores.get(wk, 0.0) if total else 0.0,
-                                 total, total))
+        n_posts = len(posts_by_week.get(wk, []))
+        n_comments = len(comments_by_week.get(wk, []))
+        out.append(WeekSentiment(wk, scores.get(wk, 0.0) if n_posts else 0.0,
+                                 n_posts, n_comments))
         cur += timedelta(days=7)
     return out
 

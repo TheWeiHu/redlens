@@ -249,6 +249,10 @@ def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
         ]
         upsert(s, posts)
         upsert(s, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
+        # a comment under post "a" (bridged by link_id == post_id), week 1
+        upsert(s, [Comment(comment_id="c1", author_username="z",
+                           subreddit_name="vpn", link_id="a", parent_id=None,
+                           created_utc=t1, score=7, body="totally agree, love it")])
         s.commit()
 
     seen = {}
@@ -263,7 +267,9 @@ def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
         weeks = weekly_topic_sentiment(s, "vpn")
 
     assert [w.week for w in weeks] == ["2024-01-01", "2024-01-08", "2024-01-15"]
-    assert weeks[0].mean == 0.8 and weeks[0].total == 1
-    assert weeks[1].total == 0 and weeks[1].mean == 0.0      # gap zero-filled
-    assert weeks[2].mean == -0.6 and weeks[2].total == 1
+    assert weeks[0].mean == 0.8 and weeks[0].posts == 1 and weeks[0].comments == 1
+    assert weeks[1].posts == 0 and weeks[1].mean == 0.0      # gap zero-filled
+    assert weeks[2].mean == -0.6 and weeks[2].posts == 1
+    # both the post title and the comment body were handed to the model
     assert "works great" in seen["prompt"] and "keeps crashing" in seen["prompt"]
+    assert "totally agree, love it" in seen["prompt"] and "comments:" in seen["prompt"]

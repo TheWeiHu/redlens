@@ -1,6 +1,6 @@
 You are scoring the sentiment of Reddit discussion about "$topic" (tracked by keywords: $keywords) week by week, to chart how the mood shifts over time.
 
-Each block below is one week, labeled by its Monday date, with that week's most-engaged post titles. Judge the overall sentiment of the discussion toward $topic in each week. Account for sarcasm, complaints, and praise — a title like "another amazing feature" may be sarcastic, and "X no longer works" is negative even though it contains "works".
+Each block below is one week, labeled by its Monday date, with that week's most-engaged post titles and top comment snippets. Weigh both the posts and the comments. Judge the overall sentiment of the discussion toward $topic in each week. Account for sarcasm, complaints, and praise — a title like "another amazing feature" may be sarcastic, and "X no longer works" is negative even though it contains "works".
 
 $weeks
 

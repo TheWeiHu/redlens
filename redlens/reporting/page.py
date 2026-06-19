@@ -168,11 +168,12 @@ def _sentiment_chart(series: list[WeekSentiment]) -> str:
         y = center - bh if wk.mean >= 0 else center
         cls = "pos" if wk.mean >= 0 else "neg"
         sign = "+" if wk.mean >= 0 else ""
+        counts = f"{wk.posts:,} posts" + (
+            f", {wk.comments:,} comments" if wk.comments else "")
         bars.append(
             f'<rect class="{cls}" x="{i * bw:.1f}" y="{y:.1f}" '
             f'width="{max(bw - 0.5, 0.4):.1f}" height="{max(bh, 0.6):.1f}">'
-            f"<title>{wk.week}: {sign}{wk.mean:.2f} · "
-            f"{wk.total:,} posts</title></rect>"
+            f"<title>{wk.week}: {sign}{wk.mean:.2f} · {counts}</title></rect>"
         )
     baseline = (f'<line x1="0" y1="{center:.1f}" x2="{width:.0f}" '
                 f'y2="{center:.1f}" stroke="#ccc" stroke-width="0.5"/>')
@@ -416,8 +417,9 @@ def render_topic_page(engine: Engine, name: str,
         is_llm = sentiment_weeks is not None
         if sentiment_weeks is None:
             sentiment_weeks = weekly_sentiment(
-                (p.created_utc, f"{p.title or ''} {p.selftext or ''}")
-                for p in posts)
+                ((p.created_utc, f"{p.title or ''} {p.selftext or ''}")
+                 for p in posts),
+                ((c.created_utc, c.body or "") for c in comments))
         section = _sentiment_section(sentiment_weeks, is_llm=is_llm)
         return _render(topic, posts, comments, summary, section)
 

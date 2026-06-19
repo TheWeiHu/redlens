@@ -76,13 +76,13 @@ def score_text(text: str) -> float | None:
 @dataclass(frozen=True)
 class WeekSentiment:
     """One UTC ISO-week bucket. ``week`` is the Monday as ``YYYY-MM-DD``,
-    ``mean`` the average post sentiment in ``[-1, 1]`` (0.0 for a week with no
-    scored posts), ``scored``/``total`` the post counts (scored = carried
-    sentiment words)."""
+    ``mean`` the average document sentiment in ``[-1, 1]`` (0.0 when nothing in
+    the week scored), and ``posts``/``comments`` the counts that fell in it —
+    both contribute to ``mean`` when present."""
     week: str
     mean: float
-    scored: int
-    total: int
+    posts: int
+    comments: int
 
 
 def _week_start(ts: int) -> str:
@@ -91,21 +91,31 @@ def _week_start(ts: int) -> str:
     return (d - timedelta(days=d.weekday())).isoformat()
 
 
-def weekly_sentiment(items: Iterable[tuple[int, str]]) -> list[WeekSentiment]:
-    """Bucket ``(created_utc, text)`` pairs into UTC ISO weeks (Monday start),
-    gaps zero-filled so the axis is honest, returning each week's mean sentiment
-    over its *scored* posts in chronological order."""
+def weekly_sentiment(posts: Iterable[tuple[int, str]],
+                     comments: Iterable[tuple[int, str]] = ()) -> list[WeekSentiment]:
+    """Bucket ``(created_utc, text)`` pairs — posts, and optionally the comments
+    under them — into UTC ISO weeks (Monday start), gaps zero-filled, returning
+    each week's mean sentiment over its *scored* documents (posts and comments
+    together) in chronological order."""
     scores: dict[str, list[float]] = defaultdict(list)
-    totals: Counter[str] = Counter()
-    for created_utc, text in items:
+    nposts: Counter[str] = Counter()
+    ncomments: Counter[str] = Counter()
+    for created_utc, text in posts:
         wk = _week_start(created_utc)
-        totals[wk] += 1
+        nposts[wk] += 1
         s = score_text(text)
         if s is not None:
             scores[wk].append(s)
-    if not totals:
+    for created_utc, text in comments:
+        wk = _week_start(created_utc)
+        ncomments[wk] += 1
+        s = score_text(text)
+        if s is not None:
+            scores[wk].append(s)
+    seen = set(nposts) | set(ncomments)
+    if not seen:
         return []
-    weeks = sorted(totals)
+    weeks = sorted(seen)
     out: list[WeekSentiment] = []
     cur = datetime.fromisoformat(weeks[0]).date()
     end = datetime.fromisoformat(weeks[-1]).date()
@@ -113,6 +123,6 @@ def weekly_sentiment(items: Iterable[tuple[int, str]]) -> list[WeekSentiment]:
         wk = cur.isoformat()
         vals = scores.get(wk, [])
         mean = sum(vals) / len(vals) if vals else 0.0
-        out.append(WeekSentiment(wk, mean, len(vals), totals.get(wk, 0)))
+        out.append(WeekSentiment(wk, mean, nposts.get(wk, 0), ncomments.get(wk, 0)))
         cur += timedelta(days=7)
     return out
