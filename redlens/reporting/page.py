@@ -152,11 +152,12 @@ def _day_chart(series: list[tuple[str, int]]) -> str:
 
 
 def _sentiment_chart(series: list[WeekSentiment]) -> str:
-    """Inline-SVG diverging bar chart of weekly mean sentiment in [-1, 1]: bars
-    rise (green) above a neutral baseline for positive weeks and fall (red)
-    below for negative ones, height ~ magnitude; hover for the week's average
-    and how many posts were scored. Returns '' when nothing was scored."""
-    if not series or all(w.scored == 0 for w in series):
+    """Inline-SVG diverging bar chart of weekly sentiment in [-1, 1]: bars rise
+    (green) above a neutral baseline for positive weeks and fall (red) below for
+    negative ones, height ~ magnitude; hover for the week's score and post
+    count. Returns '' when there's no signal to show (every week neutral) — e.g.
+    the lexicon fallback found no sentiment words."""
+    if not series or all(w.mean == 0.0 for w in series):
         return ""
     width, half, pad = 600.0, 38.0, 14.0
     center, total_h = half, half * 2
@@ -170,8 +171,8 @@ def _sentiment_chart(series: list[WeekSentiment]) -> str:
         bars.append(
             f'<rect class="{cls}" x="{i * bw:.1f}" y="{y:.1f}" '
             f'width="{max(bw - 0.5, 0.4):.1f}" height="{max(bh, 0.6):.1f}">'
-            f"<title>{wk.week}: {sign}{wk.mean:.2f} avg · "
-            f"{wk.scored:,}/{wk.total:,} posts scored</title></rect>"
+            f"<title>{wk.week}: {sign}{wk.mean:.2f} · "
+            f"{wk.total:,} posts</title></rect>"
         )
     baseline = (f'<line x1="0" y1="{center:.1f}" x2="{width:.0f}" '
                 f'y2="{center:.1f}" stroke="#ccc" stroke-width="0.5"/>')
@@ -329,6 +330,7 @@ def _unique_slug(name: str, used: set[str]) -> str:
 
 def render_all(engine: Engine, out_dir: Path,
                summarize: Callable[[str], TopicSummary | None] | None = None,
+               sentiment: Callable[[str], list[WeekSentiment] | None] | None = None,
                ) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
@@ -336,7 +338,9 @@ def render_all(engine: Engine, out_dir: Path,
     in the same most-recently-tracked-first order as the index.
 
     ``summarize`` is an optional per-topic AI-narrative provider (one LLM call
-    each); when given, every rendered page gets a summary section."""
+    each). ``sentiment`` is an optional per-topic LLM sentiment-trend provider;
+    without it each page falls back to the offline lexicon. When given, every
+    rendered page gets that section."""
     out_dir.mkdir(parents=True, exist_ok=True)
     with Session(engine) as session:
         listings = list_topics(session)
@@ -351,7 +355,9 @@ def render_all(engine: Engine, out_dir: Path,
             results.append(PageResult(listing.name, s, 0, written=False))
             continue
         summary = summarize(listing.name) if summarize else None
-        doc = render_topic_page(engine, listing.name, summary=summary)
+        weeks = sentiment(listing.name) if sentiment else None
+        doc = render_topic_page(engine, listing.name, summary=summary,
+                                sentiment_weeks=weeks)
         (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
         results.append(
             PageResult(listing.name, s, listing.matched_posts, written=True))
@@ -388,10 +394,13 @@ def render_index(results: list[PageResult]) -> str:
 
 
 def render_topic_page(engine: Engine, name: str,
-                      summary: TopicSummary | None = None) -> str:
+                      summary: TopicSummary | None = None,
+                      sentiment_weeks: list[WeekSentiment] | None = None) -> str:
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
-    optional — when given, an AI-narrative section is added; the page is fully
-    offline/keyless without it."""
+    optional — when given, an AI-narrative section is added. ``sentiment_weeks``
+    (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
+    omitted the page falls back to the offline lexicon, so it stays fully
+    keyless without either."""
     with Session(engine) as session:
         topic = get_topic(session, name)
         if topic is None:
@@ -404,11 +413,30 @@ def render_topic_page(engine: Engine, name: str,
             .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
         comments = topic_comments(session, topic.name)
-        return _render(topic, posts, comments, summary)
+        is_llm = sentiment_weeks is not None
+        if sentiment_weeks is None:
+            sentiment_weeks = weekly_sentiment(
+                (p.created_utc, f"{p.title or ''} {p.selftext or ''}")
+                for p in posts)
+        section = _sentiment_section(sentiment_weeks, is_llm=is_llm)
+        return _render(topic, posts, comments, summary, section)
+
+
+def _sentiment_section(series: list[WeekSentiment], *, is_llm: bool) -> str:
+    """The 'Sentiment over time' heading + caption + chart, or '' when there's
+    nothing to chart. ``is_llm`` only changes the caption's method note."""
+    svg = _sentiment_chart(series)
+    if not svg:
+        return ""
+    src = "LLM-scored" if is_llm else "offline lexicon (rough — sarcasm/negation can fool it)"
+    return ('<h2>Sentiment over time</h2>\n'
+            '<p class="muted">weekly sentiment, −1 (negative) to +1 (positive)'
+            f' · {src}</p>\n{svg}')
 
 
 def _render(topic: Topic, posts: list[Post], comments: list[Comment],
-            summary: TopicSummary | None = None) -> str:
+            summary: TopicSummary | None = None,
+            sentiment_section: str = "") -> str:
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
     keywords = ", ".join(topic.keyword_list)
@@ -438,14 +466,6 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
     domain_groups = _by(posts, _host)
     domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
     domains = _drill(domain_rows, domain_groups) if domain_rows else ""
-
-    sentiment_svg = _sentiment_chart(weekly_sentiment(
-        (p.created_utc, f"{p.title or ''} {p.selftext or ''}") for p in posts))
-    sentiment_section = (
-        '<h2>Sentiment over time</h2>\n'
-        '<p class="muted">weekly mean post sentiment, −1 (negative) to '
-        '+1 (positive) · lexicon-based</p>\n'
-        f"{sentiment_svg}" if sentiment_svg else "")
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

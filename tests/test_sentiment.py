@@ -70,9 +70,10 @@ def test_sentiment_chart_renders_both_polarities():
     ]
     svg = _sentiment_chart(series)
     assert svg.startswith("<svg") and 'class="pos"' in svg and 'class="neg"' in svg
-    assert "+0.50 avg" in svg and "2024-01-08" in svg
+    assert "+0.50 · 3 posts" in svg and "2024-01-08" in svg
 
 
-def test_sentiment_chart_empty_when_nothing_scored():
+def test_sentiment_chart_empty_when_no_signal():
     assert _sentiment_chart([]) == ""
+    # posts present but every week neutral -> nothing to show
     assert _sentiment_chart([WeekSentiment("2024-01-01", 0.0, 0, 5)]) == ""
