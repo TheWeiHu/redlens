@@ -75,7 +75,12 @@ adheres to [Semantic Versioning](https://semver.org/).
   closes the gap (re-pulled rows dedup).
 - `track`: the per-topic incremental cursor no longer advances when a subreddit
   in the net fails transiently, so that subreddit's older posts are still
-  re-fetched on the next track instead of being silently skipped.
+  re-fetched on the next track instead of being silently skipped. When the
+  failed run had *widened* the topic (new subreddit, changed keywords, longer
+  window) the cursor is reset, forcing a full re-pull next time — otherwise the
+  already-persisted wider net would mask the widening and skip the failed slice.
+- Shell completions (bash): topic names containing spaces (e.g. `dua lipa`) are
+  offered as a single completion instead of being split on whitespace.
 - `page --all`: topic names that reduce to the same slug (e.g. `C++` and `C#`
   → `c`) no longer overwrite each other's page or share an index link —
   colliding slugs are suffixed (`c`, `c-2`).
