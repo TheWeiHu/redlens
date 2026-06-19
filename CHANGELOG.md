@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Sentiment over time** on the topic page — a new "Sentiment over time"
+  section charts each week's mean post sentiment (−1 to +1) as diverging bars
+  (green positive / red negative), bucketed from the archive's post timestamps.
+  Scoring is offline and deterministic via a bundled lexicon
+  (`redlens/sentiment.py`, word valences from the VADER lexicon), so the page
+  stays keyless; a light negation rule flips "not good". Posts with no sentiment
+  words are neutral and excluded rather than dragging the mean to zero.
 - `redlens page --all` — render every tracked topic plus a small `index.html`
   linking them, into a directory (`-o DIR`, default the per-user reports dir).
   Reuses the existing per-topic renderer; topics with zero matched posts are
@@ -55,6 +62,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   `-o PATH`) as `--format json|csv|jsonl`. (#8)
 
 ### Changed
+- The AI topic summary (`summarize --topic`, and `page --summary`) is now more
+  succinct: the prompt caps the overview at one or two sentences, each theme to
+  one short sentence, and sentiment/viewpoints to a single sentence each.
 - `redlens doctor`: an unreachable arctic-shift probe is now a "⚠" (exit 0)
   rather than a "✗" (exit 1) — a third party's transient downtime isn't a fault
   in your environment, and the exit code gates only on what you can fix (storage
