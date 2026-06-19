@@ -97,6 +97,28 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert "AI summary" not in doc                       # absent without --summary
 
 
+def test_page_score_and_influence_include_comments(engine, monkeypatch):
+    data = {"vpn": [raw("p1", "vpn", score=100, num_comments=3, title="a post")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "vpn", subreddits=["vpn"])
+    # three high-karma comments under p1 from a comment-only author
+    with Session(engine) as s:
+        s.add_all([
+            Comment(comment_id=f"c{i}", author_username="commenter",
+                    subreddit_name="vpn", link_id="p1", parent_id=None,
+                    created_utc=NOW - 100, score=50, body="great insight here")
+            for i in range(3)])
+        s.commit()
+
+    doc = render_topic_page(engine, "vpn")
+    # total score folds in comments: 100 (post) + 3x50 = 250
+    assert "250 score" in doc
+    # the comment-only author surfaces in Most influential, labeled by comments,
+    # and their comment is drillable
+    assert "u/commenter (3 comments)" in doc
+    assert "great insight here" in doc
+
+
 def test_page_embeds_ai_summary_when_given(engine, monkeypatch):
     """`page --summary` threads a TopicSummary into the HTML; the narrative is
     rendered and escaped, and absent otherwise."""

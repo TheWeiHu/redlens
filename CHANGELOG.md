@@ -17,6 +17,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   When comment threads have been pulled (`track --comments`), both paths fold
   the comments into each week's score alongside the posts; the chart tooltip
   shows the post and comment counts behind each week.
+- The topic page's headline **score** now sums post **and** comment scores (was
+  posts only), and **Most influential** now ranks by post *and* comment
+  engagement — so a prolific commenter surfaces, not just posters. Each author
+  is labeled by their post/comment counts and drills down to both. (Both only
+  change once comments are pulled via `track --comments`.)
 - `redlens page --all` — render every tracked topic plus a small `index.html`
   linking them, into a directory (`-o DIR`, default the per-user reports dir).
   Reuses the existing per-topic renderer; topics with zero matched posts are

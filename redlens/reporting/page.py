@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypeVar
 from urllib.parse import urlparse
 
 from sqlalchemy.engine import Engine
@@ -31,6 +32,7 @@ from redlens.sentiment import WeekSentiment, weekly_sentiment
 from redlens.topics import get_topic, list_topics, topic_comments
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
+_Item = TypeVar("_Item", Post, Comment)
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _STOPWORDS = frozenset(constants.data_lines("stopwords.txt"))
 _A = constants.ACCENT
@@ -90,16 +92,26 @@ def _bar(label: str, n: int, peak: int, prefix: str = "") -> str:
             f'</div></div><div class="v">{n:,}</div></div>')
 
 
+def _post_li(p: Post) -> str:
+    return (f"<li><a href='https://reddit.com/comments/{p.post_id}'>"
+            f"{_trunc(p.title or '(untitled)')}</a> "
+            f"<span class='muted'>{p.score:,} pts · {p.num_comments:,} comm. · "
+            f"r/{html.escape(p.subreddit_name)} · {_date(p.created_utc)}</span></li>")
+
+
+def _comment_li(c: Comment) -> str:
+    body = (c.body or "").strip().replace("\n", " ") or "(comment)"
+    return (f"<li><a href='https://reddit.com/comments/{c.link_id}/_/{c.comment_id}'>"
+            f"{_trunc(body)}</a> "
+            f"<span class='muted'>{c.score:,} pts · comment · "
+            f"r/{html.escape(c.subreddit_name)} · {_date(c.created_utc)}</span></li>")
+
+
 def _post_links(posts: list[Post]) -> str:
     """A clickable list of the underlying posts — every claim drills down to
     the real Reddit threads behind it."""
     return "<ul>" + "".join(
-        f"<li><a href='https://reddit.com/comments/{p.post_id}'>"
-        f"{_trunc(p.title or '(untitled)')}</a> "
-        f"<span class='muted'>{p.score:,} pts · {p.num_comments:,} comm. · "
-        f"r/{html.escape(p.subreddit_name)} · {_date(p.created_utc)}</span></li>"
-        for p in posts[:constants.DRILL_POSTS]
-    ) + "</ul>"
+        _post_li(p) for p in posts[:constants.DRILL_POSTS]) + "</ul>"
 
 
 def _drill(rows: list[tuple[str, int]], groups: dict[str, list[Post]],
@@ -234,13 +246,16 @@ def _themes(posts: list[Post], keywords: str, comments: list[Comment]) -> str:
     )
 
 
-def _influential(posts: list[Post]) -> list[tuple[str, int, str]]:
+def _influential(posts: list[Post],
+                 comments: list[Comment]) -> list[tuple[str, int, str]]:
     """Authors by engagement index: per post sqrt(score + COMMENT_WEIGHT x
-    comments), summed, counting only posts past a floor — sustained voices
-    over one fluke, and zero-engagement bot volume excluded. Returns
-    (display label, points, raw username) so the page can drill to their posts."""
+    comments) and per comment sqrt(score), summed over everything past a floor —
+    so a prolific commenter counts, not just posters, and zero-engagement bot
+    volume is excluded. Returns (display label, points, raw username) so the
+    page can drill to that author's posts and comments."""
     index: dict[str, float] = {}
-    count: Counter[str] = Counter()
+    posts_by: Counter[str] = Counter()
+    comments_by: Counter[str] = Counter()
     for p in posts:
         if p.author_username.lower() in constants.NON_AUTHORS:
             continue
@@ -248,10 +263,48 @@ def _influential(posts: list[Post]) -> list[tuple[str, int, str]]:
         if engagement < constants.MIN_POST_ENGAGEMENT:
             continue
         index[p.author_username] = index.get(p.author_username, 0.0) + engagement**0.5
-        count[p.author_username] += 1
+        posts_by[p.author_username] += 1
+    for c in comments:
+        if c.author_username.lower() in constants.NON_AUTHORS:
+            continue
+        if max(c.score, 0) < constants.MIN_POST_ENGAGEMENT:
+            continue
+        index[c.author_username] = index.get(c.author_username, 0.0) + c.score**0.5
+        comments_by[c.author_username] += 1
+
+    def _label(name: str) -> str:
+        parts = []
+        if posts_by[name]:
+            parts.append(f"{posts_by[name]} post{'' if posts_by[name] == 1 else 's'}")
+        if comments_by[name]:
+            parts.append(
+                f"{comments_by[name]} comment{'' if comments_by[name] == 1 else 's'}")
+        return f"{name} ({', '.join(parts)})"
+
     ranked = sorted(index.items(), key=lambda kv: (-kv[1], kv[0].lower()))
-    return [(f"{name} ({count[name]})", round(pts), name)
+    return [(_label(name), round(pts), name)
             for name, pts in ranked[:constants.TOP_AUTHORS]]
+
+
+def _influence_drill(infl: list[tuple[str, int, str]],
+                     posts_by_author: dict[str, list[Post]],
+                     comments_by_author: dict[str, list[Comment]]) -> str:
+    """Influence rows that expand (no JS) to the author's top posts and
+    comments, best first — so an author's score drills to the activity behind
+    it, whether they posted, commented, or both."""
+    peak = max((pts for _, pts, _ in infl), default=1)
+    out = []
+    for label, pts, author in infl:
+        aposts = sorted(posts_by_author.get(author, []),
+                        key=lambda p: (-p.score, p.post_id))[:constants.DRILL_POSTS]
+        acomments = sorted(comments_by_author.get(author, []),
+                           key=lambda c: (-c.score, c.comment_id))[:constants.DRILL_POSTS]
+        items = ("".join(_post_li(p) for p in aposts)
+                 + "".join(_comment_li(c) for c in acomments))
+        out.append(
+            f'<details><summary>{_bar(label, pts, peak, "u/")}</summary>'
+            f"<ul>{items}</ul></details>")
+    return "\n".join(out)
 
 
 def _host(post: Post) -> str:
@@ -264,12 +317,12 @@ def _link_domains(posts: list[Post]) -> Counter[str]:
     return Counter(h for p in posts if (h := _host(p)))
 
 
-def _by(posts: list[Post], key: Callable[[Post], str]) -> dict[str, list[Post]]:
-    """Group posts under a key function, dropping empty keys."""
-    groups: dict[str, list[Post]] = defaultdict(list)
-    for p in posts:
-        if k := key(p):
-            groups[k].append(p)
+def _by(items: list[_Item], key: Callable[[_Item], str]) -> dict[str, list[_Item]]:
+    """Group items (posts or comments) under a key function, dropping empty keys."""
+    groups: dict[str, list[_Item]] = defaultdict(list)
+    for it in items:
+        if k := key(it):
+            groups[k].append(it)
     return groups
 
 
@@ -459,11 +512,10 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
     sub_groups = _by(posts, lambda p: p.subreddit_name)
     sub_rows = _ranked(subs, constants.TOP_SUBREDDITS)
 
-    infl = _influential(posts)
-    author_posts = _by(posts, lambda p: p.author_username)
-    infl_rows = [(label, pts) for label, pts, _ in infl]
-    infl_groups = {label: author_posts.get(author, [])
-                   for label, _, author in infl}
+    infl = _influential(posts, comments)
+    infl_html = _influence_drill(
+        infl, _by(posts, lambda p: p.author_username),
+        _by(comments, lambda c: c.author_username))
 
     domain_groups = _by(posts, _host)
     domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
@@ -474,7 +526,7 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 <title>{html.escape(topic.name)} · redlens</title><style>{_CSS}</style></head><body>
 <h1>{html.escape(topic.name)}</h1>
 <p class="muted">{html.escape(keywords)!r} · last {topic.days} days · {span}</p>
-<p>{len(posts):,} posts · {sum(p.score for p in posts):,} score ·
+<p>{len(posts):,} posts · {sum(p.score for p in posts) + sum(c.score for c in comments):,} score ·
 {n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched</p>
 {_summary_section(summary) if summary else ""}
 <h2>Posts per day</h2>
@@ -486,7 +538,7 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 <p class="muted">click any row to see the posts behind it</p>
 {_drill(sub_rows, sub_groups, prefix="r/")}
 <h2>Most influential</h2>
-{_drill(infl_rows, infl_groups, prefix="u/")}
+{infl_html}
 <h2>Themes</h2>
 {_themes(posts, keywords, comments)}
 <h2>Links</h2>
