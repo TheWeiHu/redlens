@@ -277,7 +277,9 @@ def track_topic(
             and not terms_changed and not reset)
         after = window_start
         if incremental:
-            after = max(window_start, topic.newest_seen_utc or 0)
+            # -1 so the boundary second is re-queried (arctic's `after` is a
+            # strict >); same-second siblings dedup on upsert rather than vanish.
+            after = max(window_start, (topic.newest_seen_utc or 0) - 1)
 
         seen: set[str] = set()
         newest = topic.newest_seen_utc or 0

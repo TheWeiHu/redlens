@@ -24,6 +24,19 @@ from redlens.topics import get_topic, topic_comments, topic_posts
 
 FORMATS = ("json", "csv", "jsonl")
 
+# Leading characters that a spreadsheet treats as the start of a formula. A
+# Reddit-controlled field (title/body/url) beginning with one of these would
+# execute on open in Excel/Sheets/LibreOffice — so we defuse it on the CSV path.
+_CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: object) -> object:
+    """Neutralize CSV formula injection: prefix a leading formula trigger with a
+    single quote so spreadsheets render it as text. Non-strings pass through."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_LEADS):
+        return "'" + value
+    return value
+
 
 def _dump(
     header: dict[str, object],
@@ -64,7 +77,7 @@ def _dump(
                     fields.append(key)
         writer = csv.DictWriter(out, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows({k: _csv_safe(v) for k, v in row.items()} for row in rows)
 
     return len(posts), len(comments)
 

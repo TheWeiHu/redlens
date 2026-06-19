@@ -69,6 +69,21 @@ def test_csv_has_kind_column_and_one_row_per_record(db_session):
     assert rows[1]["comment_id"] == "c1"
 
 
+def test_csv_defuses_formula_injection(db_session):
+    """A Reddit-controlled field starting with a spreadsheet formula trigger is
+    neutralized with a leading quote so it can't execute on open."""
+    upsert(db_session, [User(username="alice")])
+    upsert(db_session, [
+        Post(post_id="p1", author_username="alice", subreddit_name="news",
+             created_utc=1_700_000_000, title="=cmd|'/c calc'!A1", score=1),
+    ])
+    out = io.StringIO()
+    export_user(db_session, "alice", "csv", out)
+    rows = list(csv.DictReader(out.getvalue().splitlines()))
+    assert rows[0]["title"] == "'=cmd|'/c calc'!A1"   # quoted, not a live formula
+    assert not rows[0]["title"].startswith("=")
+
+
 def test_export_is_scoped_to_one_user(db_session):
     _seed(db_session)
     out = io.StringIO()

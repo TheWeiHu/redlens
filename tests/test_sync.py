@@ -131,8 +131,10 @@ def test_interrupted_backfill_resumes_without_refetch(monkeypatch):
     fake.calls.clear()
     r2 = sync_user("alice", engine)
     assert r2.posts_written == 90                   # the remaining 90 items
-    # Resume only walked *older* than the cursor — nothing newer was re-fetched.
-    assert all(after is None and before is not None and before <= 1090
+    # Resume only walked from the cursor down — nothing newer was re-fetched.
+    # The cursor is padded +1 (before <= 1091) so the boundary second is
+    # re-queried and any same-second sibling is recovered, not skipped.
+    assert all(after is None and before is not None and before <= 1091
                for kind, after, before in fake.calls if kind == "posts")
 
     with Session(engine) as s:
@@ -182,6 +184,38 @@ def test_capped_incremental_pull_does_not_lose_the_gap(monkeypatch):
         st = _get_sync_state(s, "alice", "posts")
     assert total == 110                                         # nothing lost
     assert st is not None and st.completed_backfill is True
+
+
+# --- same-second sibling at the cursor boundary ----------------------------
+
+def test_incremental_pull_recovers_same_second_sibling(monkeypatch):
+    """A new item created in the *same wall-clock second* as the prior cursor
+    must not be skipped. arctic's `after` is a strict >, so a naive
+    `after=newest` would exclude it permanently — the -1s pad re-queries the
+    boundary second and upsert dedups the already-stored twin."""
+    fake = FakeArctic(_posts(10, start=1000), [], meta={"author": "alice", "id": "t2_a"})
+    _install(monkeypatch, fake)
+    engine = _mem()
+
+    sync_user("alice", engine)                       # cursor settles at 1009
+    with Session(engine) as s:
+        st = _get_sync_state(s, "alice", "posts")
+        assert st is not None and st.newest_seen_utc == 1009
+
+    # A new post lands in the same second as the cursor (1009), plus a clearly
+    # newer one. The same-second sibling is the one a strict `after` would drop.
+    fake.posts = _posts(10, start=1000) + [
+        {"id": "twin", "author": "alice", "subreddit": "python",
+         "created_utc": 1009, "title": "same second", "score": 1, "num_comments": 0},
+        {"id": "later", "author": "alice", "subreddit": "python",
+         "created_utc": 1010, "title": "newer", "score": 1, "num_comments": 0},
+    ]
+    sync_user("alice", engine)
+
+    with Session(engine) as s:
+        ids = {p.post_id for p in s.exec(select(Post)).all()}
+    assert "twin" in ids                              # the boundary sibling survived
+    assert "later" in ids
 
 
 # --- --full override -------------------------------------------------------

@@ -72,7 +72,8 @@ def test_retrack_incremental_vs_full_window(engine, monkeypatch):
 
     calls.clear()
     track_topic(engine, "x")                             # unchanged: incremental
-    assert calls and all(c == NOW - 5000 for c in calls)
+    # cursor is padded -1s so the boundary second is re-queried (dedup on upsert)
+    assert calls and all(c == NOW - 5001 for c in calls)
 
     calls.clear()
     track_topic(engine, "x", subreddits=["b"])           # net grew: full window

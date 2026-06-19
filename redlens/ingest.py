@@ -88,10 +88,15 @@ def _sync_kind(
 
     after: int | None = None
     before: int | None = None
+    # arctic's after/before bound created_utc at 1-second resolution and are
+    # treated as strict (>/<), so an item sharing the exact boundary second
+    # would be skipped. Pad the cursor by 1s so the boundary second is re-fetched
+    # (re-pulled rows dedup on upsert) and no same-second sibling is lost.
     if state is not None and not state.completed_backfill:
-        before = state.oldest_seen_utc      # resume the interrupted backfill
-    elif state is not None:
-        after = state.newest_seen_utc       # cheap forward-only top-up
+        if state.oldest_seen_utc is not None:
+            before = state.oldest_seen_utc + 1  # resume the interrupted backfill
+    elif state is not None and state.newest_seen_utc is not None:
+        after = state.newest_seen_utc - 1       # cheap forward-only top-up
 
     incremental = after is not None
     newest = state.newest_seen_utc if state else None
