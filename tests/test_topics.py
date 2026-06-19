@@ -119,9 +119,8 @@ def test_page_score_and_influence_include_comments(engine, monkeypatch):
     assert "great insight here" in doc
 
 
-def test_brand_mentions_counts_orders_and_word_boundary():
-    from redlens.models import Brand
-    from redlens.reporting.page import _brand_mentions, _brands_section
+def test_count_mentions_orders_and_word_boundary():
+    from redlens.reporting.page import _count_mentions, _mentions_section
     posts = [
         Post(post_id="p1", author_username="a", subreddit_name="vpn",
              created_utc=NOW, score=10, num_comments=0,
@@ -135,18 +134,18 @@ def test_brand_mentions_counts_orders_and_word_boundary():
                 link_id="p1", parent_id=None, created_utc=NOW, score=3,
                 body="I switched to Mullvad"),
     ]
-    brands = [
-        Brand(name="ExpressVPN", aliases=["expressvpn", "express vpn"]),
-        Brand(name="Mullvad", aliases=["mullvad"]),
-        Brand(name="Surfshark", aliases=["surfshark"]),   # absent -> dropped
+    named_terms = [
+        ("ExpressVPN", ["expressvpn", "express vpn"]),
+        ("Mullvad", ["mullvad"]),
+        ("Surfshark", ["surfshark"]),   # absent -> dropped
     ]
-    rows = _brand_mentions(brands, posts, comments)
+    rows = _count_mentions(named_terms, posts, comments)
     assert [(name, n) for name, n, _, _ in rows] == [("ExpressVPN", 2), ("Mullvad", 1)]
 
-    html = _brands_section(rows)
+    html = _mentions_section("Other brands mentioned", "by mentions", rows)
     assert "Other brands mentioned" in html
     assert "ExpressVPN" in html and "Mullvad" in html and "Surfshark" not in html
-    assert _brands_section([]) == ""
+    assert _mentions_section("X", "y", []) == ""
 
 
 def test_themes_html_with_and_without_labels():

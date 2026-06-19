@@ -1,0 +1,16 @@
+Below are post titles and comment snippets from a Reddit discussion about "$topic". Identify the recurring PROBLEMS, complaints, and frustrations people raise about $topic — the things that go wrong or annoy them.
+
+$sample
+
+Return ONLY a JSON object (no markdown, no commentary):
+
+{
+  "categories": [
+    {"name": "<a short complaint label, e.g. 'Auto-renew billing'>", "phrases": ["<a specific phrase that signals this complaint, as it appears in the text>"]}
+  ]
+}
+
+Rules:
+- Only list complaints actually present above; do not invent or pad. Aim for the 5-10 most prominent.
+- "phrases" are how this complaint will be counted across the whole discussion, so make them SPECIFIC — prefer distinctive multi-word phrases ("auto renew", "won't cancel", "keeps disconnecting", "slow speeds") over generic single words ("slow", "bad") that would over-count. Include the real spellings/variants people use.
+- Each category is one coherent complaint, not a grab-bag. Keep the label under ~4 words.

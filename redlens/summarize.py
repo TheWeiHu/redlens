@@ -33,6 +33,7 @@ from redlens.config import llm_api_key
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.models import (
     Brand,
+    Category,
     Comment,
     Post,
     Profile,
@@ -244,6 +245,30 @@ def identify_brands(session: Session, name: str) -> list[Brand]:
     variants to count them by. The caller does the actual counting; the LLM only
     recognizes. Raises :class:`NotFound`/:class:`MissingKey` like
     :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
+    named = _extract_labeled_terms(
+        session, name, prompt_name="brands", terms_key="aliases")
+    return [Brand(name=n, aliases=terms) for n, terms in named]
+
+
+def extract_categories(session: Session, name: str, kind: str) -> list[Category]:
+    """One LLM call to surface discussion categories — ``kind`` is
+    ``"complaints"`` (recurring problems) or ``"use_cases"`` (what people use the
+    topic for) — each with the signature phrases to count it by. Same
+    recognize-here / count-in-the-caller split as :func:`identify_brands`."""
+    prompt_name = "complaints" if kind == "complaints" else "use_cases"
+    named = _extract_labeled_terms(
+        session, name, prompt_name=prompt_name, terms_key="phrases")
+    return [Category(name=n, terms=terms) for n, terms in named]
+
+
+def _extract_labeled_terms(
+    session: Session, name: str, *, prompt_name: str, terms_key: str,
+) -> list[tuple[str, list[str]]]:
+    """Shared core for the LLM entity extractors (brands, complaints, use cases):
+    sample the most-engaged posts/comments, ask ``prompt_name`` for a
+    ``{"categories": [{"name", <terms_key>}]}`` list, and return
+    ``(name, terms)`` pairs — blank names dropped, empty term lists falling back
+    to ``[name]`` so every pair is countable."""
     topic = get_topic(session, name)
     if topic is None:
         raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
@@ -269,30 +294,34 @@ def identify_brands(session: Session, name: str) -> list[Brand]:
     def _eng(p: Post) -> int:
         return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
 
-    top_posts = sorted(posts, key=lambda p: -_eng(p))[:constants.BRAND_SAMPLE_POSTS]
+    top_posts = sorted(posts, key=lambda p: -_eng(p))[:constants.EXTRACT_SAMPLE_POSTS]
     top_comments = sorted(comments, key=lambda c: -c.score
-                          )[:constants.BRAND_SAMPLE_COMMENTS]
+                          )[:constants.EXTRACT_SAMPLE_COMMENTS]
     lines = [f"- {p.title.strip()[:160]}" for p in top_posts
              if p.title and p.title.strip()]
     lines += [f"- {c.body.strip().replace(chr(10), ' ')[:160]}"
               for c in top_comments if c.body and c.body.strip()]
-    prompt = prompts.render("brands", topic=topic.name, sample="\n".join(lines))
+    prompt = prompts.render(prompt_name, topic=topic.name, sample="\n".join(lines))
     raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
     data = _parse_json(raw)
 
-    out: list[Brand] = []
-    rows = data.get("brands")
+    # brands.txt returns {"brands": [...]}; complaints/use_cases return
+    # {"categories": [...]} — accept whichever list the object carries.
+    rows = data.get("categories")
+    if not isinstance(rows, list):
+        rows = data.get("brands")
+    out: list[tuple[str, list[str]]] = []
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        bn = str(row.get("name", "")).strip()
-        if not bn:
+        label = str(row.get("name", "")).strip()
+        if not label:
             continue
-        raw_aliases = row.get("aliases")
-        aliases = [str(a).strip() for a in raw_aliases
-                   if isinstance(a, str) and str(a).strip()
-                   ] if isinstance(raw_aliases, list) else []
-        out.append(Brand(name=bn, aliases=aliases or [bn]))
+        raw_terms = row.get(terms_key)
+        terms = [str(t).strip() for t in raw_terms
+                 if isinstance(t, str) and str(t).strip()
+                 ] if isinstance(raw_terms, list) else []
+        out.append((label, terms or [label]))
     return out
 
 

@@ -119,9 +119,9 @@ COMMENT_WEIGHT = 2              # a comment counts this many votes toward engage
 TITLE_MAX = 110                 # chars of a post title shown before truncating
 DRILL_POSTS = 25                # posts listed inside each expandable group
 SENTIMENT_WEEK_SAMPLE = 8       # most-engaged titles per week sent to the LLM scorer
-BRAND_SAMPLE_POSTS = 60         # most-engaged titles sent to the brand finder
-BRAND_SAMPLE_COMMENTS = 80      # most-upvoted comment snippets sent with them
-TOP_BRANDS = 12                 # other-brand rows shown on the page
+EXTRACT_SAMPLE_POSTS = 60       # most-engaged titles sent to LLM entity extractors
+EXTRACT_SAMPLE_COMMENTS = 80    # most-upvoted comment snippets sent with them
+TOP_MENTIONS = 12               # rows shown per mention section (brands/complaints/uses)
 ACCENT = "#d93a00"             # redlens red — the page's one accent color
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"

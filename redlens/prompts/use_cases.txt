@@ -1,0 +1,16 @@
+Below are post titles and comment snippets from a Reddit discussion about "$topic". Identify the USE CASES — what people actually use $topic for, the jobs and situations they bring it up in (e.g. streaming, travel, gaming, work, privacy).
+
+$sample
+
+Return ONLY a JSON object (no markdown, no commentary):
+
+{
+  "categories": [
+    {"name": "<a short use-case label, e.g. 'Streaming'>", "phrases": ["<a specific phrase that signals this use case, as it appears in the text>"]}
+  ]
+}
+
+Rules:
+- Only list use cases actually present above; do not invent or pad. Aim for the 5-10 most prominent.
+- "phrases" are how this use case will be counted across the whole discussion, so make them SPECIFIC — prefer distinctive words/phrases people actually use ("netflix", "streaming", "torrent", "geo-block", "while traveling", "gaming") over vague terms that would over-count. Include real spellings/variants.
+- Each category is one coherent use case. Keep the label under ~4 words.
