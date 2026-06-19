@@ -94,6 +94,28 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert "https://reddit.com/comments/p1" in doc
     assert "r/dualipa" in doc
     assert doc == render_topic_page(engine, "dua lipa")  # byte-deterministic
+    assert "AI summary" not in doc                       # absent without --summary
+
+
+def test_page_embeds_ai_summary_when_given(engine, monkeypatch):
+    """`page --summary` threads a TopicSummary into the HTML; the narrative is
+    rendered and escaped, and absent otherwise."""
+    from redlens.models import Theme, TopicSummary
+    data = {"dualipa": [raw("p1", "dualipa", score=500, title="Wedding")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+
+    summary = TopicSummary(
+        topic="dua lipa", model="gpt-test", depth="quick",
+        overview="Fans discuss the <wedding> & tour.",
+        themes=[Theme(title="Tour", summary="dates & venues")],
+        sentiment="Mostly positive.", viewpoints="Little disagreement.")
+    doc = render_topic_page(engine, "dua lipa", summary=summary)
+    assert "AI summary" in doc
+    assert "gpt-test" in doc
+    assert "Fans discuss the &lt;wedding&gt; &amp; tour." in doc   # escaped
+    assert "Tour" in doc and "dates &amp; venues" in doc
+    assert "Mostly positive." in doc and "Little disagreement." in doc
 
 
 def test_cli_track_then_page(engine, tmp_path, monkeypatch):

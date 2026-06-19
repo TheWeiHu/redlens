@@ -7,7 +7,23 @@ import argparse
 import pytest
 
 from redlens import completions
-from redlens.cli import build_parser, main
+from redlens.cli import _resolve_sources, build_parser, main
+
+
+def test_init_is_listed_in_help() -> None:
+    """`init` must be discoverable in --help — doctor and schema errors tell
+    users to run it, so it can't be a hidden verb."""
+    help_text = build_parser().format_help()
+    assert "init" in help_text
+    assert "create or migrate the database" in help_text
+
+
+def test_sources_none_runs_no_discovery() -> None:
+    """`--sources none`/`skip` is the non-interactive 'only --subreddits' path:
+    it resolves to an empty discovery list."""
+    assert _resolve_sources("none", assume_yes=True) == []
+    assert _resolve_sources("skip", assume_yes=True) == []
+    assert _resolve_sources("name", assume_yes=True) == ["name"]
 
 
 def _subcommands() -> list[str]:

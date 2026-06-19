@@ -25,7 +25,7 @@ from sqlmodel import Session, select
 
 from redlens import constants
 from redlens.errors import NotFound
-from redlens.models import Comment, Post, Topic, TopicPost
+from redlens.models import Comment, Post, Topic, TopicPost, TopicSummary
 from redlens.reporting import lda
 from redlens.topics import get_topic, list_topics, topic_comments
 
@@ -59,6 +59,12 @@ svg text {{ fill: #888; font-size: 9px; }}
 table {{ border-collapse: collapse; width: 100%; }}
 td {{ border-bottom: 1px solid #eee; padding: .3rem .5rem; vertical-align: top; }}
 td.n {{ text-align: right; white-space: nowrap; color: #666; }}
+.summary {{ background: #faf3f0; border-left: 3px solid {_A}; padding: .6rem .9rem;
+           border-radius: 0 4px 4px 0; }}
+.summary ul.themes {{ margin: .4rem 0 .4rem 1.1rem; padding: 0; }}
+.summary ul.themes li {{ list-style: disc; font-size: .95rem; margin: .2rem 0; }}
+.summary .lbl {{ color: {_A}; font-weight: 600; }}
+.summary p {{ margin: .4rem 0; }}
 """
 
 
@@ -232,6 +238,33 @@ def _by(posts: list[Post], key: Callable[[Post], str]) -> dict[str, list[Post]]:
     return groups
 
 
+def _summary_section(s: TopicSummary) -> str:
+    """The LLM narrative from ``summarize --topic`` rendered inline — overview,
+    themes, sentiment, viewpoints. Everything is escaped: model output is
+    untrusted text. Returns '' when the summary carried no prose."""
+    parts: list[str] = []
+    if s.overview:
+        parts.append(f"<p>{html.escape(s.overview)}</p>")
+    if s.themes:
+        items = "".join(
+            f"<li><strong>{html.escape(t.title)}</strong>"
+            + (f" — {html.escape(t.summary)}" if t.summary else "")
+            + "</li>"
+            for t in s.themes
+        )
+        parts.append(f'<ul class="themes">{items}</ul>')
+    for label, body in (("Sentiment", s.sentiment), ("Viewpoints", s.viewpoints)):
+        if body:
+            parts.append(
+                f'<p><span class="lbl">{label}</span> {html.escape(body)}</p>')
+    if not parts:
+        return ""
+    note = (f'<p class="muted">AI summary · {html.escape(s.model)} · '
+            f'{html.escape(s.depth)} depth</p>')
+    return (f"<h2>AI summary</h2>\n{note}\n"
+            f'<div class="summary">{"".join(parts)}</div>')
+
+
 def slug(name: str) -> str:
     """A filesystem-safe, lowercase slug for a topic name (``Dua Lipa`` →
     ``dua-lipa``); the per-topic page filename derives from it."""
@@ -261,11 +294,16 @@ def _unique_slug(name: str, used: set[str]) -> str:
     return s
 
 
-def render_all(engine: Engine, out_dir: Path) -> list[PageResult]:
+def render_all(engine: Engine, out_dir: Path,
+               summarize: Callable[[str], TopicSummary | None] | None = None,
+               ) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
     index) since there is nothing to chart. Returns one result per topic,
-    in the same most-recently-tracked-first order as the index."""
+    in the same most-recently-tracked-first order as the index.
+
+    ``summarize`` is an optional per-topic AI-narrative provider (one LLM call
+    each); when given, every rendered page gets a summary section."""
     out_dir.mkdir(parents=True, exist_ok=True)
     with Session(engine) as session:
         listings = list_topics(session)
@@ -279,7 +317,8 @@ def render_all(engine: Engine, out_dir: Path) -> list[PageResult]:
         if listing.matched_posts == 0:
             results.append(PageResult(listing.name, s, 0, written=False))
             continue
-        doc = render_topic_page(engine, listing.name)
+        summary = summarize(listing.name) if summarize else None
+        doc = render_topic_page(engine, listing.name, summary=summary)
         (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
         results.append(
             PageResult(listing.name, s, listing.matched_posts, written=True))
@@ -315,7 +354,11 @@ def render_index(results: list[PageResult]) -> str:
 </body></html>"""
 
 
-def render_topic_page(engine: Engine, name: str) -> str:
+def render_topic_page(engine: Engine, name: str,
+                      summary: TopicSummary | None = None) -> str:
+    """Render one topic's page. ``summary`` (from ``summarize --topic``) is
+    optional — when given, an AI-narrative section is added; the page is fully
+    offline/keyless without it."""
     with Session(engine) as session:
         topic = get_topic(session, name)
         if topic is None:
@@ -328,10 +371,11 @@ def render_topic_page(engine: Engine, name: str) -> str:
             .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
         comments = topic_comments(session, topic.name)
-        return _render(topic, posts, comments)
+        return _render(topic, posts, comments, summary)
 
 
-def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
+def _render(topic: Topic, posts: list[Post], comments: list[Comment],
+            summary: TopicSummary | None = None) -> str:
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
     keywords = ", ".join(topic.keyword_list)
@@ -369,6 +413,7 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
 <p class="muted">{html.escape(keywords)!r} · last {topic.days} days · {span}</p>
 <p>{len(posts):,} posts · {sum(p.score for p in posts):,} score ·
 {n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched</p>
+{_summary_section(summary) if summary else ""}
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts))}
 <h2>By weekday &amp; hour (UTC)</h2>
