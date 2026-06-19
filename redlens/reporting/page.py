@@ -227,8 +227,10 @@ def _punchcard(posts: list[Post], comments: list[Comment]) -> str:
     return f'<svg viewBox="0 0 {w} {h}">{labels}{dots}</svg>'
 
 
-def _themes(posts: list[Post], keywords: str, comments: list[Comment]) -> str:
-    """LDA themes over post text and, when pulled, comment bodies."""
+def _lda_themes(posts: list[Post], comments: list[Comment],
+                keywords: str) -> list[tuple[float, list[str]]]:
+    """LDA themes (share, keywords) over post text and, when pulled, comment
+    bodies — the raw clusters, ready to render or hand to a labeler."""
     skip = _STOPWORDS | set(_WORD_RE.findall(keywords.lower()))
 
     def tokens(text: str) -> list[str]:
@@ -237,13 +239,25 @@ def _themes(posts: list[Post], keywords: str, comments: list[Comment]) -> str:
 
     docs = [t for p in posts if (t := tokens(f"{p.title or ''} {p.selftext or ''}"))]
     docs += [t for c in comments if (t := tokens(c.body or ""))]
-    found = lda.topics(docs)
-    if not found:
+    return lda.topics(docs)
+
+
+def _themes_html(themes: list[tuple[float, list[str]]],
+                 labels: list[str] | None = None) -> str:
+    """Render LDA themes. With ``labels`` (one per theme, from the LLM) each row
+    leads with the readable label and keeps the keywords as muted context;
+    without them it shows the keywords alone."""
+    if not themes:
         return '<div class="muted">not enough text for topic modeling</div>'
-    return "\n".join(
-        f'<div>{share:.0%} · {html.escape(", ".join(words))}</div>'
-        for share, words in found
-    )
+    out = []
+    for i, (share, words) in enumerate(themes):
+        wl = html.escape(", ".join(words))
+        if labels and i < len(labels) and labels[i]:
+            out.append(f"<div>{share:.0%} · <strong>{html.escape(labels[i])}</strong> "
+                       f'<span class="muted">{wl}</span></div>')
+        else:
+            out.append(f"<div>{share:.0%} · {wl}</div>")
+    return "\n".join(out)
 
 
 def _influential(posts: list[Post],
@@ -385,6 +399,7 @@ def _unique_slug(name: str, used: set[str]) -> str:
 def render_all(engine: Engine, out_dir: Path,
                summarize: Callable[[str], TopicSummary | None] | None = None,
                sentiment: Callable[[str], list[WeekSentiment] | None] | None = None,
+               theme_labeler: Callable[[str, list[list[str]]], list[str]] | None = None,
                ) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
@@ -393,8 +408,9 @@ def render_all(engine: Engine, out_dir: Path,
 
     ``summarize`` is an optional per-topic AI-narrative provider (one LLM call
     each). ``sentiment`` is an optional per-topic LLM sentiment-trend provider;
-    without it each page falls back to the offline lexicon. When given, every
-    rendered page gets that section."""
+    without it each page falls back to the offline lexicon. ``theme_labeler``
+    turns each page's LDA clusters into readable labels. When given, every
+    rendered page gets those."""
     out_dir.mkdir(parents=True, exist_ok=True)
     with Session(engine) as session:
         listings = list_topics(session)
@@ -411,7 +427,7 @@ def render_all(engine: Engine, out_dir: Path,
         summary = summarize(listing.name) if summarize else None
         weeks = sentiment(listing.name) if sentiment else None
         doc = render_topic_page(engine, listing.name, summary=summary,
-                                sentiment_weeks=weeks)
+                                sentiment_weeks=weeks, theme_labeler=theme_labeler)
         (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
         results.append(
             PageResult(listing.name, s, listing.matched_posts, written=True))
@@ -449,12 +465,16 @@ def render_index(results: list[PageResult]) -> str:
 
 def render_topic_page(engine: Engine, name: str,
                       summary: TopicSummary | None = None,
-                      sentiment_weeks: list[WeekSentiment] | None = None) -> str:
+                      sentiment_weeks: list[WeekSentiment] | None = None,
+                      theme_labeler: Callable[[str, list[list[str]]], list[str]]
+                      | None = None) -> str:
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
     optional — when given, an AI-narrative section is added. ``sentiment_weeks``
     (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
-    omitted the page falls back to the offline lexicon, so it stays fully
-    keyless without either."""
+    omitted the page falls back to the offline lexicon. ``theme_labeler`` (from
+    ``label_themes``) turns each LDA keyword cluster into a readable label; when
+    omitted the themes show keywords only. The page stays fully keyless without
+    any of them."""
     with Session(engine) as session:
         topic = get_topic(session, name)
         if topic is None:
@@ -474,7 +494,12 @@ def render_topic_page(engine: Engine, name: str,
                  for p in posts),
                 ((c.created_utc, c.body or "") for c in comments))
         section = _sentiment_section(sentiment_weeks, is_llm=is_llm)
-        return _render(topic, posts, comments, summary, section)
+
+        themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
+        labels = (theme_labeler(topic.name, [words for _, words in themes])
+                  if theme_labeler and themes else None)
+        themes_html = _themes_html(themes, labels)
+        return _render(topic, posts, comments, summary, section, themes_html)
 
 
 def _sentiment_section(series: list[WeekSentiment], *, is_llm: bool) -> str:
@@ -491,7 +516,7 @@ def _sentiment_section(series: list[WeekSentiment], *, is_llm: bool) -> str:
 
 def _render(topic: Topic, posts: list[Post], comments: list[Comment],
             summary: TopicSummary | None = None,
-            sentiment_section: str = "") -> str:
+            sentiment_section: str = "", themes_html: str = "") -> str:
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
     keywords = ", ".join(topic.keyword_list)
@@ -540,7 +565,7 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 <h2>Most influential</h2>
 {infl_html}
 <h2>Themes</h2>
-{_themes(posts, keywords, comments)}
+{themes_html}
 <h2>Links</h2>
 {domains or '<div class="muted">no external links</div>'}
 <h2>Top posts</h2>

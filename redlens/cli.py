@@ -27,6 +27,7 @@ from redlens.reporting import explore
 from redlens.reporting.page import render_all, render_topic_page, slug
 from redlens.sentiment import WeekSentiment
 from redlens.summarize import (
+    label_themes,
     summarize_topic,
     summarize_user,
     weekly_topic_sentiment,
@@ -520,12 +521,18 @@ def main(argv: list[str] | None = None) -> int:
                 with session(engine) as s:
                     return weekly_topic_sentiment(s, topic_name)
 
+            # Readable labels for the LDA themes (one LLM call); no DB needed.
+            def _label_themes(topic_name: str,
+                              word_lists: list[list[str]]) -> list[str]:
+                return label_themes(topic_name, word_lists)
+
             if args.all_topics:
                 out_dir = Path(args.out) if args.out else default_report_dir()
                 results = render_all(
                     engine, out_dir,
                     summarize=_summary if args.summary else None,
-                    sentiment=_sentiment if args.summary else None)
+                    sentiment=_sentiment if args.summary else None,
+                    theme_labeler=_label_themes if args.summary else None)
                 written = [pg for pg in results if pg.written]
                 skipped = [pg for pg in results if not pg.written]
                 for pg in written:
@@ -542,7 +549,8 @@ def main(argv: list[str] | None = None) -> int:
             elif args.topic:
                 html_doc = render_topic_page(
                     engine, args.topic, summary=_summary(args.topic),
-                    sentiment_weeks=_sentiment(args.topic))
+                    sentiment_weeks=_sentiment(args.topic),
+                    theme_labeler=_label_themes if args.summary else None)
                 out = Path(args.out or f"{slug(args.topic)}.html")
                 out.write_text(html_doc, encoding="utf-8")
                 print(f"wrote {out} ({len(html_doc):,} bytes)")

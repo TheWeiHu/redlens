@@ -119,6 +119,18 @@ def test_page_score_and_influence_include_comments(engine, monkeypatch):
     assert "great insight here" in doc
 
 
+def test_themes_html_with_and_without_labels():
+    from redlens.reporting.page import _themes_html
+    themes = [(0.6, ["server", "slow", "drop"]), (0.4, ["price", "deal"])]
+    plain = _themes_html(themes)
+    assert "server, slow, drop" in plain and "<strong>" not in plain
+    labeled = _themes_html(themes, ["Connection Issues", "Pricing"])
+    assert "<strong>Connection Issues</strong>" in labeled
+    assert "server, slow, drop" in labeled       # keywords kept as muted context
+    assert _themes_html([]) == \
+        '<div class="muted">not enough text for topic modeling</div>'
+
+
 def test_page_embeds_ai_summary_when_given(engine, monkeypatch):
     """`page --summary` threads a TopicSummary into the HTML; the narrative is
     rendered and escaped, and absent otherwise."""
