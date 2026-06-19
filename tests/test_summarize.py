@@ -273,3 +273,35 @@ def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
     # both the post title and the comment body were handed to the model
     assert "works great" in seen["prompt"] and "keeps crashing" in seen["prompt"]
     assert "totally agree, love it" in seen["prompt"] and "comments:" in seen["prompt"]
+
+
+def test_label_themes_empty_needs_no_key():
+    from redlens.summarize import label_themes
+    assert label_themes("vpn", []) == []
+
+
+def test_label_themes_no_key_raises(db):
+    from redlens.errors import MissingKey
+    from redlens.summarize import label_themes
+    with pytest.raises(MissingKey):
+        label_themes("vpn", [["a", "b"]])
+
+
+def test_label_themes_aligns_and_falls_back(db, monkeypatch):
+    """Labels align to themes by position; a blank or missing label falls back
+    to the cluster's own keywords, so the result is always full-length."""
+    from redlens.summarize import label_themes
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    themes = [["server", "connection", "slow"],
+              ["price", "deal", "refund"],
+              ["app", "update", "ui"]]
+    seen = {}
+
+    def fake_complete(prompt, key, *, max_tokens):
+        seen["prompt"] = prompt
+        return json.dumps({"labels": ["Connection Problems", ""]})  # 2nd blank, 3rd missing
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    labels = label_themes("vpn", themes)
+    assert labels == ["Connection Problems", "price, deal, refund", "app, update, ui"]
+    assert "server, connection, slow" in seen["prompt"]   # clusters handed to model

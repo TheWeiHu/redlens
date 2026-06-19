@@ -210,6 +210,33 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
     return out
 
 
+def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
+    """Short, human-readable labels for LDA keyword clusters — one LLM call for
+    all of them. Returns one label per input theme, in order; any theme the
+    model skips or mangles falls back to its joined keywords, so the result is
+    always aligned and non-empty. Raises :class:`MissingKey` with no key."""
+    if not themes:
+        return []
+    key = llm_api_key()
+    if not key:
+        raise MissingKey(
+            "no LLM API key — run `redlens setup` or set "
+            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
+        )
+    listed = "\n".join(f"{i + 1}. {', '.join(words)}"
+                       for i, words in enumerate(themes))
+    prompt = prompts.render("theme_labels", topic=topic, themes=listed)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    data = _parse_json(raw)
+    given = data.get("labels")
+    given = given if isinstance(given, list) else []
+    out: list[str] = []
+    for i, words in enumerate(themes):
+        label = given[i].strip() if i < len(given) and isinstance(given[i], str) else ""
+        out.append(label or ", ".join(words[:4]))
+    return out
+
+
 def _resolve_depth(depth: str | None) -> str:
     """Validate an optional ``--depth`` and fall back to the default."""
     if depth is not None and depth not in constants.SUMMARY_DEPTHS:

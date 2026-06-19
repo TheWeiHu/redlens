@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Readable theme labels.** With `page --summary`, each LDA keyword cluster on
+  the topic page gets a short human-readable label from one LLM call
+  (`summarize.label_themes()`); the cluster's keywords stay alongside as muted
+  context. Without a key the themes show keywords only, as before.
 - **Sentiment over time** on the topic page — a new "Sentiment over time"
   section charts each week's sentiment (−1 to +1) as diverging bars (green
   positive / red negative), bucketed from the archive's post timestamps. With
