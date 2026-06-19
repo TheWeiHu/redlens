@@ -79,12 +79,16 @@ def _bash(global_flags: list[str], subcommands: dict[str, list[str]]) -> str:
     flag_cases = "\n".join(
         f"        {name}) opts=\"{' '.join(flags)}\" ;;" for name, flags in subcommands.items()
     )
+    # IFS=$'\n' so multi-word DB values (e.g. a topic named "dua lipa") stay a
+    # single completion candidate instead of splitting into "dua" and "lipa".
     flag_value_cases = "\n".join(
-        f'        {flag}) COMPREPLY=( $(compgen -W "$({_call(kind)})" -- "$cur") ); return ;;'
+        f'        {flag}) local IFS=$\'\\n\'; '
+        f'COMPREPLY=( $(compgen -W "$({_call(kind)})" -- "$cur") ); return ;;'
         for flag, kind in FLAG_VALUE_KIND.items()
     )
     pos_cases = "\n".join(
-        f'            {verb}) COMPREPLY=( $(compgen -W "$({_call(kind)})" -- "$cur") ); return ;;'
+        f'            {verb}) local IFS=$\'\\n\'; '
+        f'COMPREPLY=( $(compgen -W "$({_call(kind)})" -- "$cur") ); return ;;'
         for verb, kind in POSITIONAL_KIND.items()
         if verb in subcommands
     )

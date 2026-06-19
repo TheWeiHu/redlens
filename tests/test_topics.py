@@ -206,6 +206,39 @@ def test_track_does_not_advance_cursor_when_a_subreddit_fails(engine, monkeypatc
     assert "p2" in post_ids                            # recovered, not lost
 
 
+def test_track_widening_failure_does_not_strand_new_subreddit(engine, monkeypatch):
+    # Phase 1: track over sub "a" — succeeds, cursor advances to p1.
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"a": [raw("p1", "a", ts=NOW - 1000)]}))
+    track_topic(engine, "x", subreddits=["a"])
+    with Session(engine) as s:
+        assert get_topic(s, "x").newest_seen_utc == NOW - 1000
+
+    # Phase 2: widen the net with sub "b", which fails transiently. The widened
+    # net is persisted, so a *stale* cursor would make the next run go
+    # incremental and skip b's older posts — the cursor must reset to force a
+    # full re-pull instead.
+    def flaky(subreddit, query, after=None, before=None):
+        if subreddit == "b":
+            raise RedlensError("r/b: rate limited")
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", flaky)
+    res = track_topic(engine, "x", subreddits=["a", "b"])
+    assert "b" in res.failed
+    with Session(engine) as s:
+        assert get_topic(s, "x").newest_seen_utc is None    # reset, not stale
+
+    # Phase 3: b recovers with an OLDER post; the forced full re-pull gets it.
+    def healthy(subreddit, query, after=None, before=None):
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)],
+                    "b": [raw("p2", "b", ts=NOW - 9000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", healthy)
+    track_topic(engine, "x")
+    with Session(engine) as s:
+        post_ids = {p.post_id for p in s.exec(select(Post)).all()}
+    assert "p2" in post_ids                                 # recovered, not lost
+
+
 def test_list_topics_rollup_and_recency(engine, monkeypatch):
     data = {"dualipa": [raw("p1", "dualipa"), raw("p2", "dualipa")],
             "Ozempic": [raw("p3", "Ozempic")]}
