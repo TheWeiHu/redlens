@@ -565,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
                           f"keywords {', '.join(trow.keywords)!r} · "
                           f"tracked {_ts(trow.last_tracked_at)}")
         elif args.verb == "export":
-            if bool(args.username) == bool(args.topic):
+            if (args.username is None) == (args.topic is None):
                 raise RedlensError(
                     "export needs exactly one of <username> or --topic")
 
@@ -582,6 +582,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"wrote {n_posts:,} posts + {n_comments:,} comments "
                           f"for {scope} to {args.out}", file=sys.stderr)
                 else:
+                    if args.format == "csv":
+                        # csv writers emit their own \r\n terminators; a text
+                        # stream that also translates \n would double them into
+                        # \r\r\n (blank rows) on Windows. Disable translation,
+                        # matching the newline="" used for the file path. Guard
+                        # with getattr so a wrapped stream (e.g. test capture)
+                        # without reconfigure degrades instead of crashing.
+                        reconfigure = getattr(sys.stdout, "reconfigure", None)
+                        if reconfigure is not None:
+                            reconfigure(newline="")
                     _do_export(sys.stdout)
         elif getattr(args, "topic", None):  # show --topic <topic>
             with session(engine) as s:
