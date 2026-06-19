@@ -305,3 +305,35 @@ def test_label_themes_aligns_and_falls_back(db, monkeypatch):
     labels = label_themes("vpn", themes)
     assert labels == ["Connection Problems", "price, deal, refund", "app, update, ui"]
     assert "server, connection, slow" in seen["prompt"]   # clusters handed to model
+
+
+def test_identify_brands_no_key_raises(topic_db):
+    from redlens.errors import MissingKey
+    from redlens.summarize import identify_brands
+    with Session(connect(str(topic_db))) as s, pytest.raises(MissingKey):
+        identify_brands(s, "climate")
+
+
+def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
+    """Brands are parsed into name + aliases; blank names dropped, empty aliases
+    fall back to the name, and the sample handed to the model is the archive."""
+    from redlens.summarize import identify_brands
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = {}
+
+    def fake_complete(prompt, key, *, max_tokens):
+        seen["prompt"] = prompt
+        return json.dumps({"brands": [
+            {"name": "Tesla", "aliases": ["tesla", "tsla"]},
+            {"name": "BYD", "aliases": []},          # empty -> name as alias
+            {"name": "", "aliases": ["x"]},          # blank name -> dropped
+        ]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(topic_db))) as s:
+        brands = identify_brands(s, "climate")
+
+    assert [b.name for b in brands] == ["Tesla", "BYD"]
+    assert brands[0].aliases == ["tesla", "tsla"]
+    assert brands[1].aliases == ["BYD"]                  # empty -> [name]
+    assert "carbon tax debate heats up" in seen["prompt"]  # archive sampled

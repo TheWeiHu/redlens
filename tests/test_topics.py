@@ -119,6 +119,36 @@ def test_page_score_and_influence_include_comments(engine, monkeypatch):
     assert "great insight here" in doc
 
 
+def test_brand_mentions_counts_orders_and_word_boundary():
+    from redlens.models import Brand
+    from redlens.reporting.page import _brand_mentions, _brands_section
+    posts = [
+        Post(post_id="p1", author_username="a", subreddit_name="vpn",
+             created_utc=NOW, score=10, num_comments=0,
+             title="ExpressVPN is faster"),
+        Post(post_id="p2", author_username="b", subreddit_name="vpn",
+             created_utc=NOW, score=5, num_comments=0,
+             title="thinking about express vpn vs expressway"),  # 'expressway' must NOT match
+    ]
+    comments = [
+        Comment(comment_id="c1", author_username="x", subreddit_name="vpn",
+                link_id="p1", parent_id=None, created_utc=NOW, score=3,
+                body="I switched to Mullvad"),
+    ]
+    brands = [
+        Brand(name="ExpressVPN", aliases=["expressvpn", "express vpn"]),
+        Brand(name="Mullvad", aliases=["mullvad"]),
+        Brand(name="Surfshark", aliases=["surfshark"]),   # absent -> dropped
+    ]
+    rows = _brand_mentions(brands, posts, comments)
+    assert [(name, n) for name, n, _, _ in rows] == [("ExpressVPN", 2), ("Mullvad", 1)]
+
+    html = _brands_section(rows)
+    assert "Other brands mentioned" in html
+    assert "ExpressVPN" in html and "Mullvad" in html and "Surfshark" not in html
+    assert _brands_section([]) == ""
+
+
 def test_themes_html_with_and_without_labels():
     from redlens.reporting.page import _themes_html
     themes = [(0.6, ["server", "slow", "drop"]), (0.4, ["price", "deal"])]

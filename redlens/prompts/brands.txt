@@ -1,0 +1,17 @@
+Below are post titles and comment snippets from a Reddit discussion about "$topic". Identify the OTHER brands, products, companies, or services that come up — competitors, alternatives, and tools people mention — NOT "$topic" itself, and not generic words or subreddit names.
+
+$sample
+
+Return ONLY a JSON object (no markdown, no commentary):
+
+{
+  "brands": [
+    {"name": "<canonical brand name>", "aliases": ["<each spelling/abbreviation as it appears in the text>"]}
+  ]
+}
+
+Rules:
+- Only list brands actually present in the text above. Do not invent or pad.
+- "aliases" must include every spelling and abbreviation that appears (e.g. for ExpressVPN: "ExpressVPN", "express", "express vpn"; for Private Internet Access: "PIA"). These are what will be counted, so be exact and lowercase-insensitive is fine.
+- Exclude "$topic" itself and its own spellings.
+- Skip generic terms (e.g. "vpn", "router", "app") that are not a specific brand.

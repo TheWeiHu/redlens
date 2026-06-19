@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Other brands mentioned.** With `page --summary`, a new section surfaces the
+  competitor/alternative brands that come up in a topic's discussion. One LLM
+  call (`summarize.identify_brands()`) recognizes the brands and their spelling
+  variants; the page then counts mentions **deterministically** (whole-word,
+  case-insensitive, across posts + comments) — so the frequency is exact, not
+  the model's guess. Each brand bar drills down to the posts/comments naming it.
 - **Readable theme labels.** With `page --summary`, each LDA keyword cluster on
   the topic page gets a short human-readable label from one LLM call
   (`summarize.label_themes()`); the cluster's keywords stay alongside as muted

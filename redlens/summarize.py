@@ -32,6 +32,7 @@ from redlens import constants, llm, prompts
 from redlens.config import llm_api_key
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.models import (
+    Brand,
     Comment,
     Post,
     Profile,
@@ -234,6 +235,64 @@ def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
     for i, words in enumerate(themes):
         label = given[i].strip() if i < len(given) and isinstance(given[i], str) else ""
         out.append(label or ", ".join(words[:4]))
+    return out
+
+
+def identify_brands(session: Session, name: str) -> list[Brand]:
+    """One LLM call to surface the OTHER brands/products that come up in a
+    tracked topic's discussion (competitors, alternatives) — with the spelling
+    variants to count them by. The caller does the actual counting; the LLM only
+    recognizes. Raises :class:`NotFound`/:class:`MissingKey` like
+    :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
+    topic = get_topic(session, name)
+    if topic is None:
+        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+
+    key = llm_api_key()
+    if not key:
+        raise MissingKey(
+            "no LLM API key — run `redlens setup` or set "
+            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
+        )
+
+    topic_id = topic.id
+    assert topic_id is not None
+    posts = list(session.exec(
+        select(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .where(TopicPost.topic_id == topic_id)
+    ))
+    if not posts:
+        return []
+    comments = topic_comments(session, topic.name)
+
+    def _eng(p: Post) -> int:
+        return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
+
+    top_posts = sorted(posts, key=lambda p: -_eng(p))[:constants.BRAND_SAMPLE_POSTS]
+    top_comments = sorted(comments, key=lambda c: -c.score
+                          )[:constants.BRAND_SAMPLE_COMMENTS]
+    lines = [f"- {p.title.strip()[:160]}" for p in top_posts
+             if p.title and p.title.strip()]
+    lines += [f"- {c.body.strip().replace(chr(10), ' ')[:160]}"
+              for c in top_comments if c.body and c.body.strip()]
+    prompt = prompts.render("brands", topic=topic.name, sample="\n".join(lines))
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    data = _parse_json(raw)
+
+    out: list[Brand] = []
+    rows = data.get("brands")
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        bn = str(row.get("name", "")).strip()
+        if not bn:
+            continue
+        raw_aliases = row.get("aliases")
+        aliases = [str(a).strip() for a in raw_aliases
+                   if isinstance(a, str) and str(a).strip()
+                   ] if isinstance(raw_aliases, list) else []
+        out.append(Brand(name=bn, aliases=aliases or [bn]))
     return out
 
 
