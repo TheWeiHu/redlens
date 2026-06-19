@@ -331,7 +331,14 @@ def track_topic(
                 on_progress(label, kept)
 
         topic.subreddits = json.dumps(net)
-        topic.newest_seen_utc = newest or None
+        # Only advance the incremental cursor when every subreddit succeeded.
+        # The cursor is a single high-water mark across the whole net, so if one
+        # subreddit failed transiently (rate-limit, ban, exhausted retries) but
+        # others advanced it, the next track would query the failed sub with
+        # after=<that mark> and never re-fetch its older posts. Keeping the old
+        # cursor re-queries the full window next time; already-stored rows dedup.
+        if not failed:
+            topic.newest_seen_utc = newest or None
         topic.last_tracked_at = now
         session.add(topic)
         session.commit()

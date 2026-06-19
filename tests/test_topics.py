@@ -17,7 +17,7 @@ from sqlmodel import Session, select
 from redlens import arctic
 from redlens.cli import main
 from redlens.db import connect, init_schema
-from redlens.errors import NotFound
+from redlens.errors import NotFound, RedlensError
 from redlens.models import Comment, Post, TopicPost, User
 from redlens.reporting.page import render_topic_page
 from redlens.topics import get_topic, list_topics, track_topic, untrack_topic
@@ -155,6 +155,55 @@ def test_cli_page_all_renders_index_and_skips_empty(engine, tmp_path,
 def test_cli_page_needs_topic_or_all(engine, tmp_path):
     db = tmp_path / "t.db"
     assert main(["--db", str(db), "page"]) == 1        # neither topic nor --all
+
+
+def test_cli_page_all_decollides_slugs(engine, tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    # "C++" and "C#" both slug() to "c" — render_all must not overwrite one
+    # topic's page (and index link) with the other's.
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"cpp": [raw("p1", "cpp")],
+                                    "csharp": [raw("p2", "csharp")]}))
+    assert main(["--db", str(db), "track", "C++",
+                 "--subreddits", "cpp", "--yes"]) == 0
+    assert main(["--db", str(db), "track", "C#",
+                 "--subreddits", "csharp", "--yes"]) == 0
+
+    out = tmp_path / "reports"
+    assert main(["--db", str(db), "page", "--all", "-o", str(out)]) == 0
+
+    pages = sorted(p.name for p in out.glob("*.html") if p.name != "index.html")
+    assert pages == ["c-2.html", "c.html"]             # distinct files, no clobber
+    index = (out / "index.html").read_text()
+    assert "c.html" in index and "c-2.html" in index   # both topics linked
+
+
+def test_track_does_not_advance_cursor_when_a_subreddit_fails(engine, monkeypatch):
+    # a succeeds with a recent post; b fails transiently. The net-wide cursor
+    # must NOT advance past a's post, or b's older posts would never be
+    # re-fetched (silent data loss).
+    def flaky(subreddit, query, after=None, before=None):
+        if subreddit == "b":
+            raise RedlensError("r/b: rate limited")
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", flaky)
+
+    res = track_topic(engine, "x", subreddits=["a", "b"])
+    assert "b" in res.failed and res.posts_new == 1
+    with Session(engine) as s:
+        topic = get_topic(s, "x")
+        assert topic is not None and topic.newest_seen_utc is None   # not advanced
+
+    # b recovers with an OLDER post; since the cursor never moved, the next track
+    # re-queries the full window and still picks p2 up.
+    def healthy(subreddit, query, after=None, before=None):
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)],
+                    "b": [raw("p2", "b", ts=NOW - 2000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", healthy)
+    track_topic(engine, "x")
+    with Session(engine) as s:
+        post_ids = {p.post_id for p in s.exec(select(Post)).all()}
+    assert "p2" in post_ids                            # recovered, not lost
 
 
 def test_list_topics_rollup_and_recency(engine, monkeypatch):

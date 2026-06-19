@@ -274,7 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"redlens {__version__}")
     p.add_argument("--db", default=None, help="SQLite file (default: REDLENS_DB, "
                    "config.toml, or the per-user data dir)")
-    sub = p.add_subparsers(dest="verb", required=True)
+    # metavar keeps the hidden verbs (the `analytics` deprecation alias and the
+    # `__complete` helper, both registered without help=) out of the usage
+    # line's {choices} brace; they're already absent from the command list.
+    sub = p.add_subparsers(dest="verb", required=True, metavar="<command>")
     sub.add_parser("init")
     sy = sub.add_parser("sync", help="archive a user's history (incremental by default)")
     sy.add_argument("username")
