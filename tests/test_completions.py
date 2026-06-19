@@ -71,6 +71,30 @@ def test_scripts_wire_db_value_completion(shell: str) -> None:
     assert f"{completions.HELPER_VERB} topics" in script
 
 
+def test_untrack_completes_topic_names() -> None:
+    # 0021 follow-up: `untrack <topic>` must complete topic names, like
+    # `page` and `--topic` already do.
+    assert completions.POSITIONAL_KIND.get("untrack") == "topics"
+    bash = completions.generate("bash", build_parser())
+    assert (f'untrack) COMPREPLY=( $(compgen -W "$({completions._HELPER} topics'
+            in bash)
+    fish = completions.generate("fish", build_parser())
+    assert "__fish_seen_subcommand_from page untrack" in fish  # both topic verbs
+
+
+def test_help_hides_internal_verbs(capsys: pytest.CaptureFixture[str]) -> None:
+    # The `analytics` deprecation alias and the `__complete` helper are
+    # registered without help=, so a `<command>` metavar keeps them out of the
+    # usage line's choices brace too — they must not surface in `--help`.
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert "analytics" not in out
+    assert "__complete" not in out
+    assert "<command>" in out          # public verbs grouped under the metavar
+    assert "doctor" in out             # ...real verbs still documented
+
+
 def test_complete_lists_usernames_and_topics(tmp_path) -> None:
     from redlens.db import connect, init_schema, session
     from redlens.models import Topic, User

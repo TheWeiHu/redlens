@@ -248,6 +248,19 @@ class PageResult:
     written: bool
 
 
+def _unique_slug(name: str, used: set[str]) -> str:
+    """``slug(name)`` made collision-free within ``used`` by appending ``-2``,
+    ``-3``, … on conflict. Mutates ``used`` with the slug it hands back."""
+    base = slug(name)
+    s = base
+    n = 1
+    while s in used:
+        n += 1
+        s = f"{base}-{n}"
+    used.add(s)
+    return s
+
+
 def render_all(engine: Engine, out_dir: Path) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
@@ -257,8 +270,12 @@ def render_all(engine: Engine, out_dir: Path) -> list[PageResult]:
     with Session(engine) as session:
         listings = list_topics(session)
     results: list[PageResult] = []
+    used: set[str] = set()
     for listing in listings:
-        s = slug(listing.name)
+        # slug() is lossy (keeps only [a-z0-9]), so distinct names can collide
+        # ("C#"/"C++" -> "c"). Suffix dupes so each topic gets its own file and
+        # the index links don't all point at the last writer.
+        s = _unique_slug(listing.name, used)
         if listing.matched_posts == 0:
             results.append(PageResult(listing.name, s, 0, written=False))
             continue
