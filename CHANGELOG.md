@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Top complaints & use cases.** With `page --summary`, two new sections
+  surface the recurring problems people raise and what they use the topic for.
+  Same recognize-then-count split as the brands section
+  (`summarize.extract_categories()` + a shared `_count_mentions`): one LLM call
+  recognizes each category and its signature phrases, then mentions are counted
+  deterministically across posts + comments, with drill-down to the evidence.
 - **Other brands mentioned.** With `page --summary`, a new section surfaces the
   competitor/alternative brands that come up in a topic's discussion. One LLM
   call (`summarize.identify_brands()`) recognizes the brands and their spelling

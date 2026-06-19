@@ -22,11 +22,12 @@ from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.models import Brand, Profile, TopicAnalytics, TopicSummary
+from redlens.models import Brand, Category, Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
 from redlens.reporting.page import render_all, render_topic_page, slug
 from redlens.sentiment import WeekSentiment
 from redlens.summarize import (
+    extract_categories,
     identify_brands,
     label_themes,
     summarize_topic,
@@ -535,6 +536,20 @@ def main(argv: list[str] | None = None) -> int:
                 with session(engine) as s:
                     return identify_brands(s, topic_name)
 
+            # Complaints and use cases — same recognize-then-count split, one LLM
+            # call each, under --summary only.
+            def _categories(topic_name: str, kind: str) -> list[Category] | None:
+                if not args.summary:
+                    return None
+                with session(engine) as s:
+                    return extract_categories(s, topic_name, kind)
+
+            def _complaints(topic_name: str) -> list[Category] | None:
+                return _categories(topic_name, "complaints")
+
+            def _use_cases(topic_name: str) -> list[Category] | None:
+                return _categories(topic_name, "use_cases")
+
             if args.all_topics:
                 out_dir = Path(args.out) if args.out else default_report_dir()
                 results = render_all(
@@ -542,7 +557,9 @@ def main(argv: list[str] | None = None) -> int:
                     summarize=_summary if args.summary else None,
                     sentiment=_sentiment if args.summary else None,
                     theme_labeler=_label_themes if args.summary else None,
-                    brands=_brands if args.summary else None)
+                    brands=_brands if args.summary else None,
+                    complaints=_complaints if args.summary else None,
+                    use_cases=_use_cases if args.summary else None)
                 written = [pg for pg in results if pg.written]
                 skipped = [pg for pg in results if not pg.written]
                 for pg in written:
@@ -561,7 +578,9 @@ def main(argv: list[str] | None = None) -> int:
                     engine, args.topic, summary=_summary(args.topic),
                     sentiment_weeks=_sentiment(args.topic),
                     theme_labeler=_label_themes if args.summary else None,
-                    brands=_brands(args.topic))
+                    brands=_brands(args.topic),
+                    complaints=_categories(args.topic, "complaints"),
+                    use_cases=_categories(args.topic, "use_cases"))
                 out = Path(args.out or f"{slug(args.topic)}.html")
                 out.write_text(html_doc, encoding="utf-8")
                 print(f"wrote {out} ({len(html_doc):,} bytes)")

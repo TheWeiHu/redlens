@@ -306,6 +306,14 @@ class Brand(BaseModel):
     aliases: list[str] = []
 
 
+class Category(BaseModel):
+    """An LLM-recognized discussion category — a complaint or a use case — with
+    the signature phrases used to count the posts/comments that express it (name
+    is tried too when the phrase list is empty)."""
+    name: str
+    terms: list[str] = []
+
+
 class TopicAnalytics(BaseModel):
     """A tracked topic's roll-up: the topic-side mirror of ``UserAnalytics``.
 

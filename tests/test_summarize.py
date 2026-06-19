@@ -337,3 +337,27 @@ def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
     assert brands[0].aliases == ["tesla", "tsla"]
     assert brands[1].aliases == ["BYD"]                  # empty -> [name]
     assert "carbon tax debate heats up" in seen["prompt"]  # archive sampled
+
+
+def test_extract_categories_parses_complaints(topic_db, monkeypatch):
+    """Complaints/use-cases go through the same core, reading the 'categories'
+    list and 'phrases' terms; empty phrases fall back to the name."""
+    from redlens.summarize import extract_categories
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = {}
+
+    def fake_complete(prompt, key, *, max_tokens):
+        seen["prompt"] = prompt
+        return json.dumps({"categories": [
+            {"name": "Pricing", "phrases": ["too expensive", "price hike"]},
+            {"name": "Outages", "phrases": []},   # empty -> name as term
+        ]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(topic_db))) as s:
+        cats = extract_categories(s, "climate", "complaints")
+
+    assert [c.name for c in cats] == ["Pricing", "Outages"]
+    assert cats[0].terms == ["too expensive", "price hike"]
+    assert cats[1].terms == ["Outages"]
+    assert "PROBLEMS" in seen["prompt"]   # the complaints prompt was used
