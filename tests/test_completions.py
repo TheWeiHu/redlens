@@ -76,10 +76,21 @@ def test_untrack_completes_topic_names() -> None:
     # `page` and `--topic` already do.
     assert completions.POSITIONAL_KIND.get("untrack") == "topics"
     bash = completions.generate("bash", build_parser())
-    assert (f'untrack) COMPREPLY=( $(compgen -W "$({completions._HELPER} topics'
-            in bash)
+    assert (f'untrack) local IFS=$\'\\n\'; '
+            f'COMPREPLY=( $(compgen -W "$({completions._HELPER} topics' in bash)
     fish = completions.generate("fish", build_parser())
     assert "__fish_seen_subcommand_from page untrack" in fish  # both topic verbs
+
+
+def test_bash_value_completion_is_newline_safe() -> None:
+    # Topic names with spaces (e.g. "dua lipa") must stay one completion, not
+    # split into "dua"/"lipa" — every bash DB-value line resets IFS to newline.
+    script = completions.generate("bash", build_parser())
+    value_lines = [ln for ln in script.splitlines()
+                   if completions.HELPER_VERB in ln and "COMPREPLY=" in ln]
+    assert value_lines  # the helper-backed completion lines exist
+    for ln in value_lines:
+        assert "IFS=$'\\n'" in ln, ln
 
 
 def test_help_hides_internal_verbs(capsys: pytest.CaptureFixture[str]) -> None:

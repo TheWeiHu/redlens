@@ -272,10 +272,12 @@ def track_topic(
             s.lower() for s in topic.subreddit_list
         }
         window_extended = old_days is not None and topic.days > old_days
+        incremental = bool(
+            topic.newest_seen_utc and not net_grew and not window_extended
+            and not terms_changed and not reset)
         after = window_start
-        if (topic.newest_seen_utc and not net_grew and not window_extended
-                and not terms_changed and not reset):
-            after = max(window_start, topic.newest_seen_utc)
+        if incremental:
+            after = max(window_start, topic.newest_seen_utc or 0)
 
         seen: set[str] = set()
         newest = topic.newest_seen_utc or 0
@@ -331,14 +333,22 @@ def track_topic(
                 on_progress(label, kept)
 
         topic.subreddits = json.dumps(net)
-        # Only advance the incremental cursor when every subreddit succeeded.
-        # The cursor is a single high-water mark across the whole net, so if one
-        # subreddit failed transiently (rate-limit, ban, exhausted retries) but
-        # others advanced it, the next track would query the failed sub with
-        # after=<that mark> and never re-fetch its older posts. Keeping the old
-        # cursor re-queries the full window next time; already-stored rows dedup.
+        # The cursor is a single high-water mark across the whole net. Advance it
+        # only when every subreddit succeeded — otherwise a transiently-failed
+        # sub would be queried with after=<that mark> next time and never
+        # re-fetch its older posts (silent loss).
         if not failed:
             topic.newest_seen_utc = newest or None
+        elif not incremental:
+            # A widened/full re-pull (grown net, changed keywords, longer window,
+            # or reset) that partially failed: the widened net/keywords/days are
+            # already persisted, so the next run won't see net_grew /
+            # terms_changed / window_extended and would go incremental from the
+            # stale cursor, skipping the failed slice's older posts. Drop the
+            # cursor so the next run re-pulls the full window until a clean pass.
+            topic.newest_seen_utc = None
+        # else: incremental top-up with a transient failure — the failed sub was
+        # already covered down to the old cursor, so keeping it is correct.
         topic.last_tracked_at = now
         session.add(topic)
         session.commit()
