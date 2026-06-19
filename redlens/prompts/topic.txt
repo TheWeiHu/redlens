@@ -10,15 +10,16 @@ $comment_snippets
 Summarize what THIS topic's discussion is actually about, grounded only in the posts and comments above. Return ONLY a JSON object (no markdown, no commentary) with exactly this shape. Every value in angle brackets is a placeholder showing the type — REPLACE every one with your own summary for this topic. Never copy these placeholders or treat them as the answer:
 
 {
-  "overview": "<a short paragraph: what this discussion is about and why people are talking about it>",
+  "overview": "<one or two sentences: what this discussion is about and why people are talking about it>",
   "themes": [
-    {"title": "<a short name for a recurring thread of the discussion>", "summary": "<one or two sentences on what is said within it>"}
+    {"title": "<a short name for a recurring thread of the discussion>", "summary": "<one short sentence on what is said within it>"}
   ],
-  "sentiment": "<a short paragraph on the overall mood and tone of the discussion>",
-  "viewpoints": "<a short paragraph on the main contrasting positions or debates, or 'little disagreement' if there are none>"
+  "sentiment": "<one sentence on the overall mood and tone>",
+  "viewpoints": "<one sentence on the main contrasting positions, or 'little disagreement' if there are none>"
 }
 
 Rules:
-- "themes" is a ranked list (most prominent first) of 2-5 of the discussion's most prominent threads.
+- Be succinct: prefer the fewest words that capture it. No filler, no preamble, no restating the question.
+- "themes" is a ranked list (most prominent first) of 2-4 of the discussion's most prominent threads; each "summary" is one short sentence.
 - Ground every statement in the posts and comments above; do not invent details that are not present.
 - Do not reference raw statistics (post or comment counts, scores, dates); they're reported elsewhere.

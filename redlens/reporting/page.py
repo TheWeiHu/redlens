@@ -27,6 +27,7 @@ from redlens import constants
 from redlens.errors import NotFound
 from redlens.models import Comment, Post, Topic, TopicPost, TopicSummary
 from redlens.reporting import lda
+from redlens.sentiment import WeekSentiment, weekly_sentiment
 from redlens.topics import get_topic, list_topics, topic_comments
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
@@ -55,6 +56,7 @@ details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
 svg {{ width: 100%; height: auto; }}
 svg rect, svg circle {{ fill: {_A}; }}
+svg rect.pos {{ fill: #2e8b57; }} svg rect.neg {{ fill: {_A}; }}
 svg text {{ fill: #888; font-size: 9px; }}
 table {{ border-collapse: collapse; width: 100%; }}
 td {{ border-bottom: 1px solid #eee; padding: .3rem .5rem; vertical-align: top; }}
@@ -147,6 +149,37 @@ def _day_chart(series: list[tuple[str, int]]) -> str:
             f'<text x="0" y="{h + 10:.0f}">{series[0][0]}</text>'
             f'<text x="{w:.0f}" y="{h + 10:.0f}" text-anchor="end">'
             f'{series[-1][0]}</text></svg>')
+
+
+def _sentiment_chart(series: list[WeekSentiment]) -> str:
+    """Inline-SVG diverging bar chart of weekly mean sentiment in [-1, 1]: bars
+    rise (green) above a neutral baseline for positive weeks and fall (red)
+    below for negative ones, height ~ magnitude; hover for the week's average
+    and how many posts were scored. Returns '' when nothing was scored."""
+    if not series or all(w.scored == 0 for w in series):
+        return ""
+    width, half, pad = 600.0, 38.0, 14.0
+    center, total_h = half, half * 2
+    bw = width / len(series)
+    bars = []
+    for i, wk in enumerate(series):
+        bh = abs(wk.mean) * half
+        y = center - bh if wk.mean >= 0 else center
+        cls = "pos" if wk.mean >= 0 else "neg"
+        sign = "+" if wk.mean >= 0 else ""
+        bars.append(
+            f'<rect class="{cls}" x="{i * bw:.1f}" y="{y:.1f}" '
+            f'width="{max(bw - 0.5, 0.4):.1f}" height="{max(bh, 0.6):.1f}">'
+            f"<title>{wk.week}: {sign}{wk.mean:.2f} avg · "
+            f"{wk.scored:,}/{wk.total:,} posts scored</title></rect>"
+        )
+    baseline = (f'<line x1="0" y1="{center:.1f}" x2="{width:.0f}" '
+                f'y2="{center:.1f}" stroke="#ccc" stroke-width="0.5"/>')
+    labels = (f'<text x="0" y="{total_h + pad - 2:.0f}">{series[0].week}</text>'
+              f'<text x="{width:.0f}" y="{total_h + pad - 2:.0f}" '
+              f'text-anchor="end">{series[-1].week}</text>')
+    return (f'<svg viewBox="0 0 {width:.0f} {total_h + pad:.0f}">'
+            f'{baseline}{"".join(bars)}{labels}</svg>')
 
 
 def _punchcard(posts: list[Post], comments: list[Comment]) -> str:
@@ -406,6 +439,14 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
     domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
     domains = _drill(domain_rows, domain_groups) if domain_rows else ""
 
+    sentiment_svg = _sentiment_chart(weekly_sentiment(
+        (p.created_utc, f"{p.title or ''} {p.selftext or ''}") for p in posts))
+    sentiment_section = (
+        '<h2>Sentiment over time</h2>\n'
+        '<p class="muted">weekly mean post sentiment, −1 (negative) to '
+        '+1 (positive) · lexicon-based</p>\n'
+        f"{sentiment_svg}" if sentiment_svg else "")
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(topic.name)} · redlens</title><style>{_CSS}</style></head><body>
@@ -416,6 +457,7 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 {_summary_section(summary) if summary else ""}
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts))}
+{sentiment_section}
 <h2>By weekday &amp; hour (UTC)</h2>
 {_punchcard(posts, comments)}
 <h2>Subreddits</h2>
