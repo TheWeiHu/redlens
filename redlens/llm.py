@@ -53,4 +53,11 @@ def complete(prompt: str, api_key: str, *,
             data = json.loads(r.read())
     except Exception as exc:
         raise RedlensError(f"LLM request failed: {exc}") from exc
-    return str(data["choices"][0]["message"]["content"])
+    choice = data["choices"][0]
+    # JSON mode guarantees valid syntax only if the reply wasn't cut off by
+    # max_tokens; a length truncation yields half an object. Flag it clearly
+    # (callers degrade on RedlensError) instead of a downstream "invalid JSON".
+    if json_object and choice.get("finish_reason") == "length":
+        raise RedlensError(
+            f"LLM reply truncated at max_tokens={max_tokens}; raise the limit")
+    return str(choice["message"]["content"])
