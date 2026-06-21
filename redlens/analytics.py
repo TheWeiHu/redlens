@@ -18,7 +18,7 @@ from redlens.models import (
     UserAnalytics,
     UserListing,
 )
-from redlens.topics import get_topic
+from redlens.topics import require_topic
 
 
 def compute_user_analytics(session: Session, username: str) -> UserAnalytics:
@@ -104,9 +104,7 @@ def compute_topic_analytics(session: Session, name: str) -> TopicAnalytics:
     ``topicpost`` join (the 0007 in-SQL convention); nothing is loaded into
     Python row-by-row.
     """
-    topic = get_topic(session, name)
-    if topic is None:
-        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+    topic = require_topic(session, name)
 
     # Every measure below is a SQL aggregate over the topic's matched posts
     # (the topicpost join), so nothing is loaded into Python row-by-row.

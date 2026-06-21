@@ -141,6 +141,15 @@ def get_topic(session: Session, name: str) -> Topic | None:
     ).first()
 
 
+def require_topic(session: Session, name: str) -> Topic:
+    """The tracked topic ``name``, or raise :class:`NotFound` with the standard
+    "run track first" guidance — the message every read path shares."""
+    topic = get_topic(session, name)
+    if topic is None:
+        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+    return topic
+
+
 def list_topics(session: Session) -> list[TopicListing]:
     """Roll up every tracked topic: keywords, net size, matched-post count,
     and when each was last tracked. Sorted most-recently-tracked first.
