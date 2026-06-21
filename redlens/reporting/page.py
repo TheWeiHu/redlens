@@ -36,7 +36,7 @@ from redlens.models import (
     TopicSummary,
 )
 from redlens.reporting import lda
-from redlens.sentiment import WeekSentiment, weekly_sentiment
+from redlens.sentiment import WeekSentiment
 from redlens.topics import get_topic, list_topics, topic_comments
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
@@ -539,7 +539,7 @@ def render_topic_page(engine: Engine, name: str,
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
     optional — when given, an AI-narrative section is added. ``sentiment_weeks``
     (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
-    omitted the page falls back to the offline lexicon. ``theme_labeler`` (from
+    omitted the page shows no sentiment chart. ``theme_labeler`` (from
     ``label_themes``) turns each LDA keyword cluster into a readable label; when
     omitted the themes show keywords only. The page stays fully keyless without
     any of them."""
@@ -555,13 +555,7 @@ def render_topic_page(engine: Engine, name: str,
             .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
         comments = topic_comments(session, topic.name)
-        is_llm = sentiment_weeks is not None
-        if sentiment_weeks is None:
-            sentiment_weeks = weekly_sentiment(
-                ((p.created_utc, f"{p.title or ''} {p.selftext or ''}")
-                 for p in posts),
-                ((c.created_utc, c.body or "") for c in comments))
-        section = _sentiment_section(sentiment_weeks, is_llm=is_llm)
+        section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
 
         themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
         labels = (theme_labeler(topic.name, [words for _, words in themes])
@@ -590,16 +584,16 @@ def render_topic_page(engine: Engine, name: str,
                        brands_html, complaints_html, use_cases_html)
 
 
-def _sentiment_section(series: list[WeekSentiment], *, is_llm: bool) -> str:
+def _sentiment_section(series: list[WeekSentiment]) -> str:
     """The 'Sentiment over time' heading + caption + chart, or '' when there's
-    nothing to chart. ``is_llm`` only changes the caption's method note."""
+    nothing to chart. The series is always LLM-scored (see
+    ``weekly_topic_sentiment``)."""
     svg = _sentiment_chart(series)
     if not svg:
         return ""
-    src = "LLM-scored" if is_llm else "offline lexicon (rough — sarcasm/negation can fool it)"
     return ('<h2>Sentiment over time</h2>\n'
             '<p class="muted">weekly sentiment, −1 (negative) to +1 (positive)'
-            f' · {src}</p>\n{svg}')
+            f' · LLM-scored</p>\n{svg}')
 
 
 def _render(topic: Topic, posts: list[Post], comments: list[Comment],

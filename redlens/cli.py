@@ -516,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
                     return summarize_topic(s, topic_name, depth=args.depth)
 
             # The sentiment-over-time trend: LLM-scored under --summary (handles
-            # sarcasm/negation), else None so the page uses the offline lexicon.
+            # sarcasm/negation). Without --summary there's no sentiment chart.
             def _sentiment(topic_name: str) -> list[WeekSentiment] | None:
                 if not args.summary:
                     return None
