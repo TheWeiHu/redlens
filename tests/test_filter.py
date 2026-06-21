@@ -56,6 +56,21 @@ def _verdicts(mapping):
     return fake
 
 
+def test_snippet_centers_on_the_matched_keyword():
+    # The mention sits deep in a long post; a naive head cut would miss it. The
+    # snippet must window around the keyword so the brand is visible (pure
+    # deterministic string work — no LLM).
+    from redlens.filter import _snippet
+    head = "x" * 600
+    text = f"{head} I switched to using Square for all my payments now."
+    snip = _snippet(text, ["square"], width=80)
+    assert "square" in snip.lower()              # the mention made it in
+    assert snip.startswith("…")                  # windowed, not from the head
+    # Short text is returned whole; a title-only match (no body hit) takes the head.
+    assert _snippet("about square", ["square"], width=80) == "about square"
+    assert _snippet(head, ["square"], width=80).startswith("x")
+
+
 def test_filter_persists_verdicts_and_hides_false_positives(engine, monkeypatch):
     posts = [_post("p1", title="Conductor the Mac app is great"),
              _post("p2", title="the train conductor checked tickets"),

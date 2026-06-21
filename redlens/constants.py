@@ -72,7 +72,11 @@ SUMMARY_TOP_SUBS = 10
 # without blowing the input budget. Output is one small verdict per item, so the
 # JSON stays well under SUMMARY_MAX_TOKENS even at a full batch.
 FILTER_BATCH = 25                # matched posts classified per LLM request
-FILTER_SNIPPET_CHARS = 300       # chars of selftext sent with each title
+# Width of the per-post snippet sent to the classifier. The snippet is centered
+# on the matched keyword (see filter._snippet), not the post's head, so the model
+# sees the brand mention in context even when it sits deep in a long post — the
+# fix for the recall misses where the match was past a naive head cut.
+FILTER_SNIPPET_CHARS = 500
 
 
 class DepthPreset(NamedTuple):

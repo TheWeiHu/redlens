@@ -52,16 +52,57 @@ def _chunked(items: list[str], size: int) -> list[list[str]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def _item_block(posts: list[Post]) -> str:
+def _needles(keyword: str) -> list[str]:
+    """Search terms for one keyword: the whole phrase plus its longer words, so a
+    multi-word keyword ('universal basic income') can center on whichever word
+    appears first."""
+    kw = " ".join(keyword.lower().split())
+    if not kw:
+        return []
+    return [kw] + [w for w in kw.split() if len(w) > 2]
+
+
+def _snippet(text: str, keywords: list[str],
+             width: int = constants.FILTER_SNIPPET_CHARS) -> str:
+    """A width-bounded slice of ``text`` centered on the first keyword hit.
+
+    ``track`` matched this post because a keyword appears somewhere in its title
+    or body — but that mention can sit deep in a long post, past a naive head cut,
+    so the model would judge blind on an intro that never names the brand and drop
+    a real mention. This deterministically finds the earliest keyword occurrence
+    and windows the text around it, so the LLM always sees the matched term in
+    context (no LLM call — pure string work). No hit in the body (e.g. the match
+    was in the title) falls back to the head."""
+    text = " ".join(text.split())
+    if len(text) <= width:
+        return text
+    low = text.lower()
+    pos = -1
+    for kw in keywords:
+        for needle in _needles(kw):
+            i = low.find(needle)
+            if i != -1:
+                pos = i if pos == -1 else min(pos, i)
+    if pos == -1:
+        return text[:width].rstrip() + "…"
+    start = max(0, pos - width // 2)
+    end = min(len(text), start + width)
+    start = max(0, end - width)
+    return (("…" if start else "") + text[start:end].strip()
+            + ("…" if end < len(text) else ""))
+
+
+def _item_block(posts: list[Post], keywords: list[str]) -> str:
     """One text block listing the batch's posts for the prompt — id, subreddit,
-    title, and a short snippet so the model has enough context to judge sense."""
+    title, and a keyword-centered snippet so the model sees the matched term in
+    context (not just the post's opening) when judging sense."""
     lines: list[str] = []
     for p in posts:
-        title = (p.title or "").strip().replace("\n", " ")
+        title = " ".join((p.title or "").split())
         lines.append(f"- id={p.post_id} | r/{p.subreddit_name} | {title}")
-        snippet = (p.selftext or "").strip().replace("\n", " ")
+        snippet = _snippet(p.selftext or "", keywords)
         if snippet:
-            lines.append(f"    {snippet[:constants.FILTER_SNIPPET_CHARS]}")
+            lines.append(f"    {snippet}")
     return "\n".join(lines)
 
 
@@ -140,7 +181,7 @@ def filter_topic(
             continue
         prompt = prompts.render(
             "filter", brand=topic.name, keywords=keywords,
-            about=about_line, items=_item_block(posts))
+            about=about_line, items=_item_block(posts, topic.keyword_list))
         try:
             raw = llm.complete(prompt, key,
                                max_tokens=constants.SUMMARY_MAX_TOKENS,
