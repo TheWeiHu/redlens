@@ -82,9 +82,13 @@ def test_helper_verb_stays_out_of_scripts(shell: str) -> None:
 def test_scripts_wire_db_value_completion(shell: str) -> None:
     script = completions.generate(shell, build_parser())
     # positional username completion (show/export/summarize) and topic
-    # completion (page positional + --topic value) both shell out to the helper
-    assert f"{completions.HELPER_VERB} users" in script
-    assert f"{completions.HELPER_VERB} topics" in script
+    # completion (page positional + --topic value) both shell out to the helper.
+    assert completions.HELPER_VERB in script
+    # bash routes each kind through the literal reader __redlens_values <kind>;
+    # zsh/fish call `__complete <kind>` directly.
+    token = "__redlens_values " if shell == "bash" else f"{completions.HELPER_VERB} "
+    assert f"{token}users" in script
+    assert f"{token}topics" in script
 
 
 def test_untrack_completes_topic_names() -> None:
@@ -92,21 +96,23 @@ def test_untrack_completes_topic_names() -> None:
     # `page` and `--topic` already do.
     assert completions.POSITIONAL_KIND.get("untrack") == "topics"
     bash = completions.generate("bash", build_parser())
-    assert (f'untrack) local IFS=$\'\\n\'; '
-            f'COMPREPLY=( $(compgen -W "$({completions._HELPER} topics' in bash)
+    assert 'untrack) __redlens_values topics "$cur"; return ;;' in bash
     fish = completions.generate("fish", build_parser())
     assert "__fish_seen_subcommand_from page untrack" in fish  # both topic verbs
 
 
-def test_bash_value_completion_is_newline_safe() -> None:
-    # Topic names with spaces (e.g. "dua lipa") must stay one completion, not
-    # split into "dua"/"lipa" — every bash DB-value line resets IFS to newline.
+def test_bash_value_completion_is_injection_safe_and_newline_safe() -> None:
+    # DB values (topic/user names) must NEVER reach `compgen -W "$(...)"`, which
+    # expands each word and would execute a name like "$(rm -rf ~)" at TAB time.
+    # They flow through __redlens_values, which reads them literally (IFS= read
+    # -r), so a multi-word name like "dua lipa" also stays one candidate.
     script = completions.generate("bash", build_parser())
-    value_lines = [ln for ln in script.splitlines()
-                   if completions.HELPER_VERB in ln and "COMPREPLY=" in ln]
-    assert value_lines  # the helper-backed completion lines exist
-    for ln in value_lines:
-        assert "IFS=$'\\n'" in ln, ln
+    assert "__redlens_values()" in script
+    assert "while IFS= read -r line" in script
+    # no DB value is ever piped into compgen -W
+    assert f'compgen -W "$({completions._HELPER}' not in script
+    # the value cases delegate to the safe literal reader
+    assert '--topic) __redlens_values topics "$cur"; return ;;' in script
 
 
 def test_help_hides_internal_verbs(capsys: pytest.CaptureFixture[str]) -> None:
@@ -137,6 +143,21 @@ def test_complete_lists_usernames_and_topics(tmp_path) -> None:
 
     assert completions.complete("users", db) == ["alice", "bob"]
     assert completions.complete("topics", db) == ["ubi"]
+
+
+def test_complete_returns_shell_metachar_names_verbatim(tmp_path) -> None:
+    # A topic name with shell metacharacters comes back unmodified; the bash
+    # script (see the injection test) reads it literally so it is never executed.
+    from redlens.db import connect, init_schema, session
+    from redlens.models import Topic
+
+    db = tmp_path / "redlens.db"
+    engine = connect(db)
+    init_schema(engine)
+    with session(engine) as s:
+        s.add(Topic(name="$(touch pwned)"))
+        s.commit()
+    assert completions.complete("topics", db) == ["$(touch pwned)"]
 
 
 def test_complete_silent_when_db_missing(tmp_path) -> None:

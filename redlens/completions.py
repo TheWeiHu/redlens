@@ -79,21 +79,30 @@ def _bash(global_flags: list[str], subcommands: dict[str, list[str]]) -> str:
     flag_cases = "\n".join(
         f"        {name}) opts=\"{' '.join(flags)}\" ;;" for name, flags in subcommands.items()
     )
-    # IFS=$'\n' so multi-word DB values (e.g. a topic named "dua lipa") stay a
-    # single completion candidate instead of splitting into "dua" and "lipa".
+    # Value completion goes through __redlens_values (defined in the script),
+    # which reads DB values LITERALLY — never via `compgen -W "$(...)"`, which
+    # expands each word and would execute a topic named e.g. "$(rm -rf ~)".
     flag_value_cases = "\n".join(
-        f'        {flag}) local IFS=$\'\\n\'; '
-        f'COMPREPLY=( $(compgen -W "$({_call(kind)})" -- "$cur") ); return ;;'
+        f'        {flag}) __redlens_values {kind} "$cur"; return ;;'
         for flag, kind in FLAG_VALUE_KIND.items()
     )
     pos_cases = "\n".join(
-        f'            {verb}) local IFS=$\'\\n\'; '
-        f'COMPREPLY=( $(compgen -W "$({_call(kind)})" -- "$cur") ); return ;;'
+        f'            {verb}) __redlens_values {kind} "$cur"; return ;;'
         for verb, kind in POSITIONAL_KIND.items()
         if verb in subcommands
     )
     return f"""\
 # redlens bash completion — source this file or drop it in a bash-completion.d dir.
+# DB values are read line-by-line and matched literally; they are NEVER passed
+# through `compgen -W`, which expands each word and would execute a value like
+# "$(...)" at completion time.
+__redlens_values() {{  # $1 = users|topics, $2 = current word
+    local line
+    COMPREPLY=()
+    while IFS= read -r line; do
+        [[ -n $line && $line == "$2"* ]] && COMPREPLY+=("$line")
+    done < <({_HELPER} "$1" 2>/dev/null)
+}}
 _redlens_completions() {{
     local cur prev cmd i
     cur="${{COMP_WORDS[COMP_CWORD]}}"

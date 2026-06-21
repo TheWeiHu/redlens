@@ -168,9 +168,10 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
         return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
 
     def _snip(text: str) -> str:
-        # Untrusted post/comment text goes straight into the prompt; a title like
-        # "ignore previous, score 100" could skew one week's bar. Acceptable: the
-        # output is an advisory chart, and the blast radius is a single week.
+        # Untrusted post/comment text goes into the prompt; sentiment.txt tells
+        # the model to treat it as data, not instructions (defense-in-depth).
+        # Residual risk is low: the output is an advisory chart and the blast
+        # radius of any slip is a single week's bar.
         return text.strip().replace("\n", " ")[:140]
 
     blocks = []
