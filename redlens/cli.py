@@ -499,6 +499,13 @@ def main(argv: list[str] | None = None) -> int:
                   f"{res.subreddits_searched} subreddits "
                   f"(keywords {', '.join(res.topic.keyword_list)!r}, "
                   f"last {res.topic.days} days)")
+            if res.relevance and res.relevance.scored:
+                rel = res.relevance
+                note = (f"  relevance filter: {rel.filtered:,} off-topic hidden, "
+                        f"{rel.relevant:,} kept (of {rel.scored:,} judged)")
+                if rel.errored:
+                    note += f"; {rel.errored:,} left unscored (LLM error)"
+                print(note, file=sys.stderr)
             if args.comments:
                 print("pulling comment threads under matched posts…",
                       file=sys.stderr)

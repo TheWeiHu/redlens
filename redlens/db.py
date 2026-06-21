@@ -30,7 +30,7 @@ T = TypeVar("T", bound=SQLModel)
 # Fresh databases skip migrations and are built straight at the latest schema;
 # databases from before versioning (user_version 0 with tables present) are
 # treated as version 1, the v0.2 baseline.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE topic ADD COLUMN exclude_terms VARCHAR NOT NULL DEFAULT ''",),
     # v3 gave topic a surrogate id + keyword list and rekeyed topicpost on
@@ -41,6 +41,17 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # additive, so create_all builds it on the spot — no DDL needed here; this
     # empty step only advances user_version past 3 so the stamp stays honest.
     4: (),
+    # v5 adds the LLM relevance verdict to topicpost (additive, nullable):
+    # which matched posts a tracked topic's filter judged on-topic. All-null on
+    # existing rows means "unscored" — kept by default, so old archives read
+    # exactly as before until the next keyed `track` fills them in.
+    5: (
+        "ALTER TABLE topicpost ADD COLUMN relevant BOOLEAN",
+        "ALTER TABLE topicpost ADD COLUMN relevance_confidence FLOAT",
+        "ALTER TABLE topicpost ADD COLUMN relevance_reason VARCHAR",
+        "ALTER TABLE topicpost ADD COLUMN relevance_model VARCHAR",
+        "ALTER TABLE topicpost ADD COLUMN relevance_at INTEGER",
+    ),
 }
 
 

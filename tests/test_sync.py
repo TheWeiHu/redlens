@@ -67,24 +67,33 @@ def _mem():
 
 # --- migration -------------------------------------------------------------
 
-def test_migration_adds_sync_state_table(tmp_path):
-    """A v3 database (no sync_state) upgrades to v4 and gains the table."""
+def test_migration_upgrades_v3_through_latest(tmp_path):
+    """A v3 database upgrades to the current schema: it gains the v4 sync_state
+    table and the v5 topicpost relevance columns. (Build the latest schema, then
+    strip what v4/v5 added so the starting DB faithfully looks like v3.)"""
     db = tmp_path / "v3.db"
     engine = connect(db)
     SQLModel.metadata.create_all(engine)
     with engine.begin() as con:
-        con.exec_driver_sql("DROP TABLE sync_state")
+        con.exec_driver_sql("DROP TABLE sync_state")          # v4 added this
+        for c in ("relevant", "relevance_confidence", "relevance_reason",
+                  "relevance_model", "relevance_at"):         # v5 added these
+            con.exec_driver_sql(f"ALTER TABLE topicpost DROP COLUMN {c}")
         con.exec_driver_sql("PRAGMA user_version = 3")
 
     init_schema(engine)
 
     with engine.begin() as con:
         version = int(con.exec_driver_sql("PRAGMA user_version").scalar())
-        present = con.exec_driver_sql(
+        sync_state = con.exec_driver_sql(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_state'"
         ).first()
-    assert version == SCHEMA_VERSION == 4
-    assert present is not None
+        cols = {r[1] for r in con.exec_driver_sql(
+            "PRAGMA table_info(topicpost)")}
+    assert version == SCHEMA_VERSION == 5
+    assert sync_state is not None
+    assert {"relevant", "relevance_confidence", "relevance_reason",
+            "relevance_model", "relevance_at"} <= cols
 
 
 # --- incremental no-op -----------------------------------------------------

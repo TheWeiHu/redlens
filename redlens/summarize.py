@@ -43,7 +43,7 @@ from redlens.models import (
     User,
 )
 from redlens.sentiment import WeekSentiment, _week_start
-from redlens.topics import get_topic, topic_comments
+from redlens.topics import get_topic, relevant_clause, topic_comments
 
 _Activity = TypeVar("_Activity", Post, Comment)
 
@@ -149,7 +149,7 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
     posts = list(session.exec(
         select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id)
+        .where(TopicPost.topic_id == topic_id, relevant_clause())
     ))
     if not posts:
         return []
@@ -297,7 +297,7 @@ def _extract_labeled_terms(
     posts = list(session.exec(
         select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id)
+        .where(TopicPost.topic_id == topic_id, relevant_clause())
     ))
     if not posts:
         return []
@@ -475,14 +475,14 @@ def _build_topic_prompt(session: Session, topic: Topic, depth: str) -> str:
         session, template="topic", depth=depth,
         post_base=select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id),
+        .where(TopicPost.topic_id == topic_id, relevant_clause()),
         comment_base=select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id),
+        .where(TopicPost.topic_id == topic_id, relevant_clause()),
         sub_bases=[
             select(Post.subreddit_name)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_id == topic_id),
+            .where(TopicPost.topic_id == topic_id, relevant_clause()),
         ],
         topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,

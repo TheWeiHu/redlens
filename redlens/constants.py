@@ -63,6 +63,18 @@ SUMMARY_MAX_TOKENS = 2400
 SUMMARY_TOP_SUBS = 10
 
 
+# --- topic relevance filter (BYO LLM key) -----------------------------------
+# `track` matches by full-text substring, so a brand whose name is a common word
+# ("conductor", "shell", "bolt") collects mostly off-topic posts. When a key is
+# present, `track` asks the LLM to classify each match as on-topic vs false
+# positive (see redlens/filter.py). Batched to amortize the call: one request per
+# FILTER_BATCH items, each item title + a short snippet so the model has context
+# without blowing the input budget. Output is one small verdict per item, so the
+# JSON stays well under SUMMARY_MAX_TOKENS even at a full batch.
+FILTER_BATCH = 25                # matched posts classified per LLM request
+FILTER_SNIPPET_CHARS = 300       # chars of selftext sent with each title
+
+
 class DepthPreset(NamedTuple):
     """How much of the archive a ``--depth`` level samples. Named fields so the
     numbers below aren't opaque positional magic at the call site."""

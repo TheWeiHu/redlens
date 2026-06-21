@@ -34,11 +34,12 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from sqlalchemy import delete, func
+from sqlalchemy import ColumnElement, delete, func
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
 from redlens import arctic
+from redlens.config import llm_api_key
 from redlens.constants import (
     COMMIT_BATCH,
     DISCOVER_MAX_AUTHORS,
@@ -47,7 +48,19 @@ from redlens.constants import (
 )
 from redlens.db import upsert
 from redlens.errors import NotFound, RedlensError
+from redlens.filter import FilterResult, filter_topic
 from redlens.models import Comment, Post, Topic, TopicListing, TopicPost, User
+
+
+def relevant_clause() -> ColumnElement[bool]:
+    """Predicate for ``topicpost`` rows a tracked topic's relevance filter kept.
+
+    Tri-state ``relevant``: ``False`` is hidden (a judged false positive);
+    ``None`` (unscored — no LLM key, or pre-filter rows) and ``True`` are kept. So
+    ``IS NOT False`` keeps unscored rows, preserving keyless behavior exactly.
+    Every surface that reads a topic's matched posts/comments ANDs this in so the
+    soft flag is honored uniformly."""
+    return col(TopicPost.relevant).isnot(False)
 
 
 def _now() -> int:
@@ -70,6 +83,7 @@ class TrackResult:
     discovered: list[str] = field(default_factory=list)
     per_subreddit: dict[str, int] = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)  # subreddit -> error
+    relevance: FilterResult | None = None  # LLM relevance pass, when a key is set
 
 
 def query_terms(query: str) -> list[str]:
@@ -155,6 +169,7 @@ def list_topics(session: Session) -> list[TopicListing]:
 
     counts: dict[int, int] = dict(session.exec(
         select(col(TopicPost.topic_id), func.count())
+        .where(relevant_clause())
         .group_by(col(TopicPost.topic_id))
     ).all())
 
@@ -286,6 +301,7 @@ def track_topic(
         posts_new = 0
         per_subreddit: dict[str, int] = {}
         failed: dict[str, str] = {}
+        matched_ids: list[str] = []   # this run's kept posts, for the relevance pass
 
         def flush(batch: list[Post]) -> None:
             """Persist a chunk of posts + their topic links and commit, so a
@@ -318,6 +334,7 @@ def track_topic(
                             if any(t in text for t in excluded):
                                 continue  # homonym noise, e.g. Ubisoft for "ubi"
                         batch.append(post)
+                        matched_ids.append(post.post_id)
                         kept += 1
                         if len(batch) >= COMMIT_BATCH:
                             flush(batch)
@@ -355,6 +372,16 @@ def track_topic(
         session.add(topic)
         session.commit()
 
+        # Relevance pass: when an LLM key is set, classify the posts this run just
+        # matched and flag the false positives (the brand-name homonym noise that
+        # substring search can't avoid). Skipped silently with no key, so keyless
+        # `track` behaves exactly as before. Runs after the commit above, so a
+        # filter failure never loses the fetched archive.
+        relevance: FilterResult | None = None
+        key = llm_api_key()
+        if key and matched_ids:
+            relevance = filter_topic(session, topic, matched_ids, key)
+
     return TrackResult(
         topic=topic,
         posts_new=posts_new,
@@ -362,6 +389,7 @@ def track_topic(
         discovered=discovered,
         per_subreddit=per_subreddit,
         failed=failed,
+        relevance=relevance,
     )
 
 
@@ -383,10 +411,14 @@ def pull_topic_comments(
         if topic is None:
             raise RedlensError(f"topic {name!r} not tracked yet")
         # Only posts that actually drew discussion are worth a request.
+        # Skip false-positive posts: fetching comment threads for off-topic
+        # matches wastes arctic requests (and stores junk). Unscored/on-topic
+        # posts are still pulled, so keyless behavior is unchanged.
         post_ids = list(session.exec(
             select(Post.post_id)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_id == topic.id, Post.num_comments > 0)
+            .where(TopicPost.topic_id == topic.id, Post.num_comments > 0,
+                   relevant_clause())
         ))
         written = 0
         for i, pid in enumerate(post_ids, 1):
@@ -411,7 +443,7 @@ def topic_posts(session: Session, name: str) -> list[Post]:
         select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
         .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower())
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
         .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
     ))
 
@@ -422,7 +454,7 @@ def topic_comments(session: Session, name: str) -> list[Comment]:
         select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
         .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower())
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
         .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
     ))
 

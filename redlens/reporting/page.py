@@ -37,7 +37,12 @@ from redlens.models import (
 )
 from redlens.reporting import lda
 from redlens.sentiment import WeekSentiment
-from redlens.topics import get_topic, list_topics, topic_comments
+from redlens.topics import (
+    get_topic,
+    list_topics,
+    relevant_clause,
+    topic_comments,
+)
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _Item = TypeVar("_Item", Post, Comment)
@@ -565,7 +570,7 @@ def render_topic_page(engine: Engine, name: str,
         posts = list(session.exec(
             select(Post)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_id == topic.id)
+            .where(TopicPost.topic_id == topic.id, relevant_clause())
             # post_id tie-break keeps the rendered page byte-deterministic
             .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
