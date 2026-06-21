@@ -38,23 +38,31 @@ relevant-first` rewrites the prompt example to the pre-tuning field order.
 
 ## Measured result — gpt-4o-mini does NOT clear the bar (pure inference)
 
-Run live on a clean box (`filter_eval.py score --runs 3`):
+Clean factorial — **1 gold set × 3 field orderings × 10 runs** (30 passes),
+reproduce with `filter_eval.py grid --runs 10 --by-brand` (raw rows in
+`grid_results.csv`). The ordering factor is where the `relevant` boolean sits
+relative to its free-text `reason`:
 
-| prompt order | recall | precision-on-junk | agreement | verdict |
-|--------------|-------:|------------------:|----------:|---------|
-| relevant-first (old) | 0.94 ± 0.02 | 0.51 ± 0.10 | 0.87 ± 0.02 | FAIL |
-| reason-first (shipped) | 0.99 ± 0.01 | ~0.59 (noisy) | 0.89 ± 0.02 | FAIL |
+| ordering (relevant @ pos) | recall | precision-on-junk | agreement | overall |
+|---------------------------|-------:|------------------:|----------:|---------|
+| relevant-first (1) | 0.916 ± 0.013 | 0.416 ± 0.045 | 0.850 ± 0.012 | **FAIL** |
+| **reason-first (2, shipped)** | **0.999 ± 0.002** | **0.976 ± 0.050** | **0.911 ± 0.012** | **PASS** |
+| relevant-last (3) | 0.995 ± 0.012 | 0.901 (noisy) | 0.883 ± 0.013 | FAIL |
 
 Findings:
-- **Field ordering matters a lot.** Asking for `reason` before `relevant` (a
-  chain-of-thought nudge) lifts recall 0.94 → ~1.0 — so `prompts/filter.txt` ships
-  reason-first.
-- **Run-to-run variance is real** (the small 29-item junk set makes
-  precision-on-junk swing 0.41–1.0 across identical prompts).
-- **The hard cases inference can't crack:** `monday` weekday mentions (model keeps
-  ~10/11 "Monday morning" posts) and `conductor` orchestrator-metaphor (0/2). This
-  is the evidence that justifies the optional `--about` sense hint.
+- **Ordering is the dominant knob.** Writing `reason` before `relevant` (a
+  chain-of-thought nudge) is decisive: agreement 0.850 → 0.911, recall → ~1.0. It
+  is *not* monotonic — putting `confidence` between reason and relevant
+  (relevant-last) is worse than keeping them adjacent, so `prompts/filter.txt`
+  ships reason-first.
+- **reason-first clears the ≥0.90 bar on the mean** (recall 0.999 / precision 0.976
+  / agreement 0.911), though agreement is marginal — 3 of 10 runs dip to ~0.894.
+- **But the overall pass masks the hard homonyms.** Pooled agreement is dominated
+  by the easy brands (arc/dove/notion/corona/linear all ~1.0). Per-brand,
+  reason-first still fails `conductor` (0.00, keeps the orchestrator metaphor),
+  `monday` (0.31, keeps "Monday morning" weekday posts), and `shell` (0.50). Those
+  are the documented brands that need the optional `--about` hint.
 
-So the filter ships **unverified against the ≥0.90 bar**: it is recall-safe
-(reason-first ≈ 1.0, so real mentions are rarely hidden) but does not yet hit the
-precision/agreement bar on the hardest homonyms without an `--about` hint.
+So: recall-safe and over the overall bar with reason-first, but the homonym brands
+(`monday`/`conductor`/`shell`) remain below it without `--about` — exactly the
+evidence the task said would justify that flag.

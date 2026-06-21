@@ -38,6 +38,7 @@ import json
 import os
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from sqlalchemy import func
@@ -153,23 +154,35 @@ def _load_gold(brand: str) -> list[dict]:
     return rows
 
 
-# The verdict-object example shipped in prompts/filter.txt (reason-first), and the
-# old relevant-first form. The parser is order-insensitive, but the *requested* key
-# order changes the model's answers: deciding the reason before committing the
-# boolean is a chain-of-thought nudge that lifted recall ~0.94 -> ~1.0 on the gold
-# set, which is why filter.txt ships reason-first. `--order relevant-first` rewrites
-# the example back so the delta stays reproducible.
-_EXAMPLE_SHIPPED = ('{"id": "<the post id, copied exactly>", '
-                    '"reason": "<≤12 words>", "relevant": true, "confidence": 0.0}')
-_EXAMPLE_RELEVANT_FIRST = ('{"id": "<the post id, copied exactly>", "relevant": true, '
-                           '"confidence": 0.0, "reason": "<≤12 words>"}')
+# The verdict-object field order is a single experimental factor: where the
+# `relevant` boolean sits relative to its free-text `reason`. The JSON parser is
+# order-insensitive, but the *requested* order changes the model's answers —
+# making it write the reason before committing the boolean is a chain-of-thought
+# nudge. The three orderings move `relevant` through positions 1/2/3 so the effect
+# is monotonic. filter.txt ships `reason-first`; the others rewrite the example.
+_ID = '"id": "<the post id, copied exactly>"'
+_REL = '"relevant": true'
+_CONF = '"confidence": 0.0'
+_REASON = '"reason": "<≤12 words>"'
+ORDERS: dict[str, list[str]] = {
+    "relevant-first": [_ID, _REL, _CONF, _REASON],   # decide, then justify
+    "reason-first":   [_ID, _REASON, _REL, _CONF],   # justify, then decide (SHIPPED)
+    "relevant-last":  [_ID, _REASON, _CONF, _REL],   # justify fully, then decide
+}
 
 
-def _predict(rows: list[dict], key: str, order: str = "default") -> dict[str, bool]:
+def _example(order: str) -> str:
+    return "{" + ", ".join(ORDERS[order]) + "}"
+
+
+_SHIPPED_EXAMPLE = _example("reason-first")  # must match prompts/filter.txt verbatim
+
+
+def _predict(rows: list[dict], key: str, order: str = "reason-first") -> dict[str, bool]:
     """Classify ``rows`` exactly as production does: same prompt, same parser,
     same batch size, same keep-when-unsure default for an omitted id. ``order``
     selects the requested JSON field order in the prompt's example object
-    (``default`` = the shipped reason-first form)."""
+    (``reason-first`` = the shipped form, a no-op rewrite)."""
     brand = rows[0]["brand"]
     keywords = rows[0].get("keywords") or [brand]
     about = rows[0].get("about", "")
@@ -183,8 +196,7 @@ def _predict(rows: list[dict], key: str, order: str = "default") -> dict[str, bo
         prompt = prompts.render(
             "filter", brand=brand, keywords=", ".join(keywords),
             about=about_clause(about), items=_item_block(posts, list(keywords)))
-        if order == "relevant-first":
-            prompt = prompt.replace(_EXAMPLE_SHIPPED, _EXAMPLE_RELEVANT_FIRST)
+        prompt = prompt.replace(_SHIPPED_EXAMPLE, _example(order))
         try:
             raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
                                json_object=True)
@@ -283,6 +295,76 @@ def _score_pass(brands: list[str], key: str, order: str,
     return o
 
 
+def _csv_cell(x: float) -> str:
+    return "" if x != x else f"{x:.4f}"  # blank for NaN (e.g. precision with 0 junk calls)
+
+
+def cmd_grid(args: argparse.Namespace) -> int:
+    """The clean factorial: one gold set × every ordering × N runs → CSV on stdout.
+    One row per (order, run, scope); scope is each brand plus OVERALL.
+
+    Every (order, run, brand) classification is an independent LLM call, so they
+    run concurrently through a bounded thread pool — the work is latency-bound
+    (hundreds of round-trips), so this is the difference between ~1 min and ~1 hr.
+    Output is reassembled in deterministic (order, run, brand) order regardless of
+    which task finishes first."""
+    key = config.llm_api_key()
+    if not key:
+        sys.exit("grid needs an LLM key (REDLENS_LLM_API_KEY / OPENAI_API_KEY / config)")
+    brands = _brand_keys(args.brand)
+    orders = list(ORDERS) if args.order == "all" else [args.order]
+    # Load + filter each brand's gold once, not per (order, run).
+    gold = {b: _load_gold(b) for b in brands
+            if (GOLD_DIR / f"{b}.jsonl").exists()
+            and any(isinstance(r.get("gold"), bool) for r in _load_gold(b))}
+    if not gold:
+        sys.exit("no labeled gold — run `pull` and label first")
+    print(f"model={llm.model_name()} orders={orders} runs={args.runs} "
+          f"brands={len(gold)} workers={args.workers} "
+          f"({len(orders) * args.runs * len(gold)} classifications)", file=sys.stderr)
+
+    tasks = [(order, run, brand)
+             for order in orders
+             for run in range(1, args.runs + 1)
+             for brand in gold]
+    done = [0]
+
+    def work(t: tuple[str, int, str]) -> tuple[tuple[str, int, str], dict[str, float]]:
+        order, run, brand = t
+        m = _confusion(gold[brand], _predict(gold[brand], key, order))
+        done[0] += 1
+        if done[0] % 20 == 0 or done[0] == len(tasks):
+            print(f"  {done[0]}/{len(tasks)} classifications", file=sys.stderr)
+        return t, m
+
+    results: dict[tuple[str, int, str], dict[str, float]] = {}
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for t, m in pool.map(work, tasks):
+            results[t] = m
+
+    cols = ["order", "run", "scope", "n", "on_topic", "junk", "pred_junk",
+            "recall", "precision_junk", "agreement"]
+    print(",".join(cols))
+
+    def emit(order: str, run: int, scope: str, m: dict[str, float]) -> None:
+        print(",".join([order, str(run), scope,
+                        str(int(m["labeled"])), str(int(m["gold_true"])),
+                        str(int(m["gold_false"])), str(int(m.get("pred_junk", 0))),
+                        _csv_cell(m["recall_true"]), _csv_cell(m["precision_junk"]),
+                        _csv_cell(m["agreement"])]))
+
+    for order in orders:
+        for run in range(1, args.runs + 1):
+            per_brand = [(b, results[(order, run, b)]) for b in gold]
+            if args.by_brand:
+                for brand, m in per_brand:
+                    emit(order, run, brand, m)
+            overall = _pooled([m for _, m in per_brand])
+            overall["pred_junk"] = sum(m["pred_junk"] for _, m in per_brand)
+            emit(order, run, "OVERALL", overall)
+    return 0
+
+
 def cmd_score(args: argparse.Namespace) -> int:
     key = config.llm_api_key()
     if not key:
@@ -311,7 +393,10 @@ def cmd_score(args: argparse.Namespace) -> int:
             print(f"  {met:<15} {mean:5.3f} ± {_stdev(vals):.3f}   "
                   f"(min {min(vals):.3f}, max {max(vals):.3f})")
         recall = sum(r["recall_true"] for r in runs) / len(runs)
-        precision = sum(r["precision_junk"] for r in runs if r["precision_junk"] == r["precision_junk"]) / len(runs)
+        # Average precision only over runs where it is defined (a run that made 0
+        # junk calls has none) — dividing by all runs would understate it.
+        precs = [r["precision_junk"] for r in runs if r["precision_junk"] == r["precision_junk"]]
+        precision = sum(precs) / len(precs) if precs else float("nan")
         agreement = sum(r["agreement"] for r in runs) / len(runs)
     else:
         recall, precision, agreement = (runs[0]["recall_true"], runs[0]["precision_junk"],
@@ -335,10 +420,19 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--brand", help="one brand (default: all labeled)")
     s.add_argument("--runs", type=int, default=1,
                    help="repeat N times and report metric mean ± stdev (LLM nondeterminism)")
-    s.add_argument("--order", choices=("default", "relevant-first"), default="default",
-                   help="JSON field order in the prompt example "
-                        "(default = shipped reason-first; relevant-first = the old order)")
+    s.add_argument("--order", choices=tuple(ORDERS), default="reason-first",
+                   help="JSON field order in the prompt example (default: shipped reason-first)")
     s.set_defaults(func=cmd_score)
+    g = sub.add_parser("grid", help="factorial: gold × orderings × N runs → CSV on stdout")
+    g.add_argument("--brand", help="one brand (default: all labeled)")
+    g.add_argument("--runs", type=int, default=10, help="runs per ordering (default 10)")
+    g.add_argument("--order", choices=(*ORDERS, "all"), default="all",
+                   help="which ordering(s) to sweep (default: all three)")
+    g.add_argument("--by-brand", action="store_true",
+                   help="also emit one CSV row per brand (not just OVERALL)")
+    g.add_argument("--workers", type=int, default=16,
+                   help="concurrent LLM requests (default 16; the calls are independent)")
+    g.set_defaults(func=cmd_grid)
     args = parser.parse_args(argv)
     return int(args.func(args))
 
