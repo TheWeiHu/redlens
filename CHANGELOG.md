@@ -25,14 +25,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   context. Without a key the themes show keywords only, as before.
 - **Sentiment over time** on the topic page — a new "Sentiment over time"
   section charts each week's sentiment (−1 to +1) as diverging bars (green
-  positive / red negative), bucketed from the archive's post timestamps. With
-  `page --summary` (LLM, key required) each week is scored by one LLM call that
-  handles sarcasm and negation ("X no longer works" is negative); without a key
-  it falls back to an offline, deterministic lexicon scorer
-  (`redlens/sentiment.py`, valences from the VADER lexicon) — keyless but rough.
-  When comment threads have been pulled (`track --comments`), both paths fold
-  the comments into each week's score alongside the posts; the chart tooltip
-  shows the post and comment counts behind each week.
+  positive / red negative), bucketed from the archive's post timestamps. Scored
+  with `page --summary` (LLM, key required): one LLM call judges each week's
+  mood, handling the sarcasm and negation a word list can't ("X no longer works"
+  is negative). Without a key there is no sentiment chart. When comment threads
+  have been pulled (`track --comments`), the comments fold into each week's score
+  alongside the posts; the chart tooltip shows the post and comment counts behind
+  each week.
 - The topic page's headline **score** now sums post **and** comment scores (was
   posts only), and **Most influential** now ranks by post *and* comment
   engagement — so a prolific commenter surfaces, not just posters. Each author

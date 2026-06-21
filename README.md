@@ -178,11 +178,9 @@ Dev-only extras (`pip install -e ".[dev]"`): `pytest`, `ruff`, `mypy` — all
 permissively licensed and never shipped to users.
 
 Bundled data in `redlens/data/` ships inside the package: the topic-modeling
-stopword and popular-subreddit lists (first-party), plus `sentiment_lexicon.txt`
-— the word valences behind the **keyless fallback** scorer for the
-sentiment-over-time chart (the chart uses the LLM under `page --summary`),
-derived from the [VADER lexicon](https://github.com/cjhutto/vaderSentiment)
-(C.J. Hutto, MIT).
+stopword and popular-subreddit lists (first-party). The sentiment-over-time
+chart is LLM-scored under `page --summary` (it handles sarcasm and negation a
+word list can't); there is no offline sentiment fallback.
 
 `sqlmodel` is still `0.0.x` and can break API on any patch bump, so it is pinned
 `>=0.0.14,<0.1` to keep redlens off a future `0.1` that may move things.

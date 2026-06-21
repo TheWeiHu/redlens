@@ -1,79 +1,16 @@
-"""Offline sentiment scoring + weekly bucketing for the sentiment-over-time
-chart. Deterministic and keyless — no DB, no network, no LLM."""
+"""Sentiment-over-time chart rendering + the ISO-week helper. Sentiment scoring
+itself is LLM-based (see tests/test_summarize.py); this covers the keyless
+plumbing the page shares."""
 from datetime import UTC, datetime
 
 from redlens.reporting.page import _sentiment_chart
-from redlens.sentiment import (
-    WeekSentiment,
-    _lexicon,
-    score_text,
-    weekly_sentiment,
-)
+from redlens.sentiment import WeekSentiment, _week_start
 
 
-def _ts(y: int, m: int, d: int) -> int:
-    return int(datetime(y, m, d, 12, 0, tzinfo=UTC).timestamp())
-
-
-def test_lexicon_has_known_polarity():
-    lex = _lexicon()
-    assert lex["good"] > 0 and lex["love"] > 0
-    assert lex["bad"] < 0 and lex["broken"] < 0
-
-
-def test_score_text_polarity():
-    assert score_text("this update is great and wonderful") > 0
-    assert score_text("this is awful, slow and broken") < 0
-
-
-def test_score_text_neutral_is_none():
-    assert score_text("") is None
-    assert score_text("the device connects to the server") is None  # no lexicon hits
-
-
-def test_score_text_negation_flips():
-    pos = score_text("good")
-    assert pos is not None and pos > 0
-    flipped = score_text("not good")
-    assert flipped is not None and flipped < 0
-
-
-def test_score_text_stays_in_range():
-    s = score_text("love love love amazing wonderful excellent")
-    assert s is not None and 0 < s <= 1.0
-
-
-def test_weekly_sentiment_buckets_and_zero_fill():
-    items = [
-        (_ts(2024, 1, 3), "great and wonderful"),   # week of Mon 2024-01-01
-        (_ts(2024, 1, 4), "happy and good"),         # same week
-        # 2024-01-08 week deliberately empty -> must zero-fill
-        (_ts(2024, 1, 17), "awful and broken"),      # week of Mon 2024-01-15
-        (_ts(2024, 1, 18), "the server endpoint"),   # same week, no lexicon hit
-    ]
-    weeks = weekly_sentiment(items)
-    assert [w.week for w in weeks] == ["2024-01-01", "2024-01-08", "2024-01-15"]
-    first, gap, last = weeks
-    assert first.mean > 0 and first.posts == 2 and first.comments == 0
-    assert gap.mean == 0.0 and gap.posts == 0 and gap.comments == 0  # zero-filled
-    assert last.mean < 0 and last.posts == 2                         # 1 of 2 scored
-
-
-def test_weekly_sentiment_includes_comments():
-    posts = [(_ts(2024, 1, 3), "great and wonderful")]      # positive post
-    comments = [
-        (_ts(2024, 1, 3), "this is awful and broken"),       # negative comments
-        (_ts(2024, 1, 4), "terrible, hate it"),              # drag the week down
-    ]
-    [week] = weekly_sentiment(posts, comments)
-    assert week.posts == 1 and week.comments == 2
-    # the post alone is positive; folding in the two negative comments flips it
-    assert week.mean < weekly_sentiment(posts)[0].mean
-    assert week.mean < 0
-
-
-def test_weekly_sentiment_empty():
-    assert weekly_sentiment([]) == []
+def test_week_start_is_the_monday_utc():
+    # 2024-01-03 is a Wednesday -> its ISO week starts Mon 2024-01-01.
+    ts = int(datetime(2024, 1, 3, 12, 0, tzinfo=UTC).timestamp())
+    assert _week_start(ts) == "2024-01-01"
 
 
 def test_sentiment_chart_renders_both_polarities():
