@@ -175,6 +175,12 @@ def _example(order: str) -> str:
     return "{" + ", ".join(ORDERS[order]) + "}"
 
 
+def _field_seq(order: str) -> str:
+    """The literal key sequence for an ordering, e.g. ``id>reason>relevant>confidence``
+    — so a CSV row says what the ordering actually is, not just its name."""
+    return ">".join(snippet.split('"')[1] for snippet in ORDERS[order])
+
+
 _SHIPPED_EXAMPLE = _example("reason-first")  # must match prompts/filter.txt verbatim
 
 
@@ -342,12 +348,12 @@ def cmd_grid(args: argparse.Namespace) -> int:
         for t, m in pool.map(work, tasks):
             results[t] = m
 
-    cols = ["order", "run", "scope", "n", "on_topic", "junk", "pred_junk",
+    cols = ["order", "fields", "run", "scope", "n", "on_topic", "junk", "pred_junk",
             "recall", "precision_junk", "agreement"]
     print(",".join(cols))
 
     def emit(order: str, run: int, scope: str, m: dict[str, float]) -> None:
-        print(",".join([order, str(run), scope,
+        print(",".join([order, _field_seq(order), str(run), scope,
                         str(int(m["labeled"])), str(int(m["gold_true"])),
                         str(int(m["gold_false"])), str(int(m.get("pred_junk", 0))),
                         _csv_cell(m["recall_true"]), _csv_cell(m["precision_junk"]),
