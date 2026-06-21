@@ -101,6 +101,36 @@ def test_migration_upgrades_v3_through_latest(tmp_path):
     assert "about" in topic_cols
 
 
+def test_migration_upgrades_pre_versioning_v1_db(tmp_path):
+    """A pre-versioning database (tables present, user_version 0 -> treated as
+    v1) upgrades cleanly to the latest schema. Regression: migration 3 DROPs
+    topic/topicpost, so the v5/v6 column-adds must skip those tables (create_all
+    rebuilds them) rather than ALTER a missing table and abort init_schema."""
+    db = tmp_path / "v1.db"
+    engine = connect(db)
+    with engine.begin() as con:
+        # The v0.2 baseline shape: topic with no exclude_terms/about, the old
+        # 2-column topicpost, user_version 0 with tables present.
+        con.exec_driver_sql(
+            "CREATE TABLE topic (id INTEGER PRIMARY KEY, name VARCHAR, "
+            "keywords VARCHAR, subreddits VARCHAR, days INTEGER, "
+            "newest_seen_utc INTEGER, last_tracked_at INTEGER, fetched_at INTEGER)")
+        con.exec_driver_sql(
+            "CREATE TABLE topicpost (topic_id INTEGER, post_id VARCHAR, "
+            "PRIMARY KEY (topic_id, post_id))")
+        con.exec_driver_sql("CREATE TABLE user (username VARCHAR PRIMARY KEY)")
+        con.exec_driver_sql("PRAGMA user_version = 0")
+
+    init_schema(engine)   # must not raise
+
+    with engine.begin() as con:
+        version = int(con.exec_driver_sql("PRAGMA user_version").scalar())
+        tp_cols = {r[1] for r in con.exec_driver_sql("PRAGMA table_info(topicpost)")}
+        topic_cols = {r[1] for r in con.exec_driver_sql("PRAGMA table_info(topic)")}
+    assert version == SCHEMA_VERSION == 6
+    assert "relevant" in tp_cols and "about" in topic_cols
+
+
 # --- incremental no-op -----------------------------------------------------
 
 def test_second_sync_is_one_request_per_kind_and_writes_nothing(monkeypatch):

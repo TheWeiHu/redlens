@@ -219,6 +219,47 @@ def test_track_about_is_persisted_and_passed_to_filter(engine, monkeypatch):
         assert get_topic(s, "conductor").about == "the Mac AI-agent app"
 
 
+def test_widening_retrack_keeps_verdicts_without_key(engine, monkeypatch):
+    # A non-incremental re-pull (the net grew) re-links existing posts. Their
+    # stored verdicts must survive even when this re-track has no key — otherwise
+    # the upsert would reset relevant -> NULL and hidden junk reappears.
+    data = {"conductor": [_raw("p1", "conductor", "Conductor app"),
+                          _raw("p2", "conductor", "orchestra conductor")],
+            "macapps": []}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "complete", _verdicts({"p1": True, "p2": False}))
+    track_topic(engine, "conductor", subreddits=["conductor"])
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)          # key removed
+    monkeypatch.setattr(llm, "complete",
+                        lambda *a, **k: pytest.fail("no key -> no LLM call"))
+    track_topic(engine, "conductor", subreddits=["macapps"])    # widens the net
+    with Session(engine) as s:
+        rows = {r.post_id: r for r in s.exec(select(TopicPost)).all()}
+        assert rows["p2"].relevant is False                     # verdict preserved
+        assert {p.post_id for p in topic_posts(s, "conductor")} == {"p1"}
+
+
+def test_adding_key_backfills_existing_unscored_rows(engine, monkeypatch):
+    # Track keyless first (rows stored unscored), then add a key and re-track.
+    # The relevance pass must classify the existing NULL rows, not only this
+    # run's new matches — otherwise the backlog of false positives stays visible.
+    data = {"conductor": [_raw("p1", "conductor", "Conductor app"),
+                          _raw("p2", "conductor", "orchestra conductor")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))
+    track_topic(engine, "conductor", subreddits=["conductor"])  # no key
+    with Session(engine) as s:
+        assert all(r.relevant is None for r in s.exec(select(TopicPost)).all())
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "complete", _verdicts({"p1": True, "p2": False}))
+    res = track_topic(engine, "conductor", subreddits=["conductor"])  # incremental
+    assert res.relevance is not None and res.relevance.scored == 2     # backfilled
+    with Session(engine) as s:
+        assert {p.post_id for p in topic_posts(s, "conductor")} == {"p1"}
+
+
 def test_track_without_key_does_not_filter(engine, monkeypatch):
     data = {"conductor": [_raw("p1", "conductor", "x"), _raw("p2", "conductor", "y")]}
     monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))

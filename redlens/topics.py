@@ -304,7 +304,6 @@ def track_topic(
         posts_new = 0
         per_subreddit: dict[str, int] = {}
         failed: dict[str, str] = {}
-        matched_ids: list[str] = []   # this run's kept posts, for the relevance pass
 
         def flush(batch: list[Post]) -> None:
             """Persist a chunk of posts + their topic links and commit, so a
@@ -312,8 +311,11 @@ def track_topic(
             if not batch:
                 return
             upsert(session, batch)
+            # update=False so re-linking an already-matched post on a full
+            # re-pull keeps its stored relevance verdict instead of resetting it
+            # to NULL (the verdict columns are TopicPost's only non-PK state).
             upsert(session, [TopicPost(topic_id=topic_id, post_id=p.post_id)
-                             for p in batch])
+                             for p in batch], update=False)
             session.commit()
             batch.clear()
 
@@ -337,7 +339,6 @@ def track_topic(
                             if any(t in text for t in excluded):
                                 continue  # homonym noise, e.g. Ubisoft for "ubi"
                         batch.append(post)
-                        matched_ids.append(post.post_id)
                         kept += 1
                         if len(batch) >= COMMIT_BATCH:
                             flush(batch)
@@ -375,16 +376,24 @@ def track_topic(
         session.add(topic)
         session.commit()
 
-        # Relevance pass: when an LLM key is set, classify the posts this run just
-        # matched and flag the false positives (the brand-name homonym noise that
-        # substring search can't avoid). Skipped silently with no key, so keyless
-        # `track` behaves exactly as before. Runs after the commit above, so a
-        # filter failure never loses the fetched archive.
+        # Relevance pass: when an LLM key is set, classify this topic's UNSCORED
+        # matches (relevant IS NULL) and flag the false positives — the brand-name
+        # homonym noise substring search can't avoid. Scoring the unscored set,
+        # not just this run's new matches, also back-fills posts matched earlier
+        # without a key (e.g. the user just added one); already-scored rows are
+        # non-NULL so they're never re-paid. Skipped silently with no key, so
+        # keyless `track` is unchanged. Runs after the commit above, so a filter
+        # failure never loses the fetched archive.
         relevance: FilterResult | None = None
         key = llm_api_key()
-        if key and matched_ids:
-            relevance = filter_topic(session, topic, matched_ids, key,
-                                     about=topic.about)
+        if key:
+            unscored = list(session.exec(
+                select(TopicPost.post_id).where(
+                    TopicPost.topic_id == topic_id,
+                    col(TopicPost.relevant).is_(None))))
+            if unscored:
+                relevance = filter_topic(session, topic, unscored, key,
+                                         about=topic.about)
 
     return TrackResult(
         topic=topic,
