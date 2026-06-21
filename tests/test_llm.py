@@ -18,7 +18,7 @@ class _Resp:
     def read(self) -> bytes:
         return self._b
 
-    def __enter__(self) -> "_Resp":
+    def __enter__(self) -> _Resp:
         return self
 
     def __exit__(self, *exc: object) -> bool:
