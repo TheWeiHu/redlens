@@ -48,6 +48,12 @@ def default_db_path() -> Path:
     return Path(user_data_dir(APP_NAME)) / "redlens.db"
 
 
+def default_report_dir() -> Path:
+    """Where ``page --all`` writes the index plus per-topic pages by default —
+    a ``reports`` folder under the per-user data dir, kept apart from the DB."""
+    return Path(user_data_dir(APP_NAME)) / "reports"
+
+
 def load_config() -> dict[str, Any]:
     """The parsed config file, or {} if there is none."""
     path = config_path()
@@ -60,16 +66,25 @@ def load_config() -> dict[str, Any]:
         raise RedlensError(f"bad config {path}: {exc}") from exc
 
 
-def resolve_db(flag: str | None = None) -> Path:
+def resolve_db_source(flag: str | None = None) -> tuple[Path, str]:
+    """Resolve the DB path and report which source in the precedence chain won.
+
+    The label is for humans (``redlens doctor`` shows which knob is active);
+    :func:`resolve_db` is the thin wrapper most callers want.
+    """
     if flag:
-        return Path(flag).expanduser()
+        return Path(flag).expanduser(), "--db flag"
     env = os.environ.get("REDLENS_DB")
     if env:
-        return Path(env).expanduser()
+        return Path(env).expanduser(), "REDLENS_DB env"
     configured = load_config().get("storage", {}).get("db")
     if configured:
-        return Path(str(configured)).expanduser()
-    return default_db_path()
+        return Path(str(configured)).expanduser(), "config.toml [storage].db"
+    return default_db_path(), "default data dir"
+
+
+def resolve_db(flag: str | None = None) -> Path:
+    return resolve_db_source(flag)[0]
 
 
 def _toml_dump(data: dict[str, dict[str, Any]]) -> str:

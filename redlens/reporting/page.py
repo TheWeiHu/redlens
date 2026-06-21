@@ -15,7 +15,10 @@ import html
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import TypeVar
 from urllib.parse import urlparse
 
 from sqlalchemy.engine import Engine
@@ -23,11 +26,21 @@ from sqlmodel import Session, select
 
 from redlens import constants
 from redlens.errors import NotFound
-from redlens.models import Comment, Post, Topic, TopicPost
+from redlens.models import (
+    Brand,
+    Category,
+    Comment,
+    Post,
+    Topic,
+    TopicPost,
+    TopicSummary,
+)
 from redlens.reporting import lda
-from redlens.topics import get_topic, topic_comments
+from redlens.sentiment import WeekSentiment
+from redlens.topics import get_topic, list_topics, topic_comments
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
+_Item = TypeVar("_Item", Post, Comment)
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _STOPWORDS = frozenset(constants.data_lines("stopwords.txt"))
 _A = constants.ACCENT
@@ -53,10 +66,17 @@ details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
 svg {{ width: 100%; height: auto; }}
 svg rect, svg circle {{ fill: {_A}; }}
+svg rect.pos {{ fill: #2e8b57; }} svg rect.neg {{ fill: {_A}; }}
 svg text {{ fill: #888; font-size: 9px; }}
 table {{ border-collapse: collapse; width: 100%; }}
 td {{ border-bottom: 1px solid #eee; padding: .3rem .5rem; vertical-align: top; }}
 td.n {{ text-align: right; white-space: nowrap; color: #666; }}
+.summary {{ background: #faf3f0; border-left: 3px solid {_A}; padding: .6rem .9rem;
+           border-radius: 0 4px 4px 0; }}
+.summary ul.themes {{ margin: .4rem 0 .4rem 1.1rem; padding: 0; }}
+.summary ul.themes li {{ list-style: disc; font-size: .95rem; margin: .2rem 0; }}
+.summary .lbl {{ color: {_A}; font-weight: 600; }}
+.summary p {{ margin: .4rem 0; }}
 """
 
 
@@ -80,16 +100,26 @@ def _bar(label: str, n: int, peak: int, prefix: str = "") -> str:
             f'</div></div><div class="v">{n:,}</div></div>')
 
 
+def _post_li(p: Post) -> str:
+    return (f"<li><a href='https://reddit.com/comments/{p.post_id}'>"
+            f"{_trunc(p.title or '(untitled)')}</a> "
+            f"<span class='muted'>{p.score:,} pts · {p.num_comments:,} comm. · "
+            f"r/{html.escape(p.subreddit_name)} · {_date(p.created_utc)}</span></li>")
+
+
+def _comment_li(c: Comment) -> str:
+    body = (c.body or "").strip().replace("\n", " ") or "(comment)"
+    return (f"<li><a href='https://reddit.com/comments/{c.link_id}/_/{c.comment_id}'>"
+            f"{_trunc(body)}</a> "
+            f"<span class='muted'>{c.score:,} pts · comment · "
+            f"r/{html.escape(c.subreddit_name)} · {_date(c.created_utc)}</span></li>")
+
+
 def _post_links(posts: list[Post]) -> str:
     """A clickable list of the underlying posts — every claim drills down to
     the real Reddit threads behind it."""
     return "<ul>" + "".join(
-        f"<li><a href='https://reddit.com/comments/{p.post_id}'>"
-        f"{_trunc(p.title or '(untitled)')}</a> "
-        f"<span class='muted'>{p.score:,} pts · {p.num_comments:,} comm. · "
-        f"r/{html.escape(p.subreddit_name)} · {_date(p.created_utc)}</span></li>"
-        for p in posts[:constants.DRILL_POSTS]
-    ) + "</ul>"
+        _post_li(p) for p in posts[:constants.DRILL_POSTS]) + "</ul>"
 
 
 def _drill(rows: list[tuple[str, int]], groups: dict[str, list[Post]],
@@ -141,6 +171,42 @@ def _day_chart(series: list[tuple[str, int]]) -> str:
             f'{series[-1][0]}</text></svg>')
 
 
+def _sentiment_chart(series: list[WeekSentiment]) -> str:
+    """Inline-SVG diverging bar chart of weekly sentiment in [-1, 1]: bars rise
+    (green) above a neutral baseline for positive weeks and fall (red) below for
+    negative ones, height ~ magnitude; hover for the week's score and post
+    count. Unscored weeks (``mean is None`` — gaps or weeks the model left out)
+    draw no bar. Returns '' when no week carries a non-zero score."""
+    scored = [w for w in series if w.mean is not None]
+    if not scored or all(w.mean == 0.0 for w in scored):
+        return ""
+    width, half, pad = 600.0, 38.0, 14.0
+    center, total_h = half, half * 2
+    bw = width / len(series)
+    bars = []
+    for i, wk in enumerate(series):
+        if wk.mean is None:
+            continue
+        bh = abs(wk.mean) * half
+        y = center - bh if wk.mean >= 0 else center
+        cls = "pos" if wk.mean >= 0 else "neg"
+        sign = "+" if wk.mean >= 0 else ""
+        counts = f"{wk.posts:,} posts" + (
+            f", {wk.comments:,} comments" if wk.comments else "")
+        bars.append(
+            f'<rect class="{cls}" x="{i * bw:.1f}" y="{y:.1f}" '
+            f'width="{max(bw - 0.5, 0.4):.1f}" height="{max(bh, 0.6):.1f}">'
+            f"<title>{wk.week}: {sign}{wk.mean:.2f} · {counts}</title></rect>"
+        )
+    baseline = (f'<line x1="0" y1="{center:.1f}" x2="{width:.0f}" '
+                f'y2="{center:.1f}" stroke="#ccc" stroke-width="0.5"/>')
+    labels = (f'<text x="0" y="{total_h + pad - 2:.0f}">{series[0].week}</text>'
+              f'<text x="{width:.0f}" y="{total_h + pad - 2:.0f}" '
+              f'text-anchor="end">{series[-1].week}</text>')
+    return (f'<svg viewBox="0 0 {width:.0f} {total_h + pad:.0f}">'
+            f'{baseline}{"".join(bars)}{labels}</svg>')
+
+
 def _punchcard(posts: list[Post], comments: list[Comment]) -> str:
     """Inline-SVG weekday x hour grid (UTC); dot area ~ volume, hover for
     the count. Comments land at their real time when pulled."""
@@ -172,8 +238,10 @@ def _punchcard(posts: list[Post], comments: list[Comment]) -> str:
     return f'<svg viewBox="0 0 {w} {h}">{labels}{dots}</svg>'
 
 
-def _themes(posts: list[Post], keywords: str, comments: list[Comment]) -> str:
-    """LDA themes over post text and, when pulled, comment bodies."""
+def _lda_themes(posts: list[Post], comments: list[Comment],
+                keywords: str) -> list[tuple[float, list[str]]]:
+    """LDA themes (share, keywords) over post text and, when pulled, comment
+    bodies — the raw clusters, ready to render or hand to a labeler."""
     skip = _STOPWORDS | set(_WORD_RE.findall(keywords.lower()))
 
     def tokens(text: str) -> list[str]:
@@ -182,22 +250,89 @@ def _themes(posts: list[Post], keywords: str, comments: list[Comment]) -> str:
 
     docs = [t for p in posts if (t := tokens(f"{p.title or ''} {p.selftext or ''}"))]
     docs += [t for c in comments if (t := tokens(c.body or ""))]
-    found = lda.topics(docs)
-    if not found:
+    return lda.topics(docs)
+
+
+def _themes_html(themes: list[tuple[float, list[str]]],
+                 labels: list[str] | None = None) -> str:
+    """Render LDA themes. With ``labels`` (one per theme, from the LLM) each row
+    leads with the readable label and keeps the keywords as muted context;
+    without them it shows the keywords alone."""
+    if not themes:
         return '<div class="muted">not enough text for topic modeling</div>'
-    return "\n".join(
-        f'<div>{share:.0%} · {html.escape(", ".join(words))}</div>'
-        for share, words in found
-    )
+    out = []
+    for i, (share, words) in enumerate(themes):
+        wl = html.escape(", ".join(words))
+        if labels and i < len(labels) and labels[i]:
+            out.append(f"<div>{share:.0%} · <strong>{html.escape(labels[i])}</strong> "
+                       f'<span class="muted">{wl}</span></div>')
+        else:
+            out.append(f"<div>{share:.0%} · {wl}</div>")
+    return "\n".join(out)
 
 
-def _influential(posts: list[Post]) -> list[tuple[str, int, str]]:
+def _count_mentions(
+    named_terms: list[tuple[str, list[str]]],
+    posts: list[Post], comments: list[Comment],
+) -> list[tuple[str, int, list[Post], list[Comment]]]:
+    """Count how many posts and comments mention each ``(name, terms)`` entry —
+    deterministic, case-insensitive, whole-word over the entry's terms. Returns
+    (name, mention count, matching posts, matching comments) for entries that
+    appear at least once, most-mentioned first. The LLM recognized the entries;
+    the frequency is counted here so it's exact. Shared by the brands, complaints
+    and use-case sections."""
+    rows: list[tuple[str, int, list[Post], list[Comment]]] = []
+    for label, raw_terms in named_terms:
+        terms = [t for t in raw_terms if t]
+        if not terms:
+            continue
+        # (?<!\w)…(?!\w) instead of \b…\b: a plain \b needs a word char on the
+        # boundary, so a symbol-edged term ("C++", ".NET", "C#") would never
+        # match. Lookarounds assert only that the *adjacent* char isn't a word
+        # char, so symbol-edged names count while "Go" still won't hit "Google".
+        pat = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(t) for t in terms)
+                         + r")(?!\w)", re.IGNORECASE)
+        mp = [p for p in posts if pat.search(f"{p.title or ''} {p.selftext or ''}")]
+        mc = [c for c in comments if pat.search(c.body or "")]
+        if mp or mc:
+            rows.append((label, len(mp) + len(mc), mp, mc))
+    rows.sort(key=lambda r: (-r[1], r[0].lower()))
+    return rows
+
+
+def _mentions_section(
+    heading: str, caption: str,
+    rows: list[tuple[str, int, list[Post], list[Comment]]],
+) -> str:
+    """Render a mention section: a count bar per entry that expands to the posts
+    and comments behind it, best first. '' when there's nothing to show."""
+    if not rows:
+        return ""
+    rows = rows[:constants.TOP_MENTIONS]
+    peak = max(n for _, n, _, _ in rows)
+    out = []
+    for name, n, mp, mc in rows:
+        aposts = sorted(mp, key=lambda p: (-p.score, p.post_id))[:constants.DRILL_POSTS]
+        acomments = sorted(mc, key=lambda c: (-c.score, c.comment_id)
+                           )[:constants.DRILL_POSTS]
+        items = ("".join(_post_li(p) for p in aposts)
+                 + "".join(_comment_li(c) for c in acomments))
+        out.append(f"<details><summary>{_bar(name, n, peak)}</summary>"
+                   f"<ul>{items}</ul></details>")
+    return (f"<h2>{html.escape(heading)}</h2>\n"
+            f'<p class="muted">{html.escape(caption)}</p>\n' + "\n".join(out))
+
+
+def _influential(posts: list[Post],
+                 comments: list[Comment]) -> list[tuple[str, int, str]]:
     """Authors by engagement index: per post sqrt(score + COMMENT_WEIGHT x
-    comments), summed, counting only posts past a floor — sustained voices
-    over one fluke, and zero-engagement bot volume excluded. Returns
-    (display label, points, raw username) so the page can drill to their posts."""
+    comments) and per comment sqrt(score), summed over everything past a floor —
+    so a prolific commenter counts, not just posters, and zero-engagement bot
+    volume is excluded. Returns (display label, points, raw username) so the
+    page can drill to that author's posts and comments."""
     index: dict[str, float] = {}
-    count: Counter[str] = Counter()
+    posts_by: Counter[str] = Counter()
+    comments_by: Counter[str] = Counter()
     for p in posts:
         if p.author_username.lower() in constants.NON_AUTHORS:
             continue
@@ -205,10 +340,48 @@ def _influential(posts: list[Post]) -> list[tuple[str, int, str]]:
         if engagement < constants.MIN_POST_ENGAGEMENT:
             continue
         index[p.author_username] = index.get(p.author_username, 0.0) + engagement**0.5
-        count[p.author_username] += 1
+        posts_by[p.author_username] += 1
+    for c in comments:
+        if c.author_username.lower() in constants.NON_AUTHORS:
+            continue
+        if max(c.score, 0) < constants.MIN_POST_ENGAGEMENT:
+            continue
+        index[c.author_username] = index.get(c.author_username, 0.0) + c.score**0.5
+        comments_by[c.author_username] += 1
+
+    def _label(name: str) -> str:
+        parts = []
+        if posts_by[name]:
+            parts.append(f"{posts_by[name]} post{'' if posts_by[name] == 1 else 's'}")
+        if comments_by[name]:
+            parts.append(
+                f"{comments_by[name]} comment{'' if comments_by[name] == 1 else 's'}")
+        return f"{name} ({', '.join(parts)})"
+
     ranked = sorted(index.items(), key=lambda kv: (-kv[1], kv[0].lower()))
-    return [(f"{name} ({count[name]})", round(pts), name)
+    return [(_label(name), round(pts), name)
             for name, pts in ranked[:constants.TOP_AUTHORS]]
+
+
+def _influence_drill(infl: list[tuple[str, int, str]],
+                     posts_by_author: dict[str, list[Post]],
+                     comments_by_author: dict[str, list[Comment]]) -> str:
+    """Influence rows that expand (no JS) to the author's top posts and
+    comments, best first — so an author's score drills to the activity behind
+    it, whether they posted, commented, or both."""
+    peak = max((pts for _, pts, _ in infl), default=1)
+    out = []
+    for label, pts, author in infl:
+        aposts = sorted(posts_by_author.get(author, []),
+                        key=lambda p: (-p.score, p.post_id))[:constants.DRILL_POSTS]
+        acomments = sorted(comments_by_author.get(author, []),
+                           key=lambda c: (-c.score, c.comment_id))[:constants.DRILL_POSTS]
+        items = ("".join(_post_li(p) for p in aposts)
+                 + "".join(_comment_li(c) for c in acomments))
+        out.append(
+            f'<details><summary>{_bar(label, pts, peak, "u/")}</summary>'
+            f"<ul>{items}</ul></details>")
+    return "\n".join(out)
 
 
 def _host(post: Post) -> str:
@@ -221,16 +394,170 @@ def _link_domains(posts: list[Post]) -> Counter[str]:
     return Counter(h for p in posts if (h := _host(p)))
 
 
-def _by(posts: list[Post], key: Callable[[Post], str]) -> dict[str, list[Post]]:
-    """Group posts under a key function, dropping empty keys."""
-    groups: dict[str, list[Post]] = defaultdict(list)
-    for p in posts:
-        if k := key(p):
-            groups[k].append(p)
+def _by(items: list[_Item], key: Callable[[_Item], str]) -> dict[str, list[_Item]]:
+    """Group items (posts or comments) under a key function, dropping empty keys."""
+    groups: dict[str, list[_Item]] = defaultdict(list)
+    for it in items:
+        if k := key(it):
+            groups[k].append(it)
     return groups
 
 
-def render_topic_page(engine: Engine, name: str) -> str:
+def _summary_section(s: TopicSummary) -> str:
+    """The LLM narrative from ``summarize --topic`` rendered inline — overview,
+    themes, sentiment, viewpoints. Everything is escaped: model output is
+    untrusted text. Returns '' when the summary carried no prose."""
+    parts: list[str] = []
+    if s.overview:
+        parts.append(f"<p>{html.escape(s.overview)}</p>")
+    if s.themes:
+        items = "".join(
+            f"<li><strong>{html.escape(t.title)}</strong>"
+            + (f" — {html.escape(t.summary)}" if t.summary else "")
+            + "</li>"
+            for t in s.themes
+        )
+        parts.append(f'<ul class="themes">{items}</ul>')
+    for label, body in (("Sentiment", s.sentiment), ("Viewpoints", s.viewpoints)):
+        if body:
+            parts.append(
+                f'<p><span class="lbl">{label}</span> {html.escape(body)}</p>')
+    if not parts:
+        return ""
+    note = (f'<p class="muted">AI summary · {html.escape(s.model)} · '
+            f'{html.escape(s.depth)} depth</p>')
+    return (f"<h2>AI summary</h2>\n{note}\n"
+            f'<div class="summary">{"".join(parts)}</div>')
+
+
+def slug(name: str) -> str:
+    """A filesystem-safe, lowercase slug for a topic name (``Dua Lipa`` →
+    ``dua-lipa``); the per-topic page filename derives from it."""
+    return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
+
+
+@dataclass(frozen=True)
+class PageResult:
+    """One topic's outcome from ``render_all``: ``written`` is False when the
+    topic had zero matched posts and was skipped (noted on the index)."""
+    name: str
+    slug: str
+    matched: int
+    written: bool
+
+
+def _unique_slug(name: str, used: set[str]) -> str:
+    """``slug(name)`` made collision-free within ``used`` by appending ``-2``,
+    ``-3``, … on conflict. Mutates ``used`` with the slug it hands back."""
+    base = slug(name)
+    s = base
+    n = 1
+    while s in used:
+        n += 1
+        s = f"{base}-{n}"
+    used.add(s)
+    return s
+
+
+def _html_shell(title: str, body: str) -> str:
+    """The standalone-HTML wrapper (doctype, head, inline CSS) shared by the
+    per-topic page and the --all index so the two can't drift. ``title`` is
+    escaped and suffixed with ' · redlens'; ``body`` is the inner markup."""
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f'<title>{html.escape(title)} · redlens</title>'
+        f'<style>{_CSS}</style></head><body>\n{body}\n</body></html>')
+
+
+def render_all(engine: Engine, out_dir: Path,
+               summarize: Callable[[str], TopicSummary | None] | None = None,
+               sentiment: Callable[[str], list[WeekSentiment] | None] | None = None,
+               theme_labeler: Callable[[str, list[list[str]]], list[str]] | None = None,
+               brands: Callable[[str], list[Brand] | None] | None = None,
+               complaints: Callable[[str], list[Category] | None] | None = None,
+               use_cases: Callable[[str], list[Category] | None] | None = None,
+               ) -> list[PageResult]:
+    """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
+    links them. Topics with zero matched posts are skipped (and noted on the
+    index) since there is nothing to chart. Returns one result per topic,
+    in the same most-recently-tracked-first order as the index.
+
+    ``summarize`` is an optional per-topic AI-narrative provider (one LLM call
+    each). ``sentiment`` is an optional per-topic LLM sentiment-trend provider;
+    without it the page shows no sentiment chart. ``theme_labeler`` turns each
+    page's LDA clusters into readable labels. ``brands`` surfaces the other
+    brands named in each topic's discussion. When given, every rendered page
+    gets those (each provider is best-effort: a per-topic LLM failure drops just
+    that section, see the CLI guards)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with Session(engine) as session:
+        listings = list_topics(session)
+    results: list[PageResult] = []
+    used: set[str] = set()
+    for listing in listings:
+        # slug() is lossy (keeps only [a-z0-9]), so distinct names can collide
+        # ("C#"/"C++" -> "c"). Suffix dupes so each topic gets its own file and
+        # the index links don't all point at the last writer.
+        s = _unique_slug(listing.name, used)
+        if listing.matched_posts == 0:
+            results.append(PageResult(listing.name, s, 0, written=False))
+            continue
+        summary = summarize(listing.name) if summarize else None
+        weeks = sentiment(listing.name) if sentiment else None
+        found_brands = brands(listing.name) if brands else None
+        found_complaints = complaints(listing.name) if complaints else None
+        found_uses = use_cases(listing.name) if use_cases else None
+        doc = render_topic_page(engine, listing.name, summary=summary,
+                                sentiment_weeks=weeks, theme_labeler=theme_labeler,
+                                brands=found_brands, complaints=found_complaints,
+                                use_cases=found_uses)
+        (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
+        results.append(
+            PageResult(listing.name, s, listing.matched_posts, written=True))
+    (out_dir / "index.html").write_text(
+        render_index(results), encoding="utf-8")
+    return results
+
+
+def render_index(results: list[PageResult]) -> str:
+    """A small overview page linking each rendered topic's report, with a note
+    listing any topics skipped for having no matched posts."""
+    written = [r for r in results if r.written]
+    skipped = [r for r in results if not r.written]
+    rows = "\n".join(
+        f"<tr><td><a href='{r.slug}.html'>{html.escape(r.name)}</a></td>"
+        f"<td class='n'>{r.matched:,} posts</td></tr>"
+        for r in written
+    )
+    table = (f"<table>{rows}</table>" if written
+             else '<p class="muted">no tracked topics with matched posts yet</p>')
+    skip_note = ""
+    if skipped:
+        names = ", ".join(html.escape(r.name) for r in skipped)
+        skip_note = (f'<p class="muted">skipped (no matched posts yet): '
+                     f'{names}</p>')
+    body = (f'<h1>tracked topics</h1>\n'
+            f'<p class="muted">{len(written):,} '
+            f'report{"" if len(written) == 1 else "s"}</p>\n{table}\n{skip_note}')
+    return _html_shell("tracked topics", body)
+
+
+def render_topic_page(engine: Engine, name: str,
+                      summary: TopicSummary | None = None,
+                      sentiment_weeks: list[WeekSentiment] | None = None,
+                      theme_labeler: Callable[[str, list[list[str]]], list[str]]
+                      | None = None,
+                      brands: list[Brand] | None = None,
+                      complaints: list[Category] | None = None,
+                      use_cases: list[Category] | None = None) -> str:
+    """Render one topic's page. ``summary`` (from ``summarize --topic``) is
+    optional — when given, an AI-narrative section is added. ``sentiment_weeks``
+    (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
+    omitted the page shows no sentiment chart. ``theme_labeler`` (from
+    ``label_themes``) turns each LDA keyword cluster into a readable label; when
+    omitted the themes show keywords only. The page stays fully keyless without
+    any of them."""
     with Session(engine) as session:
         topic = get_topic(session, name)
         if topic is None:
@@ -243,10 +570,52 @@ def render_topic_page(engine: Engine, name: str) -> str:
             .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
         ))
         comments = topic_comments(session, topic.name)
-        return _render(topic, posts, comments)
+        section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
+
+        themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
+        labels = (theme_labeler(topic.name, [words for _, words in themes])
+                  if theme_labeler and themes else None)
+        themes_html = _themes_html(themes, labels)
+
+        brands_html = _mentions_section(
+            "Other brands mentioned",
+            "competitors and alternatives named in the discussion, by posts + "
+            "comments mentioning them · click to read",
+            _count_mentions([(b.name, b.aliases) for b in brands], posts, comments),
+        ) if brands else ""
+        complaints_html = _mentions_section(
+            "Top complaints",
+            "recurring problems people raise, by posts + comments mentioning "
+            "them · click to read",
+            _count_mentions([(c.name, c.terms) for c in complaints], posts, comments),
+        ) if complaints else ""
+        use_cases_html = _mentions_section(
+            "Use cases",
+            "what people use it for, by posts + comments mentioning it · "
+            "click to read",
+            _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
+        ) if use_cases else ""
+        return _render(topic, posts, comments, summary, section, themes_html,
+                       brands_html, complaints_html, use_cases_html)
 
 
-def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
+def _sentiment_section(series: list[WeekSentiment]) -> str:
+    """The 'Sentiment over time' heading + caption + chart, or '' when there's
+    nothing to chart. The series is always LLM-scored (see
+    ``weekly_topic_sentiment``)."""
+    svg = _sentiment_chart(series)
+    if not svg:
+        return ""
+    return ('<h2>Sentiment over time</h2>\n'
+            '<p class="muted">weekly sentiment, −1 (negative) to +1 (positive)'
+            f' · LLM-scored</p>\n{svg}')
+
+
+def _render(topic: Topic, posts: list[Post], comments: list[Comment],
+            summary: TopicSummary | None = None,
+            sentiment_section: str = "", themes_html: str = "",
+            brands_html: str = "", complaints_html: str = "",
+            use_cases_html: str = "") -> str:
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
     keywords = ", ".join(topic.keyword_list)
@@ -267,36 +636,38 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment]) -> str:
     sub_groups = _by(posts, lambda p: p.subreddit_name)
     sub_rows = _ranked(subs, constants.TOP_SUBREDDITS)
 
-    infl = _influential(posts)
-    author_posts = _by(posts, lambda p: p.author_username)
-    infl_rows = [(label, pts) for label, pts, _ in infl]
-    infl_groups = {label: author_posts.get(author, [])
-                   for label, _, author in infl}
+    infl = _influential(posts, comments)
+    infl_html = _influence_drill(
+        infl, _by(posts, lambda p: p.author_username),
+        _by(comments, lambda c: c.author_username))
 
     domain_groups = _by(posts, _host)
     domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
     domains = _drill(domain_rows, domain_groups) if domain_rows else ""
 
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(topic.name)} · redlens</title><style>{_CSS}</style></head><body>
-<h1>{html.escape(topic.name)}</h1>
+    score = sum(p.score for p in posts) + sum(c.score for c in comments)
+    body = f"""<h1>{html.escape(topic.name)}</h1>
 <p class="muted">{html.escape(keywords)!r} · last {topic.days} days · {span}</p>
-<p>{len(posts):,} posts · {sum(p.score for p in posts):,} score ·
+<p>{len(posts):,} posts · {score:,} score ·
 {n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched</p>
+{_summary_section(summary) if summary else ""}
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts))}
+{sentiment_section}
 <h2>By weekday &amp; hour (UTC)</h2>
 {_punchcard(posts, comments)}
 <h2>Subreddits</h2>
 <p class="muted">click any row to see the posts behind it</p>
 {_drill(sub_rows, sub_groups, prefix="r/")}
 <h2>Most influential</h2>
-{_drill(infl_rows, infl_groups, prefix="u/")}
+{infl_html}
 <h2>Themes</h2>
-{_themes(posts, keywords, comments)}
+{themes_html}
+{complaints_html}
+{use_cases_html}
+{brands_html}
 <h2>Links</h2>
 {domains or '<div class="muted">no external links</div>'}
 <h2>Top posts</h2>
-<table>{top_rows}</table>
-</body></html>"""
+<table>{top_rows}</table>"""
+    return _html_shell(topic.name, body)

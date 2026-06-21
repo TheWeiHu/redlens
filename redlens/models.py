@@ -113,6 +113,37 @@ class Comment(SQLModel, table=True):
         )
 
 
+class SyncState(SQLModel, table=True):
+    """Per-user, per-stream cursors that make ``sync`` incremental.
+
+    A full re-pull of a user's whole history every run is wasteful and impolite
+    to arctic (a donation-funded mirror). This row records, for one
+    ``(username, kind, provider)`` stream, how far sync has reached:
+
+    - ``newest_seen_utc`` — the high-water mark; the next incremental sync asks
+      arctic only for items created *after* it.
+    - ``oldest_seen_utc`` — the low-water mark; if a backfill was interrupted
+      mid-walk (the stream pages newest-first), the next run resumes from here
+      instead of starting over.
+    - ``completed_backfill`` — True once the backward walk reached the end of
+      history. Until then sync keeps extending the backfill; after, it switches
+      to cheap forward-only incremental pulls.
+
+    ``provider`` is part of the key so a future second source can carry its own
+    cursors without colliding with arctic's.
+    """
+
+    __tablename__ = "sync_state"
+
+    username: str = Field(primary_key=True)
+    kind: str = Field(primary_key=True)          # "posts" | "comments"
+    provider: str = Field(primary_key=True, default="arctic")
+    newest_seen_utc: int | None = None
+    oldest_seen_utc: int | None = None
+    completed_backfill: bool = False
+    synced_at: int = Field(default_factory=_now)
+
+
 class Topic(SQLModel, table=True):
     """A tracked subject: a full-text query fanned out over a subreddit net.
 
@@ -189,6 +220,32 @@ class Profile(BaseModel):
     tone: str = ""
 
 
+class Theme(BaseModel):
+    """One recurring thread of a topic's discussion: a short title + a gloss."""
+    title: str
+    summary: str = ""
+
+
+class TopicSummary(BaseModel):
+    """An AI narrative of what a tracked topic's archived discussion is about.
+
+    The topic-side parallel to :class:`Profile`: generated on demand from the
+    topic's matched posts/comments and returned as structured JSON (not prose)
+    so the CLI, ``--json``, and any HTML view render it deterministically.
+    ``themes`` are the most prominent threads; the three paragraphs cover what
+    the discussion is about, its mood, and where opinion splits. Cheap to
+    regenerate from the changing archive, so nothing is cached.
+    """
+
+    topic: str
+    model: str   # which LLM produced it
+    depth: str   # sampling preset used
+    overview: str = ""
+    themes: list[Theme] = []
+    sentiment: str = ""
+    viewpoints: str = ""
+
+
 class UserAnalytics(BaseModel):
     username: str
     total_posts: int
@@ -202,3 +259,77 @@ class UserAnalytics(BaseModel):
     distinct_subreddits: int
     top_subreddit: str | None
     top_subreddit_event_count: int
+
+
+class UserListing(BaseModel):
+    """One row of ``redlens list`` — a lightweight per-user roll-up.
+
+    Cheaper than ``UserAnalytics``: just the counts and the two timestamps a
+    human scanning the archive cares about (when the account was last active,
+    and when redlens last synced it).
+    """
+
+    username: str
+    total_posts: int
+    total_comments: int
+    last_event_at: int | None    # newest post/comment created_utc
+    last_synced_at: int | None   # most recent sync for this user
+
+
+class TopicListing(BaseModel):
+    """One row of ``redlens topics`` — a lightweight per-topic roll-up.
+
+    The topic-surface parallel to :class:`UserListing`: the few facts a
+    human scanning their tracked topics cares about — the keywords being
+    queried, how wide the subreddit net is, how many posts have matched,
+    and when it was last tracked.
+    """
+
+    name: str
+    keywords: list[str]
+    subreddit_count: int         # size of the topic's subreddit net
+    matched_posts: int           # posts tagged to this topic in topicpost
+    last_tracked_at: int | None  # when track last ran for this topic
+
+
+class NameCount(BaseModel):
+    """A named tally — one ranked (subreddit|author, count) pair."""
+    name: str
+    count: int
+
+
+class Brand(BaseModel):
+    """An other brand/product the LLM spotted in a topic's discussion, with the
+    spelling variants used to count its mentions (canonical name is also tried
+    as an alias when the list is empty)."""
+    name: str
+    aliases: list[str] = []
+
+
+class Category(BaseModel):
+    """An LLM-recognized discussion category — a complaint or a use case — with
+    the signature phrases used to count the posts/comments that express it (name
+    is tried too when the phrase list is empty)."""
+    name: str
+    terms: list[str] = []
+
+
+class TopicAnalytics(BaseModel):
+    """A tracked topic's roll-up: the topic-side mirror of ``UserAnalytics``.
+
+    Counts cover the topic's *matched* posts (the ``topicpost`` join), not the
+    whole archive. ``net_size`` is how many subreddits the net casts over;
+    ``distinct_subreddits`` is how many of them actually produced a match.
+    """
+
+    name: str
+    keywords: list[str]
+    net_size: int                       # subreddits in the cast net
+    matched_posts: int
+    total_score: int
+    distinct_subreddits: int            # net subs with at least one match
+    first_post_at: int | None
+    last_post_at: int | None
+    last_tracked_at: int | None
+    top_subreddits: list[NameCount]
+    top_authors: list[NameCount]

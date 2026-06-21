@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import delete, func
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from redlens import arctic
 from redlens.constants import (
@@ -46,12 +46,20 @@ from redlens.constants import (
     NON_AUTHORS,
 )
 from redlens.db import upsert
-from redlens.errors import RedlensError
-from redlens.models import Comment, Post, Topic, TopicPost
+from redlens.errors import NotFound, RedlensError
+from redlens.models import Comment, Post, Topic, TopicListing, TopicPost, User
 
 
 def _now() -> int:
     return int(time.time())
+
+
+@dataclass
+class UntrackResult:
+    name: str
+    links_removed: int       # topicpost rows deleted for this topic
+    posts_deleted: int       # orphaned posts removed from the shared archive
+    comments_deleted: int    # orphaned comments removed alongside those posts
 
 
 @dataclass
@@ -131,6 +139,37 @@ def get_topic(session: Session, name: str) -> Topic | None:
     return session.exec(
         select(Topic).where(func.lower(Topic.name) == name.lower())
     ).first()
+
+
+def list_topics(session: Session) -> list[TopicListing]:
+    """Roll up every tracked topic: keywords, net size, matched-post count,
+    and when each was last tracked. Sorted most-recently-tracked first.
+
+    The matched-post count comes from one grouped ``topicpost`` query (not a
+    per-topic scan) so this stays cheap as the archive grows; topics never
+    yet pulled simply count zero.
+    """
+    topics = session.exec(select(Topic)).all()
+    if not topics:
+        return []
+
+    counts: dict[int, int] = dict(session.exec(
+        select(col(TopicPost.topic_id), func.count())
+        .group_by(col(TopicPost.topic_id))
+    ).all())
+
+    listings = [
+        TopicListing(
+            name=t.name,
+            keywords=t.keyword_list,
+            subreddit_count=len(t.subreddit_list),
+            matched_posts=counts.get(t.id, 0) if t.id is not None else 0,
+            last_tracked_at=t.last_tracked_at,
+        )
+        for t in topics
+    ]
+    listings.sort(key=lambda r: (r.last_tracked_at or 0), reverse=True)
+    return listings
 
 
 def discover_subreddits(
@@ -233,10 +272,14 @@ def track_topic(
             s.lower() for s in topic.subreddit_list
         }
         window_extended = old_days is not None and topic.days > old_days
+        incremental = bool(
+            topic.newest_seen_utc and not net_grew and not window_extended
+            and not terms_changed and not reset)
         after = window_start
-        if (topic.newest_seen_utc and not net_grew and not window_extended
-                and not terms_changed and not reset):
-            after = max(window_start, topic.newest_seen_utc)
+        if incremental:
+            # -1 so the boundary second is re-queried (arctic's `after` is a
+            # strict >); same-second siblings dedup on upsert rather than vanish.
+            after = max(window_start, (topic.newest_seen_utc or 0) - 1)
 
         seen: set[str] = set()
         newest = topic.newest_seen_utc or 0
@@ -292,7 +335,22 @@ def track_topic(
                 on_progress(label, kept)
 
         topic.subreddits = json.dumps(net)
-        topic.newest_seen_utc = newest or None
+        # The cursor is a single high-water mark across the whole net. Advance it
+        # only when every subreddit succeeded — otherwise a transiently-failed
+        # sub would be queried with after=<that mark> next time and never
+        # re-fetch its older posts (silent loss).
+        if not failed:
+            topic.newest_seen_utc = newest or None
+        elif not incremental:
+            # A widened/full re-pull (grown net, changed keywords, longer window,
+            # or reset) that partially failed: the widened net/keywords/days are
+            # already persisted, so the next run won't see net_grew /
+            # terms_changed / window_extended and would go incremental from the
+            # stale cursor, skipping the failed slice's older posts. Drop the
+            # cursor so the next run re-pulls the full window until a clean pass.
+            topic.newest_seen_utc = None
+        # else: incremental top-up with a transient failure — the failed sub was
+        # already covered down to the old cursor, so keeping it is correct.
         topic.last_tracked_at = now
         session.add(topic)
         session.commit()
@@ -346,6 +404,18 @@ def pull_topic_comments(
     return written
 
 
+def topic_posts(session: Session, name: str) -> list[Post]:
+    """Posts matched to a topic, highest-scoring first (post_id tie-break
+    keeps the order deterministic, matching the rendered page)."""
+    return list(session.exec(
+        select(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower())
+        .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
+    ))
+
+
 def topic_comments(session: Session, name: str) -> list[Comment]:
     """Comments under a topic's matched posts (the link_id bridge)."""
     return list(session.exec(
@@ -355,3 +425,100 @@ def topic_comments(session: Session, name: str) -> list[Comment]:
         .where(func.lower(Topic.name) == name.lower())
         .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
     ))
+
+
+def _chunked(items: list[str], size: int = 400) -> list[list[str]]:
+    """Split an id list into SQLite-IN-safe chunks (the variadic limit is
+    ~999; 400 leaves headroom for other bound params)."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def untrack_topic(engine: Engine, name: str) -> UntrackResult:
+    """Remove a tracked topic and garbage-collect only the rows it alone kept.
+
+    Deletes the ``Topic`` row and its ``topicpost`` links, then drops a matched
+    post (and the comments riding under it via ``link_id``) only when this was
+    the *sole* reason to keep it: no other topic still tags the post, and its
+    author isn't a synced user. So posts shared across topics and posts/comments
+    belonging to a user-sync archive survive — only orphaned matches are dropped.
+    """
+    with Session(engine, expire_on_commit=False) as session:
+        topic = get_topic(session, name)
+        if topic is None:
+            raise NotFound(f"topic {name!r} is not tracked")
+        topic_id = topic.id
+        assert topic_id is not None
+        topic_name = topic.name
+
+        my_post_ids = set(session.exec(
+            select(TopicPost.post_id).where(TopicPost.topic_id == topic_id)
+        ).all())
+        # One topicpost row per (topic, post), so the link count is exactly
+        # how many posts this topic tagged.
+        links_removed = len(my_post_ids)
+
+        session.execute(
+            delete(TopicPost).where(TopicPost.topic_id == topic_id)  # type: ignore[arg-type]
+        )
+        session.delete(topic)
+        session.flush()
+
+        posts_deleted = 0
+        comments_deleted = 0
+        if my_post_ids:
+            # Posts still tagged by some *other* topic must stay; so must posts
+            # whose author is a synced user (part of that user's archive).
+            still_linked = set(session.exec(select(TopicPost.post_id)).all())
+            synced = set(session.exec(select(User.username)).all())
+            candidates = my_post_ids - still_linked
+
+            orphan_posts: list[str] = []
+            for chunk in _chunked(list(candidates)):
+                for pid, author in session.exec(
+                    select(Post.post_id, Post.author_username)
+                    .where(col(Post.post_id).in_(chunk))
+                ).all():
+                    if author not in synced:
+                        orphan_posts.append(pid)
+
+            # A synced user may have *commented* under an orphan post; deleting
+            # the post would leave their archived comment dangling (its link_id
+            # pointing at a gone post). Keep any such post — and everything under
+            # it — by dropping it from the orphan set.
+            if orphan_posts:
+                synced_commented: set[str] = set()
+                for chunk in _chunked(orphan_posts):
+                    for link_id, c_author in session.exec(
+                        select(Comment.link_id, Comment.author_username)
+                        .where(col(Comment.link_id).in_(chunk))
+                    ).all():
+                        if c_author in synced:
+                            synced_commented.add(link_id)
+                orphan_posts = [p for p in orphan_posts
+                                if p not in synced_commented]
+
+            for chunk in _chunked(orphan_posts):
+                orphan_comments = [
+                    cid for cid, author in session.exec(
+                        select(Comment.comment_id, Comment.author_username)
+                        .where(col(Comment.link_id).in_(chunk))
+                    ).all() if author not in synced
+                ]
+                for cchunk in _chunked(orphan_comments):
+                    session.execute(
+                        delete(Comment).where(col(Comment.comment_id).in_(cchunk))
+                    )
+                    comments_deleted += len(cchunk)
+                session.execute(
+                    delete(Post).where(col(Post.post_id).in_(chunk))
+                )
+                posts_deleted += len(chunk)
+
+        session.commit()
+
+    return UntrackResult(
+        name=topic_name,
+        links_removed=links_removed,
+        posts_deleted=posts_deleted,
+        comments_deleted=comments_deleted,
+    )

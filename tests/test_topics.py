@@ -8,6 +8,7 @@ Kept deliberately small — the essential, stable contract:
   - the page renders from a tracked topic and refuses an unknown one.
 Arctic is stubbed; one integration test (network, weekly) is marked.
 """
+import json
 import time
 
 import pytest
@@ -16,10 +17,10 @@ from sqlmodel import Session, select
 from redlens import arctic
 from redlens.cli import main
 from redlens.db import connect, init_schema
-from redlens.errors import NotFound
-from redlens.models import TopicPost
+from redlens.errors import NotFound, RedlensError
+from redlens.models import Comment, Post, TopicPost, User
 from redlens.reporting.page import render_topic_page
-from redlens.topics import get_topic, track_topic
+from redlens.topics import get_topic, list_topics, track_topic, untrack_topic
 
 NOW = int(time.time())
 
@@ -71,7 +72,8 @@ def test_retrack_incremental_vs_full_window(engine, monkeypatch):
 
     calls.clear()
     track_topic(engine, "x")                             # unchanged: incremental
-    assert calls and all(c == NOW - 5000 for c in calls)
+    # cursor is padded -1s so the boundary second is re-queried (dedup on upsert)
+    assert calls and all(c == NOW - 5001 for c in calls)
 
     calls.clear()
     track_topic(engine, "x", subreddits=["b"])           # net grew: full window
@@ -92,6 +94,112 @@ def test_page_renders_and_requires_tracking(engine, monkeypatch):
     assert "https://reddit.com/comments/p1" in doc
     assert "r/dualipa" in doc
     assert doc == render_topic_page(engine, "dua lipa")  # byte-deterministic
+    assert "AI summary" not in doc                       # absent without --summary
+
+
+def test_page_score_and_influence_include_comments(engine, monkeypatch):
+    data = {"vpn": [raw("p1", "vpn", score=100, num_comments=3, title="a post")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "vpn", subreddits=["vpn"])
+    # three high-karma comments under p1 from a comment-only author
+    with Session(engine) as s:
+        s.add_all([
+            Comment(comment_id=f"c{i}", author_username="commenter",
+                    subreddit_name="vpn", link_id="p1", parent_id=None,
+                    created_utc=NOW - 100, score=50, body="great insight here")
+            for i in range(3)])
+        s.commit()
+
+    doc = render_topic_page(engine, "vpn")
+    # total score folds in comments: 100 (post) + 3x50 = 250
+    assert "250 score" in doc
+    # the comment-only author surfaces in Most influential, labeled by comments,
+    # and their comment is drillable
+    assert "u/commenter (3 comments)" in doc
+    assert "great insight here" in doc
+
+
+def test_count_mentions_orders_and_word_boundary():
+    from redlens.reporting.page import _count_mentions, _mentions_section
+    posts = [
+        Post(post_id="p1", author_username="a", subreddit_name="vpn",
+             created_utc=NOW, score=10, num_comments=0,
+             title="ExpressVPN is faster"),
+        Post(post_id="p2", author_username="b", subreddit_name="vpn",
+             created_utc=NOW, score=5, num_comments=0,
+             title="thinking about express vpn vs expressway"),  # 'expressway' must NOT match
+    ]
+    comments = [
+        Comment(comment_id="c1", author_username="x", subreddit_name="vpn",
+                link_id="p1", parent_id=None, created_utc=NOW, score=3,
+                body="I switched to Mullvad"),
+    ]
+    named_terms = [
+        ("ExpressVPN", ["expressvpn", "express vpn"]),
+        ("Mullvad", ["mullvad"]),
+        ("Surfshark", ["surfshark"]),   # absent -> dropped
+    ]
+    rows = _count_mentions(named_terms, posts, comments)
+    assert [(name, n) for name, n, _, _ in rows] == [("ExpressVPN", 2), ("Mullvad", 1)]
+
+    html = _mentions_section("Other brands mentioned", "by mentions", rows)
+    assert "Other brands mentioned" in html
+    assert "ExpressVPN" in html and "Mullvad" in html and "Surfshark" not in html
+    assert _mentions_section("X", "y", []) == ""
+
+
+def test_count_mentions_word_boundary_and_symbol_edges():
+    """The whole-word match must not fire on substrings ('Go' in 'Google'), but
+    MUST fire on symbol-edged names ('C++', '.NET') that a plain \\b would drop."""
+    from redlens.reporting.page import _count_mentions
+    posts = [
+        Post(post_id="p1", author_username="a", subreddit_name="x", created_utc=NOW,
+             score=1, num_comments=0, title="I love C++ and .NET", selftext=""),
+        Post(post_id="p2", author_username="b", subreddit_name="x", created_utc=NOW,
+             score=1, num_comments=0, title="driving down the expressway in Google Maps",
+             selftext=""),
+    ]
+    rows = _count_mentions([
+        ("C++", ["c++"]),          # symbol-edged: must match p1 (the \\b bug)
+        (".NET", [".net"]),        # symbol-edged: must match p1
+        ("Go", ["go"]),            # must NOT match "Google"
+        ("express", ["express"]),  # must NOT match "expressway"
+    ], posts, [])
+    got = {name: n for name, n, _, _ in rows}
+    assert got == {"C++": 1, ".NET": 1}        # Go / express correctly absent
+
+
+def test_themes_html_with_and_without_labels():
+    from redlens.reporting.page import _themes_html
+    themes = [(0.6, ["server", "slow", "drop"]), (0.4, ["price", "deal"])]
+    plain = _themes_html(themes)
+    assert "server, slow, drop" in plain and "<strong>" not in plain
+    labeled = _themes_html(themes, ["Connection Issues", "Pricing"])
+    assert "<strong>Connection Issues</strong>" in labeled
+    assert "server, slow, drop" in labeled       # keywords kept as muted context
+    assert _themes_html([]) == \
+        '<div class="muted">not enough text for topic modeling</div>'
+
+
+def test_page_embeds_ai_summary_when_given(engine, monkeypatch):
+    """`page --summary` threads a TopicSummary into the HTML; the narrative is
+    rendered and escaped, and absent otherwise."""
+    from redlens.models import Theme, TopicSummary
+    data = {"dualipa": [raw("p1", "dualipa", score=500, title="Wedding")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+
+    summary = TopicSummary(
+        topic="dua lipa", model="gpt-test", depth="quick",
+        overview="Fans discuss the <wedding> & tour.",
+        themes=[Theme(title="Tour", summary="dates & venues")],
+        sentiment="Mostly positive.", viewpoints="Little disagreement.")
+    doc = render_topic_page(engine, "dua lipa", summary=summary)
+    assert "AI summary" in doc
+    assert "gpt-test" in doc
+    assert "Fans discuss the &lt;wedding&gt; &amp; tour." in doc   # escaped
+    assert "Tour" in doc and "dates &amp; venues" in doc
+    assert "Mostly positive." in doc and "Little disagreement." in doc
 
 
 def test_cli_track_then_page(engine, tmp_path, monkeypatch):
@@ -103,6 +211,285 @@ def test_cli_track_then_page(engine, tmp_path, monkeypatch):
                  "--subreddits", "dualipa", "--yes"]) == 0
     assert main(["--db", str(db), "page", "dua lipa"]) == 0
     assert (tmp_path / "dua-lipa.html").exists()
+
+
+def test_cli_page_open_launches_browser(engine, tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    monkeypatch.chdir(tmp_path)
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+
+    opened: list[str] = []
+    monkeypatch.setattr("redlens.cli.webbrowser.open", opened.append)
+
+    # default: file written, no browser launched.
+    assert main(["--db", str(db), "page", "dua lipa"]) == 0
+    assert opened == []
+
+    # --open launches the browser pointed at the written file's URI.
+    assert main(["--db", str(db), "page", "dua lipa", "--open"]) == 0
+    assert opened == [(tmp_path / "dua-lipa.html").resolve().as_uri()]
+
+    # --no-browser suppresses the launch even with --open (scripts/CI).
+    assert main(["--db", str(db), "page", "dua lipa", "--open",
+                 "--no-browser"]) == 0
+    assert len(opened) == 1
+
+
+def test_cli_page_all_renders_index_and_skips_empty(engine, tmp_path,
+                                                    monkeypatch):
+    db = tmp_path / "t.db"
+    # dua lipa matches a post; ozempic's net yields nothing → skipped.
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    assert main(["--db", str(db), "track", "ozempic",
+                 "--subreddits", "Ozempic", "--yes"]) == 0
+
+    out = tmp_path / "reports"
+    assert main(["--db", str(db), "page", "--all", "-o", str(out)]) == 0
+
+    assert (out / "dua-lipa.html").exists()
+    assert not (out / "ozempic.html").exists()        # zero matches: skipped
+    index = (out / "index.html").read_text()
+    assert "dua-lipa.html" in index                   # links the rendered page
+    assert "ozempic" in index                          # but noted as skipped
+
+
+def test_cli_page_needs_topic_or_all(engine, tmp_path):
+    db = tmp_path / "t.db"
+    assert main(["--db", str(db), "page"]) == 1        # neither topic nor --all
+
+
+def test_cli_page_all_decollides_slugs(engine, tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    # "C++" and "C#" both slug() to "c" — render_all must not overwrite one
+    # topic's page (and index link) with the other's.
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"cpp": [raw("p1", "cpp")],
+                                    "csharp": [raw("p2", "csharp")]}))
+    assert main(["--db", str(db), "track", "C++",
+                 "--subreddits", "cpp", "--yes"]) == 0
+    assert main(["--db", str(db), "track", "C#",
+                 "--subreddits", "csharp", "--yes"]) == 0
+
+    out = tmp_path / "reports"
+    assert main(["--db", str(db), "page", "--all", "-o", str(out)]) == 0
+
+    pages = sorted(p.name for p in out.glob("*.html") if p.name != "index.html")
+    assert pages == ["c-2.html", "c.html"]             # distinct files, no clobber
+    index = (out / "index.html").read_text()
+    assert "c.html" in index and "c-2.html" in index   # both topics linked
+
+
+def test_track_does_not_advance_cursor_when_a_subreddit_fails(engine, monkeypatch):
+    # a succeeds with a recent post; b fails transiently. The net-wide cursor
+    # must NOT advance past a's post, or b's older posts would never be
+    # re-fetched (silent data loss).
+    def flaky(subreddit, query, after=None, before=None):
+        if subreddit == "b":
+            raise RedlensError("r/b: rate limited")
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", flaky)
+
+    res = track_topic(engine, "x", subreddits=["a", "b"])
+    assert "b" in res.failed and res.posts_new == 1
+    with Session(engine) as s:
+        topic = get_topic(s, "x")
+        assert topic is not None and topic.newest_seen_utc is None   # not advanced
+
+    # b recovers with an OLDER post; since the cursor never moved, the next track
+    # re-queries the full window and still picks p2 up.
+    def healthy(subreddit, query, after=None, before=None):
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)],
+                    "b": [raw("p2", "b", ts=NOW - 2000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", healthy)
+    track_topic(engine, "x")
+    with Session(engine) as s:
+        post_ids = {p.post_id for p in s.exec(select(Post)).all()}
+    assert "p2" in post_ids                            # recovered, not lost
+
+
+def test_track_widening_failure_does_not_strand_new_subreddit(engine, monkeypatch):
+    # Phase 1: track over sub "a" — succeeds, cursor advances to p1.
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"a": [raw("p1", "a", ts=NOW - 1000)]}))
+    track_topic(engine, "x", subreddits=["a"])
+    with Session(engine) as s:
+        assert get_topic(s, "x").newest_seen_utc == NOW - 1000
+
+    # Phase 2: widen the net with sub "b", which fails transiently. The widened
+    # net is persisted, so a *stale* cursor would make the next run go
+    # incremental and skip b's older posts — the cursor must reset to force a
+    # full re-pull instead.
+    def flaky(subreddit, query, after=None, before=None):
+        if subreddit == "b":
+            raise RedlensError("r/b: rate limited")
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", flaky)
+    res = track_topic(engine, "x", subreddits=["a", "b"])
+    assert "b" in res.failed
+    with Session(engine) as s:
+        assert get_topic(s, "x").newest_seen_utc is None    # reset, not stale
+
+    # Phase 3: b recovers with an OLDER post; the forced full re-pull gets it.
+    def healthy(subreddit, query, after=None, before=None):
+        yield from {"a": [raw("p1", "a", ts=NOW - 1000)],
+                    "b": [raw("p2", "b", ts=NOW - 9000)]}.get(subreddit, [])
+    monkeypatch.setattr(arctic, "iter_subreddit_query", healthy)
+    track_topic(engine, "x")
+    with Session(engine) as s:
+        post_ids = {p.post_id for p in s.exec(select(Post)).all()}
+    assert "p2" in post_ids                                 # recovered, not lost
+
+
+def test_list_topics_rollup_and_recency(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa"), raw("p2", "dualipa")],
+            "Ozempic": [raw("p3", "Ozempic")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa", "dua_lipa"])
+    time.sleep(1.1)  # ensure a later last_tracked_at for the second topic
+    track_topic(engine, "ozempic", query="ozempic, glp-1", subreddits=["Ozempic"])
+
+    with Session(engine) as s:
+        rows = list_topics(s)
+
+    assert [r.name for r in rows] == ["ozempic", "dua lipa"]  # most-recent first
+    by_name = {r.name: r for r in rows}
+    assert by_name["dua lipa"].matched_posts == 2
+    assert by_name["dua lipa"].subreddit_count == 2
+    assert by_name["dua lipa"].keywords == ["dua lipa"]
+    assert by_name["ozempic"].matched_posts == 1
+    assert by_name["ozempic"].keywords == ["ozempic", "glp-1"]
+    assert by_name["ozempic"].last_tracked_at is not None
+
+
+def test_list_topics_empty_db(engine):
+    with Session(engine) as s:
+        assert list_topics(s) == []
+
+
+def test_cli_topics_text_and_json(engine, tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "topics"]) == 0      # empty queue: no crash
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "topics"]) == 0
+    out = capsys.readouterr().out
+    assert "dua lipa" in out and "1 posts" in out
+
+    assert main(["--db", str(db), "topics", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["name"] == "dua lipa"
+    assert payload[0]["matched_posts"] == 1
+
+
+def test_cli_show_topic(engine, tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "show", "--topic", "dua lipa", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["name"] == "dua lipa"
+    assert out["matched_posts"] == 1
+
+
+def test_cli_show_requires_user_or_topic(engine, tmp_path):
+    db = tmp_path / "t.db"
+    assert main(["--db", str(db), "show"]) == 1
+
+
+def test_untrack_drops_topic_and_orphaned_matches(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa"), raw("p2", "dualipa")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    # A comment riding under a matched post, by a non-synced author.
+    with Session(engine) as s:
+        s.add(Comment(comment_id="c1", author_username="bob",
+                      subreddit_name="dualipa", link_id="p1", created_utc=NOW))
+        s.commit()
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert (res.links_removed, res.posts_deleted, res.comments_deleted) == (2, 2, 1)
+    with Session(engine) as s:
+        assert get_topic(s, "dua lipa") is None
+        assert s.exec(select(TopicPost)).all() == []
+        assert s.exec(select(Post)).all() == []
+        assert s.exec(select(Comment)).all() == []
+
+
+def test_untrack_keeps_posts_other_topics_reference(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa")], "popheads": [raw("p1", "popheads")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    track_topic(engine, "popheads", subreddits=["popheads"])   # also tags p1
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert res.posts_deleted == 0                              # p1 still tagged
+    with Session(engine) as s:
+        assert {p.post_id for p in s.exec(select(Post)).all()} == {"p1"}
+        assert get_topic(s, "popheads") is not None
+
+
+def test_untrack_keeps_synced_users_posts(engine, monkeypatch):
+    data = {"dualipa": [raw("p1", "dualipa")]}                 # author is "alice"
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    with Session(engine) as s:
+        s.add(User(username="alice"))                          # alice is synced
+        s.commit()
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert res.posts_deleted == 0                              # alice's post survives
+    with Session(engine) as s:
+        assert {p.post_id for p in s.exec(select(Post)).all()} == {"p1"}
+
+
+def test_untrack_keeps_post_a_synced_user_commented_on(engine, monkeypatch):
+    """An orphan post whose author isn't synced is normally dropped — but if a
+    synced user commented under it, keep the post (and the comment) so the
+    comment isn't left dangling, pointing at a deleted post."""
+    data = {"dualipa": [raw("p1", "dualipa")]}                 # post author "alice"
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    with Session(engine) as s:
+        s.add(User(username="carol"))                          # carol is synced
+        s.add(Comment(comment_id="c1", author_username="carol",
+                      subreddit_name="dualipa", link_id="p1", created_utc=NOW))
+        s.commit()
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert (res.posts_deleted, res.comments_deleted) == (0, 0)
+    with Session(engine) as s:
+        assert {p.post_id for p in s.exec(select(Post)).all()} == {"p1"}      # kept
+        assert {c.comment_id for c in s.exec(select(Comment)).all()} == {"c1"}  # not dangling
+
+
+def test_cli_untrack_yes_and_unknown(engine, tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"dualipa": [raw("p1", "dualipa")]}))
+    assert main(["--db", str(db), "untrack", "ghost", "-y"]) == 2  # NotFound
+    assert main(["--db", str(db), "track", "dua lipa",
+                 "--subreddits", "dualipa", "--yes"]) == 0
+    capsys.readouterr()
+    assert main(["--db", str(db), "untrack", "dua lipa", "-y"]) == 0
+    assert "untracked 'dua lipa'" in capsys.readouterr().out
+    assert main(["--db", str(db), "topics", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
 
 
 @pytest.mark.integration
