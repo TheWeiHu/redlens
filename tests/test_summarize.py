@@ -86,7 +86,7 @@ def test_representative_payload_and_structured_profile(db, monkeypatch, capsys):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     captured = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         captured["prompt"] = prompt
         return _STUB_JSON                       # fenced JSON, as a model might return
 
@@ -196,7 +196,7 @@ def test_topic_representative_payload_and_structured_summary(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     captured = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         captured["prompt"] = prompt
         return _STUB_TOPIC_JSON
 
@@ -257,7 +257,7 @@ def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
 
     seen = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         seen["prompt"] = prompt
         return json.dumps({"weeks": [{"week": w1, "score": 80},
                                      {"week": w2, "score": -60}]})
@@ -308,7 +308,7 @@ def test_weekly_topic_sentiment_robust_to_bad_scores(db, monkeypatch):
     w1, w2 = _week_start(t1), _week_start(t2)
     _vpn_topic_with_two_weeks(db, t1, t2)
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         # w1 scored 150 (out of range -> clamped to 1.0); w2 OMITTED entirely;
         # plus a bool score and an invented week the code must ignore.
         return json.dumps({"weeks": [
@@ -355,7 +355,7 @@ def test_weekly_topic_sentiment_includes_comment_only_weeks(db, monkeypatch):
 
     seen = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         seen["prompt"] = prompt
         return json.dumps({"weeks": [{"week": wp, "score": 40},
                                      {"week": wc, "score": -80}]})
@@ -393,7 +393,7 @@ def test_label_themes_aligns_and_falls_back(db, monkeypatch):
               ["app", "update", "ui"]]
     seen = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         seen["prompt"] = prompt
         return json.dumps({"labels": ["Connection Problems", ""]})  # 2nd blank, 3rd missing
 
@@ -417,7 +417,7 @@ def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     seen = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         seen["prompt"] = prompt
         return json.dumps({"brands": [
             {"name": "Tesla", "aliases": ["tesla", "tsla"]},
@@ -442,7 +442,7 @@ def test_extract_categories_parses_complaints(topic_db, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     seen = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         seen["prompt"] = prompt
         return json.dumps({"categories": [
             {"name": "Pricing", "phrases": ["too expensive", "price hike"]},

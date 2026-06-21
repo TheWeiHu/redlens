@@ -74,7 +74,8 @@ def summarize_user(session: Session, username: str, *,
         )
 
     prompt = _build_prompt(session, canon, resolved_depth)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
+                       json_object=True)
     data = _parse_json(raw)
     try:
         return Profile.model_validate(
@@ -110,7 +111,8 @@ def summarize_topic(session: Session, name: str, *,
         )
 
     prompt = _build_topic_prompt(session, topic, resolved_depth)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
+                       json_object=True)
     data = _parse_json(raw)
     try:
         return TopicSummary.model_validate(
@@ -193,7 +195,8 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
         "sentiment", topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,
         weeks="\n\n".join(blocks))
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
+                       json_object=True)
     data = _parse_json(raw)
 
     rows = data.get("weeks")
@@ -236,7 +239,8 @@ def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
     listed = "\n".join(f"{i + 1}. {', '.join(words)}"
                        for i, words in enumerate(themes))
     prompt = prompts.render("theme_labels", topic=topic, themes=listed)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
+                       json_object=True)
     data = _parse_json(raw)
     given = data.get("labels")
     given = given if isinstance(given, list) else []
@@ -310,7 +314,8 @@ def _extract_labeled_terms(
     lines += [f"- {c.body.strip().replace(chr(10), ' ')[:160]}"
               for c in top_comments if c.body and c.body.strip()]
     prompt = prompts.render(prompt_name, topic=topic.name, sample="\n".join(lines))
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS)
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
+                       json_object=True)
     data = _parse_json(raw)
 
     # brands.txt returns {"brands": [...]}; complaints/use_cases return

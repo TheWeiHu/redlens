@@ -22,8 +22,16 @@ def model_name() -> str:
 
 
 def complete(prompt: str, api_key: str, *,
-             max_tokens: int = constants.LLM_MAX_TOKENS) -> str:
-    """Return the text of one completion for ``prompt``."""
+             max_tokens: int = constants.LLM_MAX_TOKENS,
+             json_object: bool = False) -> str:
+    """Return the text of one completion for ``prompt``.
+
+    ``json_object`` turns on the API's JSON mode (``response_format``), which
+    guarantees the reply is a syntactically valid JSON object — supported by
+    gpt-4o-mini and most OpenAI-compatible servers, and requires the prompt to
+    mention "json" (our JSON prompts do). Callers still parse defensively, so an
+    endpoint that ignores the field degrades rather than breaks.
+    """
     settings = config.load_config().get("llm", {})
     url = settings.get("base_url") or constants.LLM_API_URL
     body: dict[str, Any] = {
@@ -31,6 +39,8 @@ def complete(prompt: str, api_key: str, *,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if json_object:
+        body["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
