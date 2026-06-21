@@ -200,6 +200,27 @@ def test_about_defines_the_sense_in_the_prompt(engine, monkeypatch):
     assert "the Mac AI-agent app, not an orchestra" in seen["prompt"]
 
 
+def test_track_reports_count_before_filtering(engine, monkeypatch):
+    # on_filter fires once with the number of unscored posts about to be sent to
+    # the LLM, so a big first-time backfill announces its (paid) cost up front.
+    data = {"conductor": [_raw("p1", "conductor", "a"), _raw("p2", "conductor", "b")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "complete", _verdicts({"p1": True, "p2": True}))
+    seen = []
+    track_topic(engine, "conductor", subreddits=["conductor"],
+                on_filter=seen.append)
+    assert seen == [2]                       # both unscored matches announced
+
+
+def test_track_without_key_does_not_report_filtering(engine, monkeypatch):
+    data = {"conductor": [_raw("p1", "conductor", "a")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))
+    # conftest clears keys; on_filter must not fire when there's nothing to score.
+    track_topic(engine, "conductor", subreddits=["conductor"],
+                on_filter=lambda n: pytest.fail("on_filter fired without a key"))
+
+
 def test_track_about_is_persisted_and_passed_to_filter(engine, monkeypatch):
     data = {"conductor": [_raw("p1", "conductor", "Conductor app rocks")]}
     monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))

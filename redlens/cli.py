@@ -492,6 +492,9 @@ def main(argv: list[str] | None = None) -> int:
                 discover=args.discover, reset=args.reset,
                 on_progress=lambda sub, n: print(
                     f"  r/{sub}: {n} new", file=sys.stderr),
+                on_filter=lambda n: print(
+                    f"  classifying {n:,} matched posts for relevance (LLM)…",
+                    file=sys.stderr),
             )
             if res.discovered:
                 print(f"discovered: {', '.join('r/' + s for s in res.discovered)}",

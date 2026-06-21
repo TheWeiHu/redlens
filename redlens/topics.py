@@ -235,6 +235,7 @@ def track_topic(
     discover: bool = False,
     reset: bool = False,
     on_progress: Callable[[str, int], None] | None = None,
+    on_filter: Callable[[int], None] | None = None,
 ) -> TrackResult:
     """Pull every post matching the topic's keywords across its subreddit net."""
     now = _now()
@@ -392,6 +393,11 @@ def track_topic(
                     TopicPost.topic_id == topic_id,
                     col(TopicPost.relevant).is_(None))))
             if unscored:
+                # Heads-up before a potentially large (and paid) LLM pass: the
+                # first keyed track of a big pre-existing topic back-fills every
+                # unscored row at once, so report the count we're about to spend on.
+                if on_filter:
+                    on_filter(len(unscored))
                 relevance = filter_topic(session, topic, unscored, key,
                                          about=topic.about)
 
