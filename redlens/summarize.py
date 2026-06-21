@@ -48,6 +48,20 @@ from redlens.topics import require_topic, topic_comments, topic_posts
 _Activity = TypeVar("_Activity", Post, Comment)
 
 
+def _engagement_score(post: Post) -> int:
+    """How much a post drew engagement — upvotes plus weighted replies. The
+    shared ranking for "most-engaged" sampling across the LLM extractors."""
+    return max(post.score, 0) + constants.COMMENT_WEIGHT * post.num_comments
+
+
+def _complete_json(prompt: str, key: str) -> dict[str, Any]:
+    """One JSON-mode completion, parsed to a dict — the call every structured
+    extractor shares (same token budget and defensive parse)."""
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
+                       json_object=True)
+    return _parse_json(raw)
+
+
 def summarize_user(session: Session, username: str, *,
                    depth: str | None = None) -> Profile:
     """Infer a profile for ``username`` from their archived activity.
@@ -68,9 +82,7 @@ def summarize_user(session: Session, username: str, *,
 
     key = require_llm_key()
     prompt = _build_prompt(session, canon, resolved_depth)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
     try:
         return Profile.model_validate(
             {"username": canon, "model": llm.model_name(),
@@ -96,9 +108,7 @@ def summarize_topic(session: Session, name: str, *,
     topic = require_topic(session, name)
     key = require_llm_key()
     prompt = _build_topic_prompt(session, topic, resolved_depth)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
     try:
         return TopicSummary.model_validate(
             {"topic": topic.name, "model": llm.model_name(),
@@ -137,9 +147,6 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
     active_weeks = set(posts_by_week) | set(comments_by_week)
     weeks = sorted(active_weeks)
 
-    def _engagement(p: Post) -> int:
-        return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
-
     def _snip(text: str) -> str:
         # Untrusted post/comment text goes into the prompt; sentiment.txt tells
         # the model to treat it as data, not instructions (defense-in-depth).
@@ -149,7 +156,7 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
 
     blocks = []
     for wk in weeks:
-        wkp = sorted(posts_by_week.get(wk, []), key=lambda p: -_engagement(p)
+        wkp = sorted(posts_by_week.get(wk, []), key=lambda p: -_engagement_score(p)
                      )[:constants.SENTIMENT_WEEK_SAMPLE]
         wkc = sorted(comments_by_week.get(wk, []), key=lambda c: -c.score
                      )[:constants.SENTIMENT_WEEK_SAMPLE]
@@ -166,9 +173,7 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
         "sentiment", topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,
         weeks="\n\n".join(blocks))
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
 
     rows = data.get("weeks")
     scores: dict[str, float] = {}
@@ -205,9 +210,7 @@ def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
     listed = "\n".join(f"{i + 1}. {', '.join(words)}"
                        for i, words in enumerate(themes))
     prompt = prompts.render("theme_labels", topic=topic, themes=listed)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
     given = data.get("labels")
     given = given if isinstance(given, list) else []
     out: list[str] = []
@@ -255,10 +258,8 @@ def _extract_labeled_terms(
         return []
     comments = topic_comments(session, topic.name)
 
-    def _eng(p: Post) -> int:
-        return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
-
-    top_posts = sorted(posts, key=lambda p: -_eng(p))[:constants.EXTRACT_SAMPLE_POSTS]
+    top_posts = sorted(posts, key=lambda p: -_engagement_score(p)
+                       )[:constants.EXTRACT_SAMPLE_POSTS]
     top_comments = sorted(comments, key=lambda c: -c.score
                           )[:constants.EXTRACT_SAMPLE_COMMENTS]
     lines = [f"- {p.title.strip()[:160]}" for p in top_posts
@@ -266,9 +267,7 @@ def _extract_labeled_terms(
     lines += [f"- {c.body.strip().replace(chr(10), ' ')[:160]}"
               for c in top_comments if c.body and c.body.strip()]
     prompt = prompts.render(prompt_name, topic=topic.name, sample="\n".join(lines))
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
 
     # brands.txt returns {"brands": [...]}; complaints/use_cases return
     # {"categories": [...]} — accept whichever list the object carries.
