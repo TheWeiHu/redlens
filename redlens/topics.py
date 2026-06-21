@@ -481,6 +481,22 @@ def untrack_topic(engine: Engine, name: str) -> UntrackResult:
                     if author not in synced:
                         orphan_posts.append(pid)
 
+            # A synced user may have *commented* under an orphan post; deleting
+            # the post would leave their archived comment dangling (its link_id
+            # pointing at a gone post). Keep any such post — and everything under
+            # it — by dropping it from the orphan set.
+            if orphan_posts:
+                synced_commented: set[str] = set()
+                for chunk in _chunked(orphan_posts):
+                    for link_id, c_author in session.exec(
+                        select(Comment.link_id, Comment.author_username)
+                        .where(col(Comment.link_id).in_(chunk))
+                    ).all():
+                        if c_author in synced:
+                            synced_commented.add(link_id)
+                orphan_posts = [p for p in orphan_posts
+                                if p not in synced_commented]
+
             for chunk in _chunked(orphan_posts):
                 orphan_comments = [
                     cid for cid, author in session.exec(
