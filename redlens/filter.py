@@ -93,28 +93,45 @@ def _parse_verdicts(raw: str) -> dict[str, tuple[bool, float, str]]:
     return out
 
 
+def about_clause(about: str) -> str:
+    """The prompt's authoritative-sense line. A user-supplied ``--about`` pins
+    *which* sense of an ambiguous name is meant (the Mac app "conductor", not the
+    orchestra), removing the guesswork; empty means the model infers the sense
+    from the keywords + subreddits + usage."""
+    about = about.strip()
+    if not about:
+        return ("No explicit definition was given, so INFER the intended subject "
+                "from the signals below.")
+    return (f'The intended subject is, authoritatively: {about}. '
+            "Judge every post against THAT meaning — keep posts about it, drop "
+            "posts where the name appears only in another sense.")
+
+
 def filter_topic(
     session: Session,
     topic: Topic,
     post_ids: list[str],
     key: str,
     *,
+    about: str = "",
     batch: int = constants.FILTER_BATCH,
 ) -> FilterResult:
     """Classify ``post_ids`` (a topic's freshly matched posts) as on-topic vs
     false positive and persist the verdict on their ``topicpost`` rows.
 
-    ``key`` is the LLM API key (caller checks it is present). One LLM request per
-    ``batch`` posts; the topic's name + keywords + the posts' subreddits let the
-    model infer which sense of the topic name is intended. A batch whose request
-    fails leaves its posts unscored (kept) and counts toward ``errored`` — never a
-    false-positive verdict — so a flaky LLM degrades to today's unfiltered behavior
-    instead of hiding real matches.
+    ``key`` is the LLM API key (caller checks it is present). ``about`` is an
+    optional one-line definition of the intended sense (``track --about``); when
+    given it is authoritative, otherwise the model infers the sense from the
+    topic's name + keywords + the posts' subreddits. One LLM request per ``batch``
+    posts; a batch whose request fails leaves its posts unscored (kept) and counts
+    toward ``errored`` — never a false-positive verdict — so a flaky LLM degrades
+    to today's unfiltered behavior instead of hiding real matches.
     """
     topic_id = topic.id
     assert topic_id is not None
     result = FilterResult()
     keywords = ", ".join(topic.keyword_list) or topic.name
+    about_line = about_clause(about)
 
     for chunk in _chunked(post_ids, batch):
         posts = [p for pid in chunk
@@ -123,7 +140,7 @@ def filter_topic(
             continue
         prompt = prompts.render(
             "filter", brand=topic.name, keywords=keywords,
-            items=_item_block(posts))
+            about=about_line, items=_item_block(posts))
         try:
             raw = llm.complete(prompt, key,
                                max_tokens=constants.SUMMARY_MAX_TOKENS,

@@ -30,7 +30,7 @@ T = TypeVar("T", bound=SQLModel)
 # Fresh databases skip migrations and are built straight at the latest schema;
 # databases from before versioning (user_version 0 with tables present) are
 # treated as version 1, the v0.2 baseline.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE topic ADD COLUMN exclude_terms VARCHAR NOT NULL DEFAULT ''",),
     # v3 gave topic a surrogate id + keyword list and rekeyed topicpost on
@@ -52,6 +52,10 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE topicpost ADD COLUMN relevance_model VARCHAR",
         "ALTER TABLE topicpost ADD COLUMN relevance_at INTEGER",
     ),
+    # v6 adds topic.about (additive): a one-line definition of the intended sense
+    # for the relevance filter (`track --about`), so the LLM pins the right
+    # meaning of an ambiguous name. Empty default = infer, unchanged behavior.
+    6: ("ALTER TABLE topic ADD COLUMN about VARCHAR NOT NULL DEFAULT ''",),
 }
 
 

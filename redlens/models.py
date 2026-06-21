@@ -160,6 +160,7 @@ class Topic(SQLModel, table=True):
     subreddits: str = "[]"               # JSON array of subreddit names
     days: int = 180                       # trailing window for full pulls
     exclude_terms: str = ""              # comma-separated; matching posts dropped
+    about: str = ""                      # one-line sense for the relevance filter
     newest_seen_utc: int | None = None    # incremental cursor
     last_tracked_at: int | None = None
     fetched_at: int = Field(default_factory=_now)

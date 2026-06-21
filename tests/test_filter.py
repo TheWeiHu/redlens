@@ -164,6 +164,46 @@ def test_track_filters_when_key_present(engine, monkeypatch):
         assert {p.post_id for p in topic_posts(s, "conductor")} == {"p1"}
 
 
+def test_about_defines_the_sense_in_the_prompt(engine, monkeypatch):
+    # --about pins the intended meaning; it must reach the prompt authoritatively
+    # so the model judges against THAT sense rather than guessing.
+    posts = [_post("p1", title="loving conductor for parallel agents")]
+    _seed(engine, "conductor", posts)
+    seen = {}
+
+    def fake(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"verdicts": [
+            {"id": "p1", "relevant": True, "confidence": 0.9, "reason": "x"}]})
+    monkeypatch.setattr(llm, "complete", fake)
+
+    with Session(engine) as s:
+        topic = get_topic(s, "conductor")
+        filter_topic(s, topic, ["p1"], "sk-test",
+                     about="the Mac AI-agent app, not an orchestra")
+    assert "authoritatively" in seen["prompt"]
+    assert "the Mac AI-agent app, not an orchestra" in seen["prompt"]
+
+
+def test_track_about_is_persisted_and_passed_to_filter(engine, monkeypatch):
+    data = {"conductor": [_raw("p1", "conductor", "Conductor app rocks")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = {}
+
+    def fake(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"verdicts": [
+            {"id": "p1", "relevant": True, "confidence": 0.9, "reason": "x"}]})
+    monkeypatch.setattr(llm, "complete", fake)
+
+    track_topic(engine, "conductor", subreddits=["conductor"],
+                about="the Mac AI-agent app")
+    assert "the Mac AI-agent app" in seen["prompt"]
+    with Session(engine) as s:                       # persisted for re-tracks
+        assert get_topic(s, "conductor").about == "the Mac AI-agent app"
+
+
 def test_track_without_key_does_not_filter(engine, monkeypatch):
     data = {"conductor": [_raw("p1", "conductor", "x"), _raw("p2", "conductor", "y")]}
     monkeypatch.setattr(arctic, "iter_subreddit_query", _fake_query(data))

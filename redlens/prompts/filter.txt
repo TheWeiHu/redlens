@@ -1,6 +1,6 @@
 You are filtering a Reddit archive for a tracked topic. The topic handle is "$brand". A keyword search matched the posts below by substring, so many are NOT about the intended subject — the word "$brand" also has everyday meanings, and those matches are false positives we want to drop.
-
-Infer the INTENDED subject of "$brand" from these signals, then judge each post against it:
+$about
+Establish the INTENDED subject of "$brand", then judge each post against it. Use these signals:
 - keywords the user tracks: $keywords
 - the subreddits these posts come from (a community is a strong hint about which sense is meant)
 - the way the word is actually used across the batch

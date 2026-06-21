@@ -231,6 +231,7 @@ def track_topic(
     subreddits: list[str] | None = None,
     days: int | None = None,
     exclude: str | None = None,
+    about: str | None = None,
     discover: bool = False,
     reset: bool = False,
     on_progress: Callable[[str, int], None] | None = None,
@@ -251,6 +252,8 @@ def track_topic(
             topic.days = days
         if exclude is not None:
             topic.exclude_terms = exclude
+        if about is not None:
+            topic.about = about
         # Persist now so topicpost rows can reference a stable topic id.
         session.add(topic)
         session.flush()
@@ -380,7 +383,8 @@ def track_topic(
         relevance: FilterResult | None = None
         key = llm_api_key()
         if key and matched_ids:
-            relevance = filter_topic(session, topic, matched_ids, key)
+            relevance = filter_topic(session, topic, matched_ids, key,
+                                     about=topic.about)
 
     return TrackResult(
         topic=topic,

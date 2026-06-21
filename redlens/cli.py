@@ -375,6 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--subreddits", help="comma-separated subreddits to add to the net")
     t.add_argument("--exclude", help="comma-separated terms; posts containing "
                    "any are dropped, e.g. 'ubisoft, rainbow six' for topic ubi")
+    t.add_argument("--about", help="one-line definition of the intended sense, "
+                   "e.g. 'the Mac AI-agent app, not an orchestra conductor'; "
+                   "pins the LLM relevance filter to the right meaning (needs a key)")
     t.add_argument("--discover", action="store_true",
                    help="widen the net one round via authors of matching posts")
     t.add_argument("--comments", action="store_true",
@@ -485,8 +488,8 @@ def main(argv: list[str] | None = None) -> int:
             res = track_topic(
                 engine, args.topic,
                 query=args.query, subreddits=subs,
-                days=args.days, exclude=args.exclude, discover=args.discover,
-                reset=args.reset,
+                days=args.days, exclude=args.exclude, about=args.about,
+                discover=args.discover, reset=args.reset,
                 on_progress=lambda sub, n: print(
                     f"  r/{sub}: {n} new", file=sys.stderr),
             )
