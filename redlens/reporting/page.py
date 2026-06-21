@@ -459,6 +459,17 @@ def _unique_slug(name: str, used: set[str]) -> str:
     return s
 
 
+def _html_shell(title: str, body: str) -> str:
+    """The standalone-HTML wrapper (doctype, head, inline CSS) shared by the
+    per-topic page and the --all index so the two can't drift. ``title`` is
+    escaped and suffixed with ' · redlens'; ``body`` is the inner markup."""
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f'<title>{html.escape(title)} · redlens</title>'
+        f'<style>{_CSS}</style></head><body>\n{body}\n</body></html>')
+
+
 def render_all(engine: Engine, out_dir: Path,
                summarize: Callable[[str], TopicSummary | None] | None = None,
                sentiment: Callable[[str], list[WeekSentiment] | None] | None = None,
@@ -519,21 +530,17 @@ def render_index(results: list[PageResult]) -> str:
         f"<td class='n'>{r.matched:,} posts</td></tr>"
         for r in written
     )
-    body = (f"<table>{rows}</table>" if written
-            else '<p class="muted">no tracked topics with matched posts yet</p>')
+    table = (f"<table>{rows}</table>" if written
+             else '<p class="muted">no tracked topics with matched posts yet</p>')
     skip_note = ""
     if skipped:
         names = ", ".join(html.escape(r.name) for r in skipped)
         skip_note = (f'<p class="muted">skipped (no matched posts yet): '
                      f'{names}</p>')
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tracked topics · redlens</title><style>{_CSS}</style></head><body>
-<h1>tracked topics</h1>
-<p class="muted">{len(written):,} report{"" if len(written) == 1 else "s"}</p>
-{body}
-{skip_note}
-</body></html>"""
+    body = (f'<h1>tracked topics</h1>\n'
+            f'<p class="muted">{len(written):,} '
+            f'report{"" if len(written) == 1 else "s"}</p>\n{table}\n{skip_note}')
+    return _html_shell("tracked topics", body)
 
 
 def render_topic_page(engine: Engine, name: str,
@@ -638,18 +645,15 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
     domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
     domains = _drill(domain_rows, domain_groups) if domain_rows else ""
 
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(topic.name)} · redlens</title><style>{_CSS}</style></head><body>
-<h1>{html.escape(topic.name)}</h1>
+    score = sum(p.score for p in posts) + sum(c.score for c in comments)
+    body = f"""<h1>{html.escape(topic.name)}</h1>
 <p class="muted">{html.escape(keywords)!r} · last {topic.days} days · {span}</p>
-<p>{len(posts):,} posts · {sum(p.score for p in posts) + sum(c.score for c in comments):,} score ·
+<p>{len(posts):,} posts · {score:,} score ·
 {n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched</p>
 {_summary_section(summary) if summary else ""}
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts))}
 {sentiment_section}
-{complaints_html}
 <h2>By weekday &amp; hour (UTC)</h2>
 {_punchcard(posts, comments)}
 <h2>Subreddits</h2>
@@ -659,10 +663,11 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 {infl_html}
 <h2>Themes</h2>
 {themes_html}
+{complaints_html}
 {use_cases_html}
 {brands_html}
 <h2>Links</h2>
 {domains or '<div class="muted">no external links</div>'}
 <h2>Top posts</h2>
-<table>{top_rows}</table>
-</body></html>"""
+<table>{top_rows}</table>"""
+    return _html_shell(topic.name, body)
