@@ -14,6 +14,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from redlens.models import (  # noqa: F401
     Comment,
     Post,
+    SyncState,
     Topic,
     TopicPost,
     User,
@@ -29,13 +30,17 @@ T = TypeVar("T", bound=SQLModel)
 # Fresh databases skip migrations and are built straight at the latest schema;
 # databases from before versioning (user_version 0 with tables present) are
 # treated as version 1, the v0.2 baseline.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE topic ADD COLUMN exclude_terms VARCHAR NOT NULL DEFAULT ''",),
     # v3 gave topic a surrogate id + keyword list and rekeyed topicpost on
     # topic_id; both change shape, so drop and let create_all rebuild. Tracked
     # topics are re-created by the next `track` (posts/comments are preserved).
     3: ("DROP TABLE IF EXISTS topicpost", "DROP TABLE IF EXISTS topic"),
+    # v4 adds the sync_state table (incremental-sync cursors). It is purely
+    # additive, so create_all builds it on the spot — no DDL needed here; this
+    # empty step only advances user_version past 3 so the stamp stays honest.
+    4: (),
 }
 
 

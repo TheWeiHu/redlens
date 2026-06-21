@@ -1,0 +1,11 @@
+Each numbered line is a cluster of keywords from one theme that topic-modeling found in a Reddit discussion about "$topic". Give each cluster a short, human-readable label that captures what the theme is about.
+
+$themes
+
+Return ONLY a JSON object (no markdown, no commentary), one label per theme above, in the same order:
+
+{
+  "labels": ["<label for theme 1>", "<label for theme 2>"]
+}
+
+Each label is 2-5 words, Title Case, no trailing punctuation. Base it only on the keywords shown; if a cluster is incoherent, pick the most salient word.

@@ -24,7 +24,7 @@ from redlens import llm
 from redlens.cli import main
 from redlens.db import connect, init_schema, upsert
 from redlens.errors import RedlensError
-from redlens.models import Comment, Post, User
+from redlens.models import Comment, Post, Topic, TopicPost, User
 
 
 def _seed(session, user="Alice"):
@@ -86,7 +86,7 @@ def test_representative_payload_and_structured_profile(db, monkeypatch, capsys):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     captured = {}
 
-    def fake_complete(prompt, key, *, max_tokens):
+    def fake_complete(prompt, key, **kwargs):
         captured["prompt"] = prompt
         return _STUB_JSON                       # fenced JSON, as a model might return
 
@@ -121,3 +121,339 @@ def test_unknown_depth_is_rejected(db, monkeypatch):
     from redlens.summarize import summarize_user
     with Session(connect(str(db))) as s, pytest.raises(RedlensError):
         summarize_user(s, "alice", depth="exhaustive")
+
+
+def _seed_topic(session, name="climate"):
+    """A tracked topic with matched posts (via topicpost) and comments under
+    them (via the link_id bridge), including one defining old top-voted comment
+    buried under newer filler — the sample must surface it."""
+    topic = Topic(name=name, keywords=json.dumps([name]),
+                  subreddits=json.dumps(["climate", "science"]),
+                  last_tracked_at=1_700_300_000)
+    session.add(topic)
+    session.flush()
+    posts = [
+        Post(post_id="t1", author_username="Bob", subreddit_name="climate",
+             created_utc=1_700_000_000, title="carbon tax debate heats up",
+             score=42),
+        Post(post_id="t2", author_username="Cara", subreddit_name="science",
+             created_utc=1_700_100_000, title="new solar efficiency record",
+             score=8),
+    ]
+    upsert(session, posts)
+    upsert(session, [TopicPost(topic_id=topic.id, post_id=p.post_id)
+                     for p in posts])
+    upsert(session, [
+        Comment(comment_id="old", author_username="Bob", subreddit_name="climate",
+                link_id="t1", parent_id=None, created_utc=1_000, score=9999,
+                body="DEFINING ARGUMENT about policy tradeoffs"),
+    ])
+    upsert(session, [
+        Comment(comment_id=f"c{i}", author_username="Cara",
+                subreddit_name="science", link_id="t1", parent_id=None,
+                created_utc=2_000 + i, score=1, body=f"filler reply {i}")
+        for i in range(40)
+    ])
+    session.commit()
+    return topic
+
+
+@pytest.fixture
+def topic_db(db):
+    with Session(connect(str(db))) as s:
+        _seed_topic(s)
+    return db
+
+
+_STUB_TOPIC_JSON = """```json
+{
+  "overview": "people argue about climate policy",
+  "themes": [{"title": "carbon pricing", "summary": "taxes vs cap-and-trade"}],
+  "sentiment": "concerned but engaged",
+  "viewpoints": "market vs regulation"
+}
+```"""
+
+
+def test_topic_no_key_exits_2_with_setup_hint(topic_db, capsys):
+    assert main(["--db", str(topic_db), "summarize", "--topic", "climate"]) == 2
+    assert "redlens setup" in capsys.readouterr().err
+
+
+def test_topic_not_tracked_exits_2(db, monkeypatch, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert main(["--db", str(db), "summarize", "--topic", "ghost"]) == 2
+    assert "not found" in capsys.readouterr().err.lower()
+
+
+def test_summarize_without_user_or_topic_errors(db, capsys):
+    assert main(["--db", str(db), "summarize"]) == 1
+    assert "username or --topic" in capsys.readouterr().err
+
+
+def test_topic_representative_payload_and_structured_summary(
+        topic_db, monkeypatch, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    captured = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        captured["prompt"] = prompt
+        return _STUB_TOPIC_JSON
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+
+    assert main(
+        ["--db", str(topic_db), "summarize", "--topic", "climate", "--json"]
+    ) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["topic"] == "climate" and out["model"] == "gpt-4o-mini"
+    assert out["themes"][0]["title"] == "carbon pricing"
+    assert out["sentiment"] == "concerned but engaged"
+
+    data = captured["prompt"].split("Summarize what", 1)[0]
+    assert "climate" in data                              # the topic + keywords
+    assert "r/climate" in data                            # communities, by name
+    assert "carbon tax debate heats up" in data          # matched post sampled
+    assert "DEFINING ARGUMENT about policy tradeoffs" in data  # top-voted comment
+
+
+def test_weekly_topic_sentiment_no_key_raises(topic_db):
+    from redlens.errors import MissingKey
+    from redlens.summarize import weekly_topic_sentiment
+    with Session(connect(str(topic_db))) as s, pytest.raises(MissingKey):
+        weekly_topic_sentiment(s, "climate")
+
+
+def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
+    """Posts are bucketed by week, the week's titles are handed to the model,
+    and the returned -100..100 scores map to [-1,1] with gaps zero-filled."""
+    from datetime import UTC, datetime
+
+    from redlens.sentiment import _week_start
+    from redlens.summarize import weekly_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    t1 = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())   # week Mon 2024-01-01
+    t2 = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())  # week Mon 2024-01-15
+    w1, w2 = _week_start(t1), _week_start(t2)
+    with Session(connect(str(db))) as s:
+        topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
+                      subreddits=json.dumps(["vpn"]), last_tracked_at=t2)
+        s.add(topic)
+        s.flush()
+        posts = [
+            Post(post_id="a", author_username="x", subreddit_name="vpn",
+                 created_utc=t1, title="works great", score=5),
+            Post(post_id="b", author_username="y", subreddit_name="vpn",
+                 created_utc=t2, title="keeps crashing", score=9),
+        ]
+        upsert(s, posts)
+        upsert(s, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
+        # a comment under post "a" (bridged by link_id == post_id), week 1
+        upsert(s, [Comment(comment_id="c1", author_username="z",
+                           subreddit_name="vpn", link_id="a", parent_id=None,
+                           created_utc=t1, score=7, body="totally agree, love it")])
+        s.commit()
+
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"weeks": [{"week": w1, "score": 80},
+                                     {"week": w2, "score": -60}]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        weeks = weekly_topic_sentiment(s, "vpn")
+
+    assert [w.week for w in weeks] == ["2024-01-01", "2024-01-08", "2024-01-15"]
+    assert weeks[0].mean == 0.8 and weeks[0].posts == 1 and weeks[0].comments == 1
+    assert weeks[1].posts == 0 and weeks[1].mean is None     # gap -> unscored, not 0.0
+    assert weeks[2].mean == -0.6 and weeks[2].posts == 1
+    # both the post titles and the comment body were handed to the model
+    assert "works great" in seen["prompt"] and "keeps crashing" in seen["prompt"]
+    assert "totally agree, love it" in seen["prompt"] and "comments:" in seen["prompt"]
+
+
+def _vpn_topic_with_two_weeks(db, t1, t2):
+    """Two posts in two different weeks under topic 'vpn'; returns nothing,
+    just seeds the DB. Shared by the robustness tests below."""
+    with Session(connect(str(db))) as s:
+        topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
+                      subreddits=json.dumps(["vpn"]), last_tracked_at=t2)
+        s.add(topic)
+        s.flush()
+        posts = [
+            Post(post_id="a", author_username="x", subreddit_name="vpn",
+                 created_utc=t1, title="works great", score=5),
+            Post(post_id="b", author_username="y", subreddit_name="vpn",
+                 created_utc=t2, title="keeps crashing", score=9),
+        ]
+        upsert(s, posts)
+        upsert(s, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
+        s.commit()
+
+
+def test_weekly_topic_sentiment_robust_to_bad_scores(db, monkeypatch):
+    """A week the model omits, or scores out-of-range / non-numeric / bool, must
+    not be laundered into a confident 0.0 — it stays unscored (mean is None)."""
+    from datetime import UTC, datetime
+
+    from redlens.sentiment import _week_start
+    from redlens.summarize import weekly_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    t1 = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())
+    t2 = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())
+    w1, w2 = _week_start(t1), _week_start(t2)
+    _vpn_topic_with_two_weeks(db, t1, t2)
+
+    def fake_complete(prompt, key, **kwargs):
+        # w1 scored 150 (out of range -> clamped to 1.0); w2 OMITTED entirely;
+        # plus a bool score and an invented week the code must ignore.
+        return json.dumps({"weeks": [
+            {"week": w1, "score": 150},
+            {"week": "2024-02-05", "score": 50},   # not an active week -> ignored
+            {"week": w2, "score": True},           # bool -> rejected
+        ]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        weeks = weekly_topic_sentiment(s, "vpn")
+
+    by = {w.week: w for w in weeks}
+    assert by[w1].mean == 1.0                       # 150/100 clamped to 1.0
+    assert by[w2].mean is None and by[w2].posts == 1  # omitted+bool -> unscored, NOT 0.0
+    assert "2024-02-05" not in by                   # invented week dropped
+
+
+def test_weekly_topic_sentiment_includes_comment_only_weeks(db, monkeypatch):
+    """A week with comments but no posts is shown to the model and charted, not
+    silently dropped or forced neutral."""
+    from datetime import UTC, datetime
+
+    from redlens.sentiment import _week_start
+    from redlens.summarize import weekly_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    t_post = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())    # week 2024-01-01
+    t_comment = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())  # week 2024-01-15
+    wp, wc = _week_start(t_post), _week_start(t_comment)
+    with Session(connect(str(db))) as s:
+        topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
+                      subreddits=json.dumps(["vpn"]), last_tracked_at=t_comment)
+        s.add(topic)
+        s.flush()
+        upsert(s, [Post(post_id="a", author_username="x", subreddit_name="vpn",
+                        created_utc=t_post, title="works great", score=5)])
+        upsert(s, [TopicPost(topic_id=topic.id, post_id="a")])
+        # comment lands in a LATER week than any post (comment-only week)
+        upsert(s, [Comment(comment_id="c1", author_username="z",
+                           subreddit_name="vpn", link_id="a", parent_id=None,
+                           created_utc=t_comment, score=7, body="this broke for me")])
+        s.commit()
+
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"weeks": [{"week": wp, "score": 40},
+                                     {"week": wc, "score": -80}]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        weeks = weekly_topic_sentiment(s, "vpn")
+
+    by = {w.week: w for w in weeks}
+    assert wc in by                                  # comment-only week present
+    assert by[wc].posts == 0 and by[wc].comments == 1
+    assert by[wc].mean == -0.8                       # scored, not forced 0.0
+    assert "this broke for me" in seen["prompt"]     # comment shown to the model
+
+
+def test_label_themes_empty_needs_no_key():
+    from redlens.summarize import label_themes
+    assert label_themes("vpn", []) == []
+
+
+def test_label_themes_no_key_raises(db):
+    from redlens.errors import MissingKey
+    from redlens.summarize import label_themes
+    with pytest.raises(MissingKey):
+        label_themes("vpn", [["a", "b"]])
+
+
+def test_label_themes_aligns_and_falls_back(db, monkeypatch):
+    """Labels align to themes by position; a blank or missing label falls back
+    to the cluster's own keywords, so the result is always full-length."""
+    from redlens.summarize import label_themes
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    themes = [["server", "connection", "slow"],
+              ["price", "deal", "refund"],
+              ["app", "update", "ui"]]
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"labels": ["Connection Problems", ""]})  # 2nd blank, 3rd missing
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    labels = label_themes("vpn", themes)
+    assert labels == ["Connection Problems", "price, deal, refund", "app, update, ui"]
+    assert "server, connection, slow" in seen["prompt"]   # clusters handed to model
+
+
+def test_identify_brands_no_key_raises(topic_db):
+    from redlens.errors import MissingKey
+    from redlens.summarize import identify_brands
+    with Session(connect(str(topic_db))) as s, pytest.raises(MissingKey):
+        identify_brands(s, "climate")
+
+
+def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
+    """Brands are parsed into name + aliases; blank names dropped, empty aliases
+    fall back to the name, and the sample handed to the model is the archive."""
+    from redlens.summarize import identify_brands
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"brands": [
+            {"name": "Tesla", "aliases": ["tesla", "tsla"]},
+            {"name": "BYD", "aliases": []},          # empty -> name as alias
+            {"name": "", "aliases": ["x"]},          # blank name -> dropped
+        ]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(topic_db))) as s:
+        brands = identify_brands(s, "climate")
+
+    assert [b.name for b in brands] == ["Tesla", "BYD"]
+    assert brands[0].aliases == ["tesla", "tsla"]
+    assert brands[1].aliases == ["BYD"]                  # empty -> [name]
+    assert "carbon tax debate heats up" in seen["prompt"]  # archive sampled
+
+
+def test_extract_categories_parses_complaints(topic_db, monkeypatch):
+    """Complaints/use-cases go through the same core, reading the 'categories'
+    list and 'phrases' terms; empty phrases fall back to the name."""
+    from redlens.summarize import extract_categories
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"categories": [
+            {"name": "Pricing", "phrases": ["too expensive", "price hike"]},
+            {"name": "Outages", "phrases": []},   # empty -> name as term
+        ]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(topic_db))) as s:
+        cats = extract_categories(s, "climate", "complaints")
+
+    assert [c.name for c in cats] == ["Pricing", "Outages"]
+    assert cats[0].terms == ["too expensive", "price hike"]
+    assert cats[1].terms == ["Outages"]
+    assert "PROBLEMS" in seen["prompt"]   # the complaints prompt was used

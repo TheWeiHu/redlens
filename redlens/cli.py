@@ -2,30 +2,51 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import re
+import json
+import os
 import sys
+import webbrowser
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, TextIO, TypeVar
 
-from redlens import __version__, discovery, onboarding
-from redlens.analytics import compute_user_analytics
-from redlens.config import llm_api_key, resolve_db
+from redlens import __version__, completions, discovery, export, onboarding
+from redlens.analytics import (
+    compute_topic_analytics,
+    compute_user_analytics,
+    list_users,
+)
+from redlens.config import default_report_dir, llm_api_key, resolve_db
 from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
+from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.models import Profile
+from redlens.models import Brand, Category, Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
-from redlens.reporting.page import render_topic_page
-from redlens.summarize import summarize_user
+from redlens.reporting.page import render_all, render_topic_page, slug
+from redlens.sentiment import WeekSentiment
+from redlens.summarize import (
+    extract_categories,
+    identify_brands,
+    label_themes,
+    summarize_topic,
+    summarize_user,
+    weekly_topic_sentiment,
+)
 from redlens.topics import (
     SubredditCandidate,
     get_topic,
+    list_topics,
     pull_topic_comments,
     query_terms,
     search_subreddits,
     track_topic,
+    untrack_topic,
 )
+
+_T = TypeVar("_T")
 
 # Discovery sources for a topic's subreddit net, in display order.
 # (key, label, on by default)
@@ -45,8 +66,23 @@ def _ts(s: int | None) -> str:
     return datetime.fromtimestamp(s, tz=UTC).strftime("%Y-%m-%d %H:%MZ")
 
 
-def _slug(name: str) -> str:
-    return "-".join(re.findall(r"[a-z0-9]+", name.lower())) or "topic"
+def _emit_json(obj: Any) -> None:
+    """Print a pydantic model — or a list of them — as indented JSON to stdout."""
+    if isinstance(obj, list):
+        print(json.dumps([r.model_dump() for r in obj], indent=2))
+    else:
+        print(obj.model_dump_json(indent=2))
+
+
+def _confirm(prompt: str, *, assume_yes: bool) -> bool:
+    """Ask a destructive y/N question. --yes skips it; a non-interactive run
+    without --yes declines (so a pipe/cron never deletes by surprise)."""
+    if assume_yes:
+        return True
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    print(f"{prompt} [y/N] ", end="", file=sys.stderr, flush=True)
+    return input().strip().lower() in ("y", "yes")
 
 
 # Demographic fields in display order, with their headings.
@@ -75,12 +111,50 @@ def _format_profile(p: Profile) -> str:
     return "\n".join(lines)
 
 
+def _format_topic_summary(s: TopicSummary) -> str:
+    """Render a structured TopicSummary as readable terminal text (the same
+    fields are in ``--json``)."""
+    lines = [f"{s.topic!r} (via {s.model}, {s.depth} depth):", ""]
+    if s.overview:
+        lines += [s.overview]
+    if s.themes:
+        lines += ["", "Themes:"]
+        lines += [f"  • {t.title}: {t.summary}".rstrip(": ") for t in s.themes]
+    for heading, body in (("Sentiment", s.sentiment),
+                          ("Viewpoints", s.viewpoints)):
+        if body:
+            lines += ["", f"{heading}: {body}"]
+    return "\n".join(lines)
+
+
+def _print_topic_analytics(ta: TopicAnalytics) -> None:
+    """Render a topic roll-up as readable terminal text (full ranked lists are
+    in ``--json``; here we show the headline numbers and the leaders)."""
+    print(f"{ta.name!r}: {ta.matched_posts:,} matched posts across "
+          f"{ta.distinct_subreddits:,}/{ta.net_size:,} subreddits · "
+          f"{ta.total_score:+,} score")
+    print(f"  keywords {', '.join(ta.keywords)!r} · "
+          f"dates {_ts(ta.first_post_at)} – {_ts(ta.last_post_at)} · "
+          f"tracked {_ts(ta.last_tracked_at)}")
+    if ta.top_subreddits:
+        print("  top subs: " + ", ".join(
+            f"r/{s.name} ({s.count:,})" for s in ta.top_subreddits[:5]))
+    if ta.top_authors:
+        print("  top authors: " + ", ".join(
+            f"u/{a.name} ({a.count:,})" for a in ta.top_authors[:5]))
+
+
 def _resolve_sources(sources_arg: str | None, *, assume_yes: bool) -> list[str]:
     """Discovery sources for a new topic: an explicit --sources list wins
     (the only way to request web/global/llm non-interactively), otherwise
-    fall back to the interactive picker / name-only default."""
+    fall back to the interactive picker / name-only default.
+
+    ``--sources none`` (or ``skip``) means run no discovery at all — track only
+    the explicit ``--subreddits``, the non-interactive 'just these subs' path."""
     if sources_arg is None:
         return _choose_sources(assume_yes=assume_yes)
+    if sources_arg.strip().lower() in ("none", "skip", ""):
+        return []
     valid = {key for key, _, _ in SOURCES}
     chosen: list[str] = []
     unknown: list[str] = []
@@ -220,20 +294,51 @@ def _pick_subreddits(
               file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="redlens")
     p.add_argument("--version", action="version", version=f"redlens {__version__}")
     p.add_argument("--db", default=None, help="SQLite file (default: REDLENS_DB, "
                    "config.toml, or the per-user data dir)")
-    sub = p.add_subparsers(dest="verb", required=True)
-    sub.add_parser("init")
-    sub.add_parser("sync").add_argument("username")
-    a = sub.add_parser("analytics")
-    a.add_argument("username")
-    a.add_argument("--json", action="store_true")
+    # metavar keeps the hidden verbs (the `analytics` deprecation alias and the
+    # `__complete` helper, both registered without help=) out of the usage
+    # line's {choices} brace; they're already absent from the command list.
+    sub = p.add_subparsers(dest="verb", required=True, metavar="<command>")
+    sub.add_parser("init", help="create or migrate the database, then exit")
+    sy = sub.add_parser("sync", help="archive a user's history (incremental by default)")
+    sy.add_argument("username")
+    sy.add_argument("--full", action="store_true",
+                    help="ignore saved cursors and re-pull the entire history")
+    sh = sub.add_parser("show", help="print a user's (or --topic's) roll-up stats")
+    sh.add_argument("username", nargs="?", help="user to roll up (omit when using --topic)")
+    sh.add_argument("--topic", help="roll up a tracked topic instead of a user")
+    sh.add_argument("--json", action="store_true")
+    # `analytics` is the old name for `show`; kept as a hidden alias for one
+    # release (no help= so it stays out of `--help`).
+    al = sub.add_parser("analytics")
+    al.add_argument("username")
+    al.add_argument("--json", action="store_true")
+    ls = sub.add_parser("list", help="list every user in the DB")
+    ls.add_argument("--json", action="store_true")
+    tp = sub.add_parser("topics", help="list every tracked topic")
+    tp.add_argument("--json", action="store_true")
+    ex = sub.add_parser(
+        "export", help="dump a user's — or a tracked topic's — posts and comments")
+    ex.add_argument("username", nargs="?",
+                    help="the user to export (omit when using --topic)")
+    ex.add_argument("--topic",
+                    help="export this tracked topic's matched posts/comments "
+                    "instead of a user")
+    ex.add_argument("--format", choices=export.FORMATS, default="json",
+                    help=f"output format: {', '.join(export.FORMATS)} (default: json)")
+    ex.add_argument("-o", "--out", help="write to PATH (default: stdout)")
     sm = sub.add_parser(
-        "summarize", help="AI profile summary from the archived data (BYO LLM key)")
-    sm.add_argument("username")
+        "summarize",
+        help="AI summary from the archived data: a user's profile, or "
+             "--topic's discussion (BYO LLM key)")
+    sm.add_argument("username", nargs="?",
+                    help="user to profile (omit when using --topic)")
+    sm.add_argument("--topic", help="summarize a tracked topic's discussion "
+                    "instead of a user")
     sm.add_argument("--json", action="store_true")
     sm.add_argument("--depth", choices=tuple(SUMMARY_DEPTHS),
                     help="how much of the archive to sample (top-voted + recent): "
@@ -281,17 +386,70 @@ def main(argv: list[str] | None = None) -> int:
                    help="accept the found subreddit list without the picker")
     t.add_argument("--sources", help="comma-separated discovery sources "
                    "(name, global, web, popular, llm) — lets you request "
-                   "web/global non-interactively; default is the picker")
+                   "web/global non-interactively; 'none' runs no discovery "
+                   "(track only --subreddits); default is the picker")
+    doc = sub.add_parser(
+        "doctor", help="diagnose the environment (DB, config, arctic-shift, LLM key)")
+    doc.add_argument("--json", action="store_true")
+    doc.add_argument("--no-network", action="store_true",
+                     help="skip the arctic-shift reachability probe (offline "
+                     "diagnosis); reports it as skipped, not failed")
     g = sub.add_parser("page", help="render a tracked topic as a standalone HTML page")
-    g.add_argument("topic")
-    g.add_argument("-o", "--out", help="output path (default: ./<topic>.html)")
+    g.add_argument("topic", nargs="?", help="topic to render (omit with --all)")
+    g.add_argument("--all", action="store_true", dest="all_topics",
+                   help="render every tracked topic plus an index.html into -o "
+                   "(a directory)")
+    g.add_argument("-o", "--out", help="single topic: output file "
+                   "(default: ./<topic>.html); --all: output directory "
+                   "(default: the per-user reports dir)")
+    g.add_argument("--open", action="store_true",
+                   help="open the rendered page (or the index, with --all) in a "
+                   "browser after writing it")
+    g.add_argument("--no-browser", action="store_true",
+                   help="never open a browser, even with --open (for scripts/CI)")
+    g.add_argument("--summary", action="store_true",
+                   help="embed an AI narrative of the discussion in the page "
+                   "(one LLM call per topic; BYO key)")
+    g.add_argument("--depth", choices=SUMMARY_DEPTHS, default=SUMMARY_DEFAULT_DEPTH,
+                   help="how much of the archive the --summary samples "
+                   f"(default: {SUMMARY_DEFAULT_DEPTH})")
+    ut = sub.add_parser(
+        "untrack", help="stop tracking a topic and drop its orphaned matches")
+    ut.add_argument("topic")
+    ut.add_argument("-y", "--yes", action="store_true",
+                    help="delete without the confirmation prompt")
+    c = sub.add_parser(
+        "completions", help="print a shell completion script (eval or save it)")
+    c.add_argument("shell", choices=completions.SHELLS)
+    # Hidden helper the generated completion scripts shell out to for DB-backed
+    # value completion (usernames / topic names). No help= and a `__` prefix so
+    # it stays out of `--help` and out of the completion scripts themselves.
+    cmp = sub.add_parser(completions.HELPER_VERB)
+    cmp.add_argument("kind", choices=("users", "topics"))
     if onboarding.ENABLED:
         sub.add_parser("setup")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = build_parser()
     args = p.parse_args(argv)
 
     try:
+        if args.verb == "completions":
+            print(completions.generate(args.shell, p), end="")
+            return 0
+        if args.verb == completions.HELPER_VERB:
+            # Read-only value completion for the generated scripts; resolve the
+            # DB path but never create it (completion has no side effects).
+            for value in completions.complete(args.kind, resolve_db(args.db)):
+                print(value)
+            return 0
         if args.verb == "setup":
             return onboarding.run_wizard()
+        if args.verb == "doctor":
+            return run_doctor(args.db, as_json=args.json,
+                              no_network=args.no_network)
         onboarding.offer_setup_on_first_run()
         db = resolve_db(args.db)
         if args.verb == "explore":
@@ -302,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "init":
             print(f"schema applied to {db}")
         elif args.verb == "sync":
-            r = sync_user(args.username, engine)
+            r = sync_user(args.username, engine, full=args.full)
             print(f"u/{r.user.username}: "
                   f"{r.posts_written:,} posts, {r.comments_written:,} comments")
         elif args.verb == "track":
@@ -352,22 +510,221 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{res.topic.name!r}: {n:,} comments stored")
             print(f"next: redlens page {res.topic.name!r}")
         elif args.verb == "page":
-            html_doc = render_topic_page(engine, args.topic)
-            out = Path(args.out or f"{_slug(args.topic)}.html")
-            out.write_text(html_doc, encoding="utf-8")
-            print(f"wrote {out} ({len(html_doc):,} bytes)")
-        elif args.verb == "summarize":
-            with session(engine) as s:
-                summ = summarize_user(s, args.username, depth=args.depth)
-            if args.json:
-                print(summ.model_dump_json(indent=2))
+            # Each --summary section is best-effort: a missing key or a bad LLM
+            # response drops just that section (and warns) instead of aborting
+            # the page — critical for --all, where one topic's failure would
+            # otherwise kill the whole batch and skip index.html.
+            def _best_effort(topic_name: str, what: str,
+                             call: Callable[[], _T], fallback: _T) -> _T:
+                try:
+                    return call()
+                except RedlensError as exc:
+                    print(f"  {topic_name}: {what} skipped — {exc}",
+                          file=sys.stderr)
+                    return fallback
+
+            # An optional AI-narrative provider, shared by the single and --all
+            # paths. Each call is one LLM request against the topic's archive.
+            def _summary(topic_name: str) -> TopicSummary | None:
+                if not args.summary:
+                    return None
+
+                def call() -> TopicSummary:
+                    with session(engine) as s:
+                        return summarize_topic(s, topic_name, depth=args.depth)
+                return _best_effort(topic_name, "AI summary", call, None)
+
+            # The sentiment-over-time trend: LLM-scored under --summary (handles
+            # sarcasm/negation). Without --summary there's no sentiment chart.
+            def _sentiment(topic_name: str) -> list[WeekSentiment] | None:
+                if not args.summary:
+                    return None
+
+                def call() -> list[WeekSentiment]:
+                    with session(engine) as s:
+                        return weekly_topic_sentiment(s, topic_name)
+                return _best_effort(topic_name, "sentiment trend", call, None)
+
+            # Readable labels for the LDA themes (one LLM call); no DB needed.
+            def _label_themes(topic_name: str,
+                              word_lists: list[list[str]]) -> list[str]:
+                return _best_effort(
+                    topic_name, "theme labels",
+                    lambda: label_themes(topic_name, word_lists), [])
+
+            # Other brands named in the discussion (one LLM call to recognize;
+            # the page counts their mentions). Under --summary only.
+            def _brands(topic_name: str) -> list[Brand] | None:
+                if not args.summary:
+                    return None
+
+                def call() -> list[Brand]:
+                    with session(engine) as s:
+                        return identify_brands(s, topic_name)
+                return _best_effort(topic_name, "brands", call, None)
+
+            # Complaints and use cases — same recognize-then-count split, one LLM
+            # call each, under --summary only.
+            def _categories(topic_name: str, kind: str) -> list[Category] | None:
+                if not args.summary:
+                    return None
+
+                def call() -> list[Category]:
+                    with session(engine) as s:
+                        return extract_categories(s, topic_name, kind)
+                return _best_effort(topic_name, kind, call, None)
+
+            def _complaints(topic_name: str) -> list[Category] | None:
+                return _categories(topic_name, "complaints")
+
+            def _use_cases(topic_name: str) -> list[Category] | None:
+                return _categories(topic_name, "use_cases")
+
+            if args.all_topics:
+                out_dir = Path(args.out) if args.out else default_report_dir()
+                results = render_all(
+                    engine, out_dir,
+                    summarize=_summary if args.summary else None,
+                    sentiment=_sentiment if args.summary else None,
+                    theme_labeler=_label_themes if args.summary else None,
+                    brands=_brands if args.summary else None,
+                    complaints=_complaints if args.summary else None,
+                    use_cases=_use_cases if args.summary else None)
+                written = [pg for pg in results if pg.written]
+                skipped = [pg for pg in results if not pg.written]
+                for pg in written:
+                    print(f"wrote {out_dir / (pg.slug + '.html')}")
+                if skipped:
+                    print(f"skipped {len(skipped)} topic(s) with no matched "
+                          f"posts: {', '.join(pg.name for pg in skipped)}",
+                          file=sys.stderr)
+                index = out_dir / "index.html"
+                print(f"index: {index} "
+                      f"({len(written)} topic{'' if len(written) == 1 else 's'})")
+                if args.open and not args.no_browser:
+                    webbrowser.open(index.resolve().as_uri())
+            elif args.topic:
+                html_doc = render_topic_page(
+                    engine, args.topic, summary=_summary(args.topic),
+                    sentiment_weeks=_sentiment(args.topic),
+                    theme_labeler=_label_themes if args.summary else None,
+                    brands=_brands(args.topic),
+                    complaints=_categories(args.topic, "complaints"),
+                    use_cases=_categories(args.topic, "use_cases"))
+                out = Path(args.out or f"{slug(args.topic)}.html")
+                out.write_text(html_doc, encoding="utf-8")
+                print(f"wrote {out} ({len(html_doc):,} bytes)")
+                if args.open and not args.no_browser:
+                    webbrowser.open(out.resolve().as_uri())
             else:
-                print(_format_profile(summ))
-        else:
+                raise RedlensError("page: give a topic or pass --all")
+        elif args.verb == "untrack":
+            with session(engine) as s:
+                if get_topic(s, args.topic) is None:
+                    raise NotFound(f"topic {args.topic!r} is not tracked")
+            if not _confirm(
+                f"delete topic {args.topic!r} and its orphaned posts/comments?",
+                assume_yes=args.yes,
+            ):
+                print("untrack: aborted (pass -y to confirm non-interactively)",
+                      file=sys.stderr)
+                return 1
+            ur = untrack_topic(engine, args.topic)
+            print(f"untracked {ur.name!r}: removed {ur.links_removed:,} topic "
+                  f"links, {ur.posts_deleted:,} orphaned posts, "
+                  f"{ur.comments_deleted:,} orphaned comments")
+        elif args.verb == "summarize":
+            if args.topic:
+                with session(engine) as s:
+                    tsumm = summarize_topic(s, args.topic, depth=args.depth)
+                if args.json:
+                    _emit_json(tsumm)
+                else:
+                    print(_format_topic_summary(tsumm))
+            else:
+                if not args.username:
+                    raise RedlensError(
+                        "summarize: give a username or --topic <topic>")
+                with session(engine) as s:
+                    summ = summarize_user(s, args.username, depth=args.depth)
+                if args.json:
+                    _emit_json(summ)
+                else:
+                    print(_format_profile(summ))
+        elif args.verb == "list":
+            with session(engine) as s:
+                rows = list_users(s)
+            if args.json:
+                _emit_json(rows)
+            elif not rows:
+                print("no users in DB — sync one with: redlens sync <user>",
+                      file=sys.stderr)
+            else:
+                for row in rows:
+                    print(f"u/{row.username}: {row.total_posts:,} posts, "
+                          f"{row.total_comments:,} comments · "
+                          f"last event {_ts(row.last_event_at)} · "
+                          f"synced {_ts(row.last_synced_at)}")
+        elif args.verb == "topics":
+            with session(engine) as s:
+                topic_rows = list_topics(s)
+            if args.json:
+                _emit_json(topic_rows)
+            elif not topic_rows:
+                print("no topics tracked — start one with: redlens track <topic>",
+                      file=sys.stderr)
+            else:
+                for trow in topic_rows:
+                    print(f"{trow.name}: {trow.matched_posts:,} posts across "
+                          f"{trow.subreddit_count:,} subreddits · "
+                          f"keywords {', '.join(trow.keywords)!r} · "
+                          f"tracked {_ts(trow.last_tracked_at)}")
+        elif args.verb == "export":
+            if (args.username is None) == (args.topic is None):
+                raise RedlensError(
+                    "export needs exactly one of <username> or --topic")
+
+            def _do_export(out: TextIO) -> tuple[int, int]:
+                if args.topic:
+                    return export.export_topic(s, args.topic, args.format, out)
+                return export.export_user(s, args.username, args.format, out)
+
+            scope = f"topic {args.topic!r}" if args.topic else f"u/{args.username}"
+            with session(engine) as s:
+                if args.out:
+                    with open(args.out, "w", encoding="utf-8", newline="") as fh:
+                        n_posts, n_comments = _do_export(fh)
+                    print(f"wrote {n_posts:,} posts + {n_comments:,} comments "
+                          f"for {scope} to {args.out}", file=sys.stderr)
+                else:
+                    if args.format == "csv":
+                        # csv writers emit their own \r\n terminators; a text
+                        # stream that also translates \n would double them into
+                        # \r\r\n (blank rows) on Windows. Disable translation,
+                        # matching the newline="" used for the file path. Guard
+                        # with getattr so a wrapped stream (e.g. test capture)
+                        # without reconfigure degrades instead of crashing.
+                        reconfigure = getattr(sys.stdout, "reconfigure", None)
+                        if reconfigure is not None:
+                            reconfigure(newline="")
+                    _do_export(sys.stdout)
+        elif getattr(args, "topic", None):  # show --topic <topic>
+            with session(engine) as s:
+                ta = compute_topic_analytics(s, args.topic)
+            if args.json:
+                _emit_json(ta)
+            else:
+                _print_topic_analytics(ta)
+        else:  # "show <user>" or its hidden alias "analytics"
+            if args.verb == "analytics":
+                print("note: 'analytics' is deprecated; use 'show' "
+                      "(this alias is kept for one release)", file=sys.stderr)
+            if not args.username:
+                raise RedlensError("show: give a username or --topic <topic>")
             with session(engine) as s:
                 an = compute_user_analytics(s, args.username)
             if args.json:
-                print(an.model_dump_json(indent=2))
+                _emit_json(an)
             else:
                 print(f"u/{an.username}: {an.total_posts:,} posts, "
                       f"{an.total_comments:,} comments, "
@@ -378,6 +735,12 @@ def main(argv: list[str] | None = None) -> int:
                       f"top r/{an.top_subreddit} "
                       f"({an.top_subreddit_event_count:,} events)")
                 print(f"  first {_ts(an.first_event_at)} · last {_ts(an.last_event_at)}")
+        return 0
+    except BrokenPipeError:
+        # A downstream reader (head, less, a closed pager) shut the pipe early.
+        # Point stdout at devnull so the interpreter's final flush can't re-raise
+        # and exit 120 — a clean exit for a tool meant to be piped.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
     except NotFound as e:
         print(f"not found: {e}", file=sys.stderr)
