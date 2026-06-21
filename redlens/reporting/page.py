@@ -175,15 +175,18 @@ def _sentiment_chart(series: list[WeekSentiment]) -> str:
     """Inline-SVG diverging bar chart of weekly sentiment in [-1, 1]: bars rise
     (green) above a neutral baseline for positive weeks and fall (red) below for
     negative ones, height ~ magnitude; hover for the week's score and post
-    count. Returns '' when there's no signal to show (every week neutral) — e.g.
-    the lexicon fallback found no sentiment words."""
-    if not series or all(w.mean == 0.0 for w in series):
+    count. Unscored weeks (``mean is None`` — gaps or weeks the model left out)
+    draw no bar. Returns '' when no week carries a non-zero score."""
+    scored = [w for w in series if w.mean is not None]
+    if not scored or all(w.mean == 0.0 for w in scored):
         return ""
     width, half, pad = 600.0, 38.0, 14.0
     center, total_h = half, half * 2
     bw = width / len(series)
     bars = []
     for i, wk in enumerate(series):
+        if wk.mean is None:
+            continue
         bh = abs(wk.mean) * half
         y = center - bh if wk.mean >= 0 else center
         cls = "pos" if wk.mean >= 0 else "neg"
@@ -283,8 +286,12 @@ def _count_mentions(
         terms = [t for t in raw_terms if t]
         if not terms:
             continue
-        pat = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in terms) + r")\b",
-                         re.IGNORECASE)
+        # (?<!\w)…(?!\w) instead of \b…\b: a plain \b needs a word char on the
+        # boundary, so a symbol-edged term ("C++", ".NET", "C#") would never
+        # match. Lookarounds assert only that the *adjacent* char isn't a word
+        # char, so symbol-edged names count while "Go" still won't hit "Google".
+        pat = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(t) for t in terms)
+                         + r")(?!\w)", re.IGNORECASE)
         mp = [p for p in posts if pat.search(f"{p.title or ''} {p.selftext or ''}")]
         mc = [c for c in comments if pat.search(c.body or "")]
         if mp or mc:
@@ -467,10 +474,11 @@ def render_all(engine: Engine, out_dir: Path,
 
     ``summarize`` is an optional per-topic AI-narrative provider (one LLM call
     each). ``sentiment`` is an optional per-topic LLM sentiment-trend provider;
-    without it each page falls back to the offline lexicon. ``theme_labeler``
-    turns each page's LDA clusters into readable labels. ``brands`` surfaces the
-    other brands named in each topic's discussion. When given, every rendered
-    page gets those."""
+    without it the page shows no sentiment chart. ``theme_labeler`` turns each
+    page's LDA clusters into readable labels. ``brands`` surfaces the other
+    brands named in each topic's discussion. When given, every rendered page
+    gets those (each provider is best-effort: a per-topic LLM failure drops just
+    that section, see the CLI guards)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     with Session(engine) as session:
         listings = list_topics(session)

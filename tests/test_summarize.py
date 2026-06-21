@@ -268,11 +268,107 @@ def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
 
     assert [w.week for w in weeks] == ["2024-01-01", "2024-01-08", "2024-01-15"]
     assert weeks[0].mean == 0.8 and weeks[0].posts == 1 and weeks[0].comments == 1
-    assert weeks[1].posts == 0 and weeks[1].mean == 0.0      # gap zero-filled
+    assert weeks[1].posts == 0 and weeks[1].mean is None     # gap -> unscored, not 0.0
     assert weeks[2].mean == -0.6 and weeks[2].posts == 1
-    # both the post title and the comment body were handed to the model
+    # both the post titles and the comment body were handed to the model
     assert "works great" in seen["prompt"] and "keeps crashing" in seen["prompt"]
     assert "totally agree, love it" in seen["prompt"] and "comments:" in seen["prompt"]
+
+
+def _vpn_topic_with_two_weeks(db, t1, t2):
+    """Two posts in two different weeks under topic 'vpn'; returns nothing,
+    just seeds the DB. Shared by the robustness tests below."""
+    with Session(connect(str(db))) as s:
+        topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
+                      subreddits=json.dumps(["vpn"]), last_tracked_at=t2)
+        s.add(topic)
+        s.flush()
+        posts = [
+            Post(post_id="a", author_username="x", subreddit_name="vpn",
+                 created_utc=t1, title="works great", score=5),
+            Post(post_id="b", author_username="y", subreddit_name="vpn",
+                 created_utc=t2, title="keeps crashing", score=9),
+        ]
+        upsert(s, posts)
+        upsert(s, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
+        s.commit()
+
+
+def test_weekly_topic_sentiment_robust_to_bad_scores(db, monkeypatch):
+    """A week the model omits, or scores out-of-range / non-numeric / bool, must
+    not be laundered into a confident 0.0 — it stays unscored (mean is None)."""
+    from datetime import UTC, datetime
+
+    from redlens.sentiment import _week_start
+    from redlens.summarize import weekly_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    t1 = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())
+    t2 = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())
+    w1, w2 = _week_start(t1), _week_start(t2)
+    _vpn_topic_with_two_weeks(db, t1, t2)
+
+    def fake_complete(prompt, key, *, max_tokens):
+        # w1 scored 150 (out of range -> clamped to 1.0); w2 OMITTED entirely;
+        # plus a bool score and an invented week the code must ignore.
+        return json.dumps({"weeks": [
+            {"week": w1, "score": 150},
+            {"week": "2024-02-05", "score": 50},   # not an active week -> ignored
+            {"week": w2, "score": True},           # bool -> rejected
+        ]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        weeks = weekly_topic_sentiment(s, "vpn")
+
+    by = {w.week: w for w in weeks}
+    assert by[w1].mean == 1.0                       # 150/100 clamped to 1.0
+    assert by[w2].mean is None and by[w2].posts == 1  # omitted+bool -> unscored, NOT 0.0
+    assert "2024-02-05" not in by                   # invented week dropped
+
+
+def test_weekly_topic_sentiment_includes_comment_only_weeks(db, monkeypatch):
+    """A week with comments but no posts is shown to the model and charted, not
+    silently dropped or forced neutral."""
+    from datetime import UTC, datetime
+
+    from redlens.sentiment import _week_start
+    from redlens.summarize import weekly_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    t_post = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())    # week 2024-01-01
+    t_comment = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())  # week 2024-01-15
+    wp, wc = _week_start(t_post), _week_start(t_comment)
+    with Session(connect(str(db))) as s:
+        topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
+                      subreddits=json.dumps(["vpn"]), last_tracked_at=t_comment)
+        s.add(topic)
+        s.flush()
+        upsert(s, [Post(post_id="a", author_username="x", subreddit_name="vpn",
+                        created_utc=t_post, title="works great", score=5)])
+        upsert(s, [TopicPost(topic_id=topic.id, post_id="a")])
+        # comment lands in a LATER week than any post (comment-only week)
+        upsert(s, [Comment(comment_id="c1", author_username="z",
+                           subreddit_name="vpn", link_id="a", parent_id=None,
+                           created_utc=t_comment, score=7, body="this broke for me")])
+        s.commit()
+
+    seen = {}
+
+    def fake_complete(prompt, key, *, max_tokens):
+        seen["prompt"] = prompt
+        return json.dumps({"weeks": [{"week": wp, "score": 40},
+                                     {"week": wc, "score": -80}]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        weeks = weekly_topic_sentiment(s, "vpn")
+
+    by = {w.week: w for w in weeks}
+    assert wc in by                                  # comment-only week present
+    assert by[wc].posts == 0 and by[wc].comments == 1
+    assert by[wc].mean == -0.8                       # scored, not forced 0.0
+    assert "this broke for me" in seen["prompt"]     # comment shown to the model
 
 
 def test_label_themes_empty_needs_no_key():

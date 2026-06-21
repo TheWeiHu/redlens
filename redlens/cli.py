@@ -6,9 +6,10 @@ import json
 import os
 import sys
 import webbrowser
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, TypeVar
 
 from redlens import __version__, completions, discovery, export, onboarding
 from redlens.analytics import (
@@ -44,6 +45,8 @@ from redlens.topics import (
     track_topic,
     untrack_topic,
 )
+
+_T = TypeVar("_T")
 
 # Discovery sources for a topic's subreddit net, in display order.
 # (key, label, on by default)
@@ -507,42 +510,69 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{res.topic.name!r}: {n:,} comments stored")
             print(f"next: redlens page {res.topic.name!r}")
         elif args.verb == "page":
+            # Each --summary section is best-effort: a missing key or a bad LLM
+            # response drops just that section (and warns) instead of aborting
+            # the page — critical for --all, where one topic's failure would
+            # otherwise kill the whole batch and skip index.html.
+            def _best_effort(topic_name: str, what: str,
+                             call: Callable[[], _T], fallback: _T) -> _T:
+                try:
+                    return call()
+                except RedlensError as exc:
+                    print(f"  {topic_name}: {what} skipped — {exc}",
+                          file=sys.stderr)
+                    return fallback
+
             # An optional AI-narrative provider, shared by the single and --all
             # paths. Each call is one LLM request against the topic's archive.
             def _summary(topic_name: str) -> TopicSummary | None:
                 if not args.summary:
                     return None
-                with session(engine) as s:
-                    return summarize_topic(s, topic_name, depth=args.depth)
+
+                def call() -> TopicSummary:
+                    with session(engine) as s:
+                        return summarize_topic(s, topic_name, depth=args.depth)
+                return _best_effort(topic_name, "AI summary", call, None)
 
             # The sentiment-over-time trend: LLM-scored under --summary (handles
             # sarcasm/negation). Without --summary there's no sentiment chart.
             def _sentiment(topic_name: str) -> list[WeekSentiment] | None:
                 if not args.summary:
                     return None
-                with session(engine) as s:
-                    return weekly_topic_sentiment(s, topic_name)
+
+                def call() -> list[WeekSentiment]:
+                    with session(engine) as s:
+                        return weekly_topic_sentiment(s, topic_name)
+                return _best_effort(topic_name, "sentiment trend", call, None)
 
             # Readable labels for the LDA themes (one LLM call); no DB needed.
             def _label_themes(topic_name: str,
                               word_lists: list[list[str]]) -> list[str]:
-                return label_themes(topic_name, word_lists)
+                return _best_effort(
+                    topic_name, "theme labels",
+                    lambda: label_themes(topic_name, word_lists), [])
 
             # Other brands named in the discussion (one LLM call to recognize;
             # the page counts their mentions). Under --summary only.
             def _brands(topic_name: str) -> list[Brand] | None:
                 if not args.summary:
                     return None
-                with session(engine) as s:
-                    return identify_brands(s, topic_name)
+
+                def call() -> list[Brand]:
+                    with session(engine) as s:
+                        return identify_brands(s, topic_name)
+                return _best_effort(topic_name, "brands", call, None)
 
             # Complaints and use cases — same recognize-then-count split, one LLM
             # call each, under --summary only.
             def _categories(topic_name: str, kind: str) -> list[Category] | None:
                 if not args.summary:
                     return None
-                with session(engine) as s:
-                    return extract_categories(s, topic_name, kind)
+
+                def call() -> list[Category]:
+                    with session(engine) as s:
+                        return extract_categories(s, topic_name, kind)
+                return _best_effort(topic_name, kind, call, None)
 
             def _complaints(topic_name: str) -> list[Category] | None:
                 return _categories(topic_name, "complaints")

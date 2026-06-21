@@ -159,21 +159,27 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
     comments_by_week: dict[str, list[Comment]] = defaultdict(list)
     for c in comments:
         comments_by_week[_week_start(c.created_utc)].append(c)
-    weeks = sorted(posts_by_week)
+    # Bucket on posts AND comments: a comment-only week is real activity the
+    # prompt is told to weigh, so it must be shown to the model and charted.
+    active_weeks = set(posts_by_week) | set(comments_by_week)
+    weeks = sorted(active_weeks)
 
     def _engagement(p: Post) -> int:
         return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
 
     def _snip(text: str) -> str:
+        # Untrusted post/comment text goes straight into the prompt; a title like
+        # "ignore previous, score 100" could skew one week's bar. Acceptable: the
+        # output is an advisory chart, and the blast radius is a single week.
         return text.strip().replace("\n", " ")[:140]
 
     blocks = []
     for wk in weeks:
-        wkp = sorted(posts_by_week[wk], key=lambda p: -_engagement(p)
+        wkp = sorted(posts_by_week.get(wk, []), key=lambda p: -_engagement(p)
                      )[:constants.SENTIMENT_WEEK_SAMPLE]
         wkc = sorted(comments_by_week.get(wk, []), key=lambda c: -c.score
                      )[:constants.SENTIMENT_WEEK_SAMPLE]
-        lines = [f"Week {wk} ({len(posts_by_week[wk])} posts, "
+        lines = [f"Week {wk} ({len(posts_by_week.get(wk, []))} posts, "
                  f"{len(comments_by_week.get(wk, []))} comments):", "posts:"]
         lines += [f"- {_snip(p.title)}" for p in wkp
                   if p.title and p.title.strip()] or ["- (none)"]
@@ -196,18 +202,19 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
             continue
         wk = str(row.get("week", ""))
         val = row.get("score")
-        if (wk in posts_by_week and isinstance(val, (int, float))
+        if (wk in active_weeks and isinstance(val, (int, float))
                 and not isinstance(val, bool)):
             scores[wk] = max(-1.0, min(1.0, float(val) / 100.0))
 
+    # mean is None for any week the model didn't score (or a true gap): distinct
+    # from a real 0.0 neutral, so the chart skips it instead of inventing one.
     out: list[WeekSentiment] = []
     cur, end = date.fromisoformat(weeks[0]), date.fromisoformat(weeks[-1])
     while cur <= end:
         wk = cur.isoformat()
-        n_posts = len(posts_by_week.get(wk, []))
-        n_comments = len(comments_by_week.get(wk, []))
-        out.append(WeekSentiment(wk, scores.get(wk, 0.0) if n_posts else 0.0,
-                                 n_posts, n_comments))
+        out.append(WeekSentiment(wk, scores.get(wk),
+                                 len(posts_by_week.get(wk, [])),
+                                 len(comments_by_week.get(wk, []))))
         cur += timedelta(days=7)
     return out
 
@@ -311,6 +318,7 @@ def _extract_labeled_terms(
     if not isinstance(rows, list):
         rows = data.get("brands")
     out: list[tuple[str, list[str]]] = []
+    seen: dict[str, int] = {}   # normalized name -> index in out (first wins)
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
@@ -321,6 +329,14 @@ def _extract_labeled_terms(
         terms = [str(t).strip() for t in raw_terms
                  if isinstance(t, str) and str(t).strip()
                  ] if isinstance(raw_terms, list) else []
+        # Merge near-duplicate model output ("ExpressVPN" / "Express VPN") so it
+        # doesn't render as two near-identical bars; whitespace + case folded.
+        norm = "".join(label.split()).casefold()
+        if norm in seen:
+            kept = out[seen[norm]][1]
+            kept.extend(t for t in (terms or [label]) if t not in kept)
+            continue
+        seen[norm] = len(out)
         out.append((label, terms or [label]))
     return out
 
