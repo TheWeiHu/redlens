@@ -457,6 +457,27 @@ def test_untrack_keeps_synced_users_posts(engine, monkeypatch):
         assert {p.post_id for p in s.exec(select(Post)).all()} == {"p1"}
 
 
+def test_untrack_keeps_post_a_synced_user_commented_on(engine, monkeypatch):
+    """An orphan post whose author isn't synced is normally dropped — but if a
+    synced user commented under it, keep the post (and the comment) so the
+    comment isn't left dangling, pointing at a deleted post."""
+    data = {"dualipa": [raw("p1", "dualipa")]}                 # post author "alice"
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "dua lipa", subreddits=["dualipa"])
+    with Session(engine) as s:
+        s.add(User(username="carol"))                          # carol is synced
+        s.add(Comment(comment_id="c1", author_username="carol",
+                      subreddit_name="dualipa", link_id="p1", created_utc=NOW))
+        s.commit()
+
+    res = untrack_topic(engine, "dua lipa")
+
+    assert (res.posts_deleted, res.comments_deleted) == (0, 0)
+    with Session(engine) as s:
+        assert {p.post_id for p in s.exec(select(Post)).all()} == {"p1"}      # kept
+        assert {c.comment_id for c in s.exec(select(Comment)).all()} == {"c1"}  # not dangling
+
+
 def test_cli_untrack_yes_and_unknown(engine, tmp_path, monkeypatch, capsys):
     db = tmp_path / "t.db"
     monkeypatch.setattr(arctic, "iter_subreddit_query",

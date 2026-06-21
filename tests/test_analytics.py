@@ -75,12 +75,25 @@ def test_active_days_counts_distinct_calendar_dates(db_session):
     upsert(db_session, [
         _post("alice", "p1", ts=1_700_000_000),  # 2023-11-14
         _post("alice", "p2", ts=1_700_001_000),  # same day
-        _post("alice", "p3", ts=1_700_100_000),  # 2023-11-15
+        _post("alice", "p3", ts=1_700_100_000),  # 2023-11-16
     ])
     a = compute_user_analytics(db_session, "alice")
     assert a.active_days == 2
     assert a.first_event_at == 1_700_000_000
     assert a.last_event_at == 1_700_100_000
+
+
+def test_top_subreddit_tie_breaks_alphabetically(db_session):
+    """On an event-count tie the top subreddit is the alphabetically-first name,
+    so the roll-up is deterministic (not dependent on row/insertion order)."""
+    upsert(db_session, [User(username="alice")])
+    upsert(db_session, [
+        _post("alice", "p1", sub="zebra"),
+        _post("alice", "p2", sub="apples"),   # ties zebra at 1 event each
+    ])
+    a = compute_user_analytics(db_session, "alice")
+    assert a.top_subreddit_event_count == 1
+    assert a.top_subreddit == "apples"        # alphabetically first wins the tie
 
 
 def test_does_not_leak_across_users(db_session):
