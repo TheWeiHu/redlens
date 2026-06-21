@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline eval harness for the topic relevance filter (devbrain task 0024, phase 5).
+"""Offline eval harness for the topic relevance filter.
 
 `track`'s relevance filter hides posts a cheap model (gpt-4o-mini) judges off-topic,
 so before trusting it we must *prove* the cheap model clears the bar against gold
@@ -153,9 +153,23 @@ def _load_gold(brand: str) -> list[dict]:
     return rows
 
 
-def _predict(rows: list[dict], key: str) -> dict[str, bool]:
+# The verdict-object example shipped in prompts/filter.txt (reason-first), and the
+# old relevant-first form. The parser is order-insensitive, but the *requested* key
+# order changes the model's answers: deciding the reason before committing the
+# boolean is a chain-of-thought nudge that lifted recall ~0.94 -> ~1.0 on the gold
+# set, which is why filter.txt ships reason-first. `--order relevant-first` rewrites
+# the example back so the delta stays reproducible.
+_EXAMPLE_SHIPPED = ('{"id": "<the post id, copied exactly>", '
+                    '"reason": "<≤12 words>", "relevant": true, "confidence": 0.0}')
+_EXAMPLE_RELEVANT_FIRST = ('{"id": "<the post id, copied exactly>", "relevant": true, '
+                           '"confidence": 0.0, "reason": "<≤12 words>"}')
+
+
+def _predict(rows: list[dict], key: str, order: str = "default") -> dict[str, bool]:
     """Classify ``rows`` exactly as production does: same prompt, same parser,
-    same batch size, same keep-when-unsure default for an omitted id."""
+    same batch size, same keep-when-unsure default for an omitted id. ``order``
+    selects the requested JSON field order in the prompt's example object
+    (``default`` = the shipped reason-first form)."""
     brand = rows[0]["brand"]
     keywords = rows[0].get("keywords") or [brand]
     about = rows[0].get("about", "")
@@ -169,6 +183,8 @@ def _predict(rows: list[dict], key: str) -> dict[str, bool]:
         prompt = prompts.render(
             "filter", brand=brand, keywords=", ".join(keywords),
             about=about_clause(about), items=_item_block(posts, list(keywords)))
+        if order == "relevant-first":
+            prompt = prompt.replace(_EXAMPLE_SHIPPED, _EXAMPLE_RELEVANT_FIRST)
         try:
             raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
                                json_object=True)
@@ -214,53 +230,96 @@ def _fmt(x: float) -> str:
     return "  n/a" if x != x else f"{x:5.2f}"  # x!=x catches NaN
 
 
+def _pooled(agg: list[dict]) -> dict[str, float]:
+    """Pool per-brand counts (not a mean of rates) so small brands don't skew it."""
+    tot_t = sum(m["gold_true"] for m in agg)
+    tot_junk = sum(m["pred_junk"] for m in agg)
+    tot_n = sum(m["labeled"] for m in agg)
+    return {
+        "labeled": tot_n, "gold_true": tot_t,
+        "gold_false": sum(m["gold_false"] for m in agg),
+        "recall_true": sum(m["recall_true"] * m["gold_true"]
+                           for m in agg if m["gold_true"]) / tot_t if tot_t else float("nan"),
+        "precision_junk": sum(m["precision_junk"] * m["pred_junk"]
+                              for m in agg if m["pred_junk"]) / tot_junk if tot_junk else float("nan"),
+        "agreement": sum(m["agreement"] * m["labeled"] for m in agg) / tot_n if tot_n else float("nan"),
+    }
+
+
+def _stdev(xs: list[float]) -> float:
+    xs = [x for x in xs if x == x]  # drop NaN
+    if len(xs) < 2:
+        return 0.0
+    mean = sum(xs) / len(xs)
+    return (sum((x - mean) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+
+
+def _score_pass(brands: list[str], key: str, order: str,
+                show_brands: bool) -> dict[str, float] | None:
+    """One full scoring pass over every labeled brand; returns pooled overall."""
+    header = f"{'brand':<12} {'n':>4} {'+':>4} {'-':>4} {'recall':>7} {'prec':>7} {'agree':>7}"
+    if show_brands:
+        print(header)
+        print("-" * len(header))
+    agg: list[dict] = []
+    for brand in brands:
+        if not (GOLD_DIR / f"{brand}.jsonl").exists():
+            continue
+        rows = _load_gold(brand)
+        if not any(isinstance(r.get("gold"), bool) for r in rows):
+            continue
+        m = _confusion(rows, _predict(rows, key, order))
+        agg.append(m)
+        if show_brands:
+            print(f"{brand:<12} {m['labeled']:>4} {m['gold_true']:>4} {m['gold_false']:>4} "
+                  f"{_fmt(m['recall_true'])} {_fmt(m['precision_junk'])} {_fmt(m['agreement'])}")
+    if not agg:
+        return None
+    o = _pooled(agg)
+    if show_brands:
+        print("-" * len(header))
+    print(f"{'OVERALL':<12} {o['labeled']:>4} {o['gold_true']:>4} {o['gold_false']:>4} "
+          f"{_fmt(o['recall_true'])} {_fmt(o['precision_junk'])} {_fmt(o['agreement'])}")
+    return o
+
+
 def cmd_score(args: argparse.Namespace) -> int:
     key = config.llm_api_key()
     if not key:
         sys.exit("score needs an LLM key (REDLENS_LLM_API_KEY / OPENAI_API_KEY / config)")
-    print(f"scoring with model: {llm.model_name()}\n", file=sys.stderr)
-
     REC, PREC, AGREE = 0.95, 0.85, 0.90
-    header = f"{'brand':<12} {'n':>4} {'+':>4} {'-':>4} {'recall':>7} {'prec':>7} {'agree':>7}"
-    print(header)
-    print("-" * len(header))
-    agg: list[dict] = []
-    for brand in _brand_keys(args.brand):
-        if not (GOLD_DIR / f"{brand}.jsonl").exists():
-            print(f"{brand:<12} (not pulled yet — skipped)")
-            continue
-        rows = _load_gold(brand)
-        if not any(isinstance(r.get("gold"), bool) for r in rows):
-            print(f"{brand:<12} (no gold labels yet — skipped)")
-            continue
-        pred = _predict(rows, key)
-        m = _confusion(rows, pred)
-        agg.append(m)
-        print(f"{brand:<12} {m['labeled']:>4} {m['gold_true']:>4} {m['gold_false']:>4} "
-              f"{_fmt(m['recall_true'])} {_fmt(m['precision_junk'])} "
-              f"{_fmt(m['agreement'])}")
+    brands = _brand_keys(args.brand)
+    print(f"model: {llm.model_name()}  order: {args.order}  runs: {args.runs}\n",
+          file=sys.stderr)
 
-    if not agg:
-        sys.exit("\nno labeled gold found — run `pull`, then label the 'gold' fields")
+    runs: list[dict[str, float]] = []
+    for i in range(args.runs):
+        if args.runs > 1:
+            print(f"=== run {i + 1}/{args.runs} ===")
+        o = _score_pass(brands, key, args.order, show_brands=(args.runs == 1))
+        if o is None:
+            sys.exit("\nno labeled gold found — run `pull`, then label the 'gold' fields")
+        runs.append(o)
+        print()
 
-    tot_t = sum(m["gold_true"] for m in agg)
-    tot_f = sum(m["gold_false"] for m in agg)
-    tot_junk = sum(m["pred_junk"] for m in agg)
-    tot_n = sum(m["labeled"] for m in agg)
-    # Pool the raw counts (not a mean of rates) so small brands don't skew it.
-    recall = sum(m["recall_true"] * m["gold_true"]
-                 for m in agg if m["gold_true"]) / tot_t if tot_t else float("nan")
-    precision = sum(m["precision_junk"] * m["pred_junk"]
-                    for m in agg if m["pred_junk"]) / tot_junk if tot_junk else float("nan")
-    agreement = sum(m["agreement"] * m["labeled"] for m in agg) / tot_n if tot_n else float("nan")
-    print("-" * len(header))
-    print(f"{'OVERALL':<12} {tot_n:>4} {tot_t:>4} {tot_f:>4} "
-          f"{_fmt(recall)} {_fmt(precision)} {_fmt(agreement)}")
+    if args.runs > 1:
+        # Nondeterminism across identical prompts: report mean ± stdev per metric.
+        print("=== variance across runs (mean ± stdev) ===")
+        for met in ("recall_true", "precision_junk", "agreement"):
+            vals = [r[met] for r in runs]
+            mean = sum(v for v in vals if v == v) / len(vals)
+            print(f"  {met:<15} {mean:5.3f} ± {_stdev(vals):.3f}   "
+                  f"(min {min(vals):.3f}, max {max(vals):.3f})")
+        recall = sum(r["recall_true"] for r in runs) / len(runs)
+        precision = sum(r["precision_junk"] for r in runs if r["precision_junk"] == r["precision_junk"]) / len(runs)
+        agreement = sum(r["agreement"] for r in runs) / len(runs)
+    else:
+        recall, precision, agreement = (runs[0]["recall_true"], runs[0]["precision_junk"],
+                                        runs[0]["agreement"])
 
-    ok = (recall >= REC and (precision != precision or precision >= PREC)
-          and agreement >= AGREE)
-    print(f"\nbar: recall>={REC} precision-on-junk>={PREC} agreement>={AGREE}")
-    print("RESULT:", "PASS ✓" if ok else "FAIL ✗")
+    ok = (recall >= REC and (precision != precision or precision >= PREC) and agreement >= AGREE)
+    print(f"bar: recall>={REC} precision-on-junk>={PREC} agreement>={AGREE}")
+    print("RESULT:", "PASS ✓" if ok else "FAIL ✗", f"(mean over {args.runs} run(s))")
     return 0 if ok else 1
 
 
@@ -274,6 +333,11 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_pull)
     s = sub.add_parser("score", help="score gpt-4o-mini over the labeled gold")
     s.add_argument("--brand", help="one brand (default: all labeled)")
+    s.add_argument("--runs", type=int, default=1,
+                   help="repeat N times and report metric mean ± stdev (LLM nondeterminism)")
+    s.add_argument("--order", choices=("default", "relevant-first"), default="default",
+                   help="JSON field order in the prompt example "
+                        "(default = shipped reason-first; relevant-first = the old order)")
     s.set_defaults(func=cmd_score)
     args = parser.parse_args(argv)
     return int(args.func(args))

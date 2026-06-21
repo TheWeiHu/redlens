@@ -28,5 +28,5 @@ venv/
 # notebooks
 .ipynb_checkpoints/
 
-# Conductor agent scratch (eval harness, gold sets, notes) — not part of the project
+# agent scratch
 .context/
