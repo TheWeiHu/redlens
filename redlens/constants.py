@@ -49,11 +49,13 @@ PULLPUSH_SIZE = 100              # rows per PullPush global search
 LLM_MAX_TOKENS = 300            # cap on the discovery LLM call
 
 # --- profile summary (BYO LLM key) ------------------------------------------
-# Output budget. The profile is a JSON object — ranked gender/age/country/
-# state/city guesses (each with a reason), five Big Five traits (each with a
-# reason), and three short paragraphs. ~1200 tokens covers that with headroom;
-# truncated JSON won't parse, so we err generous (still a fraction of a cent).
-SUMMARY_MAX_TOKENS = 1200
+# Output budget, shared by every structured (JSON) call. The largest is the
+# use-cases/complaints extractor — up to ~10 categories each with 4-8 phrases —
+# which overflowed 1200 and truncated into invalid JSON; JSON mode guarantees
+# valid syntax only when the reply isn't cut off by this cap. 2400 gives the
+# verbose extractors headroom (still a fraction of a cent on gpt-4o-mini), and
+# complete() now flags a length-truncation explicitly rather than as "bad JSON".
+SUMMARY_MAX_TOKENS = 2400
 # Communities are a qualitative fact about a user (where they choose to spend
 # time), so we name their most-active subreddits. Ten is enough to show the
 # shape of their participation — a primary home or two plus the long tail —
