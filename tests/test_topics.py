@@ -148,6 +148,27 @@ def test_count_mentions_orders_and_word_boundary():
     assert _mentions_section("X", "y", []) == ""
 
 
+def test_count_mentions_word_boundary_and_symbol_edges():
+    """The whole-word match must not fire on substrings ('Go' in 'Google'), but
+    MUST fire on symbol-edged names ('C++', '.NET') that a plain \\b would drop."""
+    from redlens.reporting.page import _count_mentions
+    posts = [
+        Post(post_id="p1", author_username="a", subreddit_name="x", created_utc=NOW,
+             score=1, num_comments=0, title="I love C++ and .NET", selftext=""),
+        Post(post_id="p2", author_username="b", subreddit_name="x", created_utc=NOW,
+             score=1, num_comments=0, title="driving down the expressway in Google Maps",
+             selftext=""),
+    ]
+    rows = _count_mentions([
+        ("C++", ["c++"]),          # symbol-edged: must match p1 (the \\b bug)
+        (".NET", [".net"]),        # symbol-edged: must match p1
+        ("Go", ["go"]),            # must NOT match "Google"
+        ("express", ["express"]),  # must NOT match "expressway"
+    ], posts, [])
+    got = {name: n for name, n, _, _ in rows}
+    assert got == {"C++": 1, ".NET": 1}        # Go / express correctly absent
+
+
 def test_themes_html_with_and_without_labels():
     from redlens.reporting.page import _themes_html
     themes = [(0.6, ["server", "slow", "drop"]), (0.4, ["price", "deal"])]

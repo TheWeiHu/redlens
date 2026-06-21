@@ -15,10 +15,13 @@ from datetime import UTC, datetime, timedelta
 @dataclass(frozen=True)
 class WeekSentiment:
     """One UTC ISO-week bucket. ``week`` is the Monday as ``YYYY-MM-DD``,
-    ``mean`` the week's sentiment in ``[-1, 1]`` (0.0 when nothing in the week
-    scored), and ``posts``/``comments`` the counts that fell in it."""
+    ``mean`` the week's sentiment in ``[-1, 1]`` or ``None`` when the week was
+    *not scored* (a gap with no activity, or a week the model left out of its
+    response) — distinct from a real 0.0 neutral so the chart can skip it rather
+    than draw a confident neutral. ``posts``/``comments`` are the counts that
+    fell in the week."""
     week: str
-    mean: float
+    mean: float | None
     posts: int
     comments: int
 
