@@ -476,6 +476,20 @@ def pull_topic_comments(
     return written
 
 
+def topic_drop_confidences(session: Session, name: str) -> list[float]:
+    """Distinct confidences (rounded to 0.1) at which the relevance filter dropped
+    a post — the breakpoints a confidence slider snaps to, where the visible set
+    actually changes. Empty when nothing was dropped (no slider needed)."""
+    vals = session.exec(
+        select(TopicPost.relevance_confidence)
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower(),
+               col(TopicPost.relevant).is_(False),
+               col(TopicPost.relevance_confidence).isnot(None))
+    ).all()
+    return sorted({round(v, 1) for v in vals if v is not None})
+
+
 def topic_posts(session: Session, name: str, min_confidence: float = 0.0) -> list[Post]:
     """Posts matched to a topic, highest-scoring first (post_id tie-break
     keeps the order deterministic, matching the rendered page). ``min_confidence``

@@ -35,7 +35,13 @@ from redlens.models import (
 )
 from redlens.reporting import lda
 from redlens.sentiment import WeekSentiment
-from redlens.topics import list_topics, require_topic, topic_comments, topic_posts
+from redlens.topics import (
+    list_topics,
+    require_topic,
+    topic_comments,
+    topic_drop_confidences,
+    topic_posts,
+)
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _Item = TypeVar("_Item", Post, Comment)
@@ -62,16 +68,10 @@ details[open] > summary .bar {{ background: #faf3f0; }}
 details ul {{ margin: .2rem 0 .6rem 1rem; padding: 0; }}
 details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
-.reltoggle-cb {{ position: absolute; opacity: 0; width: 0; height: 0; }}
-.reltoggle {{ display: inline-block; margin: 0 0 1.2rem; padding: .35rem .8rem;
-  border: 1px solid {_A}; border-radius: 999px; color: {_A}; cursor: pointer;
-  font-size: .85rem; user-select: none; }}
-.reltoggle:hover {{ background: #faf3f0; }}
-.reltoggle::before {{ content: "\\2610  "; }}
-#show-off:checked ~ .reltoggle::before {{ content: "\\2611  "; }}
-.view-all {{ display: none; }}
-#show-off:checked ~ .view-all {{ display: block; }}
-#show-off:checked ~ .view-filtered {{ display: none; }}
+.cfslide {{ margin: 0 0 1.3rem; padding: .5rem .8rem; border: 1px solid #eee;
+  border-radius: 8px; font-size: .85rem; color: #555; }}
+.cfslide input[type=range] {{ vertical-align: middle; width: 240px; accent-color: {_A}; }}
+.cfslide output {{ color: {_A}; font-weight: 600; }}
 svg {{ width: 100%; height: auto; }}
 svg rect, svg circle {{ fill: {_A}; }}
 svg rect.pos {{ fill: #2e8b57; }} svg rect.neg {{ fill: {_A}; }}
@@ -570,7 +570,7 @@ def render_topic_page(engine: Engine, name: str,
     with Session(engine) as session:
         topic = require_topic(session, name)
 
-        def build_view(min_conf: float, label_themes: bool) -> str:
+        def build_view(min_conf: float, label_themes: bool) -> tuple[str, int]:
             # post_id tie-break keeps the rendered page byte-deterministic
             posts = topic_posts(session, topic.name, min_conf)
             comments = topic_comments(session, topic.name, min_conf)
@@ -597,17 +597,19 @@ def render_topic_page(engine: Engine, name: str,
                 "click to read",
                 _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
             ) if use_cases else ""
-            return _view(topic, posts, comments, summary, section, themes_html,
-                         brands_html, complaints_html, use_cases_html)
+            return (_view(topic, posts, comments, summary, section, themes_html,
+                          brands_html, complaints_html, use_cases_html), len(posts))
 
-        # Filtered (the chosen threshold) vs all-matched (min_conf > 1 keeps every
-        # row). n_hidden drives whether the page gets a toggle at all.
-        n_shown = len(topic_posts(session, topic.name, min_confidence))
-        n_all = len(topic_posts(session, topic.name, 2.0))
-        view_filtered = build_view(min_confidence, label_themes=True)
-        # Re-label themes for the all view would double LLM calls, so keep keywords.
-        view_all = build_view(2.0, label_themes=False) if n_all > n_shown else ""
-        return _page(topic, view_filtered, view_all, n_all - n_shown)
+        # One full view per confidence breakpoint where the visible set changes
+        # (drops with confidence < threshold reappear). No drops -> a single view.
+        confs = topic_drop_confidences(session, topic.name)
+        if not confs:
+            return _html_shell(topic.name,
+                               f"{_header(topic)}\n{build_view(min_confidence, True)[0]}")
+        thresholds = [0.0] + [c + 1e-6 for c in confs]
+        built = [build_view(t, label_themes=(i == 0)) for i, t in enumerate(thresholds)]
+        return _slider_page(topic, [h for h, _ in built], [n for _, n in built],
+                            [round(c * 100) for c in confs])
 
 
 def _sentiment_section(series: list[WeekSentiment]) -> str:
@@ -675,21 +677,36 @@ def _view(topic: Topic, posts: list[Post], comments: list[Comment],
 <table>{top_rows}</table>"""
 
 
-def _page(topic: Topic, view_filtered: str, view_all: str, n_hidden: int) -> str:
-    """Wrap one or two views in the shell. With hidden off-topic matches, a
-    checkbox near the top swaps the WHOLE page between the filtered view and the
-    show-all view (CSS-only, no JS — matches the rest of the page)."""
+def _header(topic: Topic) -> str:
     keywords = ", ".join(topic.keyword_list)
-    header = (f"<h1>{html.escape(topic.name)}</h1>\n"
-              f'<p class="muted">{html.escape(keywords)!r} · last {topic.days} days</p>')
-    if not n_hidden:
-        return _html_shell(topic.name, f"{header}\n{view_filtered}")
-    es = "es" if n_hidden != 1 else ""
-    body = (f"{header}\n"
-            f'<input type="checkbox" id="show-off" class="reltoggle-cb">'
-            f'<label for="show-off" class="reltoggle">include {n_hidden:,} off-topic '
-            f'match{es} the relevance filter hid <span class="muted">— recomputes '
-            f"the whole page</span></label>\n"
-            f'<div class="view view-filtered">{view_filtered}</div>'
-            f'<div class="view view-all">{view_all}</div>')
-    return _html_shell(topic.name, body)
+    return (f"<h1>{html.escape(topic.name)}</h1>\n"
+            f'<p class="muted">{html.escape(keywords)!r} · last {topic.days} days</p>')
+
+
+def _slider_page(topic: Topic, views: list[str], counts: list[int],
+                 breakpoints: list[int]) -> str:
+    """A relevance-confidence slider near the top that recomputes the WHOLE page:
+    each ``views[i]`` is a full render that reveals more off-topic matches, and the
+    slider (drag right = require higher confidence to hide) selects which to show.
+
+    Needs a little JS — the only spot the page isn't pure HTML/CSS — because a
+    draggable range input can't drive sibling visibility in CSS alone. The model's
+    confidence is coarse (see docs/relevance-filter.md), so the slider snaps to the
+    few breakpoints where the visible set actually changes."""
+    view_divs = "".join(
+        f'<div class="cfview"{"" if i == 0 else " hidden"}>{v}</div>'
+        for i, v in enumerate(views))
+    slider = (
+        '<div class="cfslide"><label for="cf">relevance filter — hide off-topic '
+        'the model was at least</label> <input type="range" id="cf" min="0" max="100" '
+        'step="1" value="0"> <output id="cflab"></output></div>')
+    js = (
+        "<script>(function(){"
+        f"var bp={breakpoints},counts={counts};"
+        "var s=document.getElementById('cf'),lab=document.getElementById('cflab'),"
+        "views=document.querySelectorAll('.cfview');"
+        "function u(){var v=+s.value,i=bp.filter(function(b){return b<v;}).length;"
+        "views.forEach(function(el,k){el.hidden=k!==i;});"
+        "lab.textContent=v+'% sure · '+counts[i].toLocaleString()+' posts shown';}"
+        "s.addEventListener('input',u);u();})();</script>")
+    return _html_shell(topic.name, f"{_header(topic)}\n{slider}{view_divs}{js}")
