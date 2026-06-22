@@ -53,6 +53,7 @@ _CSS = f"""
 body {{ font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto;
        padding: 0 1rem; line-height: 1.4; color: #222; }}
 h1, h2 {{ font-weight: 600; }}
+h1 {{ text-align: center; }}
 h2 {{ margin-top: 2rem; font-size: 1rem; text-transform: uppercase;
      letter-spacing: .05em; color: {_A}; border-bottom: 2px solid {_A};
      padding-bottom: .2rem; }}
@@ -70,8 +71,8 @@ details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
 .cfslide {{ margin: .2rem 0 1.4rem; padding: .7rem .9rem; border: 1px solid #eee;
   border-radius: 10px; background: #fafafa; }}
-.cfslide-top {{ font-size: .9rem; color: #555; margin-bottom: .55rem; }}
-.cfslide-top output {{ color: {_A}; font-weight: 600; }}
+.cfslide-top {{ text-align: center; margin-bottom: .55rem; }}
+.cfslide-top output {{ color: {_A}; font-weight: 600; font-size: .95rem; }}
 .cfslide-track {{ display: flex; align-items: center; gap: .7rem; }}
 .cfslide-track input[type=range] {{ flex: 1; accent-color: {_A}; }}
 .cfend {{ font-size: .72rem; color: #999; white-space: nowrap; }}
@@ -681,9 +682,7 @@ def _view(topic: Topic, posts: list[Post], comments: list[Comment],
 
 
 def _header(topic: Topic) -> str:
-    keywords = ", ".join(topic.keyword_list)
-    return (f"<h1>{html.escape(topic.name)}</h1>\n"
-            f'<p class="muted">{html.escape(keywords)!r} · last {topic.days} days</p>')
+    return f"<h1>{html.escape(topic.name)}</h1>"
 
 
 def _slider_page(topic: Topic, views: list[str], counts: list[int],
@@ -703,9 +702,8 @@ def _slider_page(topic: Topic, views: list[str], counts: list[int],
         f'<div class="cfview"{" hidden" if n != min(counts) else ""}>{v}</div>'
         for v, n in zip(views, counts, strict=True))
     slider = (
-        '<div class="cfslide"><div class="cfslide-top"><b>Relevance filter</b> · '
-        '<output id="cflab"></output></div><div class="cfslide-track">'
-        '<span class="cfend">all matches</span>'
+        '<div class="cfslide"><div class="cfslide-top"><output id="cflab"></output></div>'
+        '<div class="cfslide-track"><span class="cfend">all matches</span>'
         '<input type="range" id="cf" min="0" max="100" step="1" value="100">'
         '<span class="cfend">relevant only</span></div></div>')
     js = (
@@ -715,9 +713,8 @@ def _slider_page(topic: Topic, views: list[str], counts: list[int],
         "views=document.querySelectorAll('.cfview');"
         # slider right = strict: invert v so higher = hide more (fewer posts shown)
         "function u(){var v=+s.value,i=bp.filter(function(b){return b<(100-v);}).length;"
-        "views.forEach(function(el,k){el.hidden=k!==i;});"
-        "var shown=counts[i],hid=total-shown;"
-        "lab.textContent=shown.toLocaleString()+' posts'+(hid?' · '+hid+"
-        "' off-topic hidden':' · showing all');}"
+        "views.forEach(function(el,k){el.hidden=k!==i;});var shown=counts[i];"
+        "lab.textContent=shown===total?'all '+total+' posts':"
+        "shown.toLocaleString()+' of '+total.toLocaleString()+' posts';}"
         "s.addEventListener('input',u);u();})();</script>")
     return _html_shell(topic.name, f"{_header(topic)}\n{slider}{view_divs}{js}")
