@@ -18,7 +18,7 @@ from redlens.models import (
     UserAnalytics,
     UserListing,
 )
-from redlens.topics import require_topic
+from redlens.topics import relevant_clause, require_topic
 
 
 def compute_user_analytics(session: Session, username: str) -> UserAnalytics:
@@ -113,7 +113,7 @@ def compute_topic_analytics(session: Session, name: str) -> TopicAnalytics:
             select(*columns)
             .select_from(Post)
             .join(TopicPost, TopicPost.post_id == Post.post_id)
-            .where(TopicPost.topic_id == topic.id)
+            .where(TopicPost.topic_id == topic.id, relevant_clause())
         )
 
     def _top(column: Any, limit: int, extra_where: Any = None) -> list[Any]:

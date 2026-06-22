@@ -34,11 +34,12 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from sqlalchemy import delete, func
+from sqlalchemy import ColumnElement, delete, func, or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
 from redlens import arctic
+from redlens.config import llm_api_key
 from redlens.constants import (
     COMMIT_BATCH,
     DISCOVER_MAX_AUTHORS,
@@ -47,7 +48,31 @@ from redlens.constants import (
 )
 from redlens.db import upsert
 from redlens.errors import NotFound, RedlensError
+from redlens.filter import FilterResult, filter_topic
 from redlens.models import Comment, Post, Topic, TopicListing, TopicPost, User
+
+
+def relevant_clause(min_confidence: float = 0.0) -> ColumnElement[bool]:
+    """Predicate for ``topicpost`` rows a tracked topic's relevance filter kept.
+
+    Tri-state ``relevant``: ``False`` is hidden (a judged false positive);
+    ``None`` (unscored — no LLM key, or pre-filter rows) and ``True`` are kept. So
+    ``IS NOT False`` keeps unscored rows, preserving keyless behavior exactly.
+    Every surface that reads a topic's matched posts/comments ANDs this in so the
+    soft flag is honored uniformly.
+
+    ``min_confidence`` (0–1) makes hiding confidence-gated: a False row is hidden
+    only when the model was at least that sure (``relevance_confidence >=
+    min_confidence``); lower-confidence drops are kept visible. 0 (the default)
+    hides every False, unchanged. The model's confidence is coarse (overconfident,
+    near-bimodal), so this is a blunt knob — but confident drops are well-ordered,
+    so a high threshold reliably keeps only the sure junk hidden."""
+    kept = col(TopicPost.relevant).isnot(False)
+    if min_confidence <= 0:
+        return kept
+    return or_(kept,
+               col(TopicPost.relevance_confidence).is_(None),
+               col(TopicPost.relevance_confidence) < min_confidence)
 
 
 def _now() -> int:
@@ -70,6 +95,7 @@ class TrackResult:
     discovered: list[str] = field(default_factory=list)
     per_subreddit: dict[str, int] = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)  # subreddit -> error
+    relevance: FilterResult | None = None  # LLM relevance pass, when a key is set
 
 
 def query_terms(query: str) -> list[str]:
@@ -164,6 +190,7 @@ def list_topics(session: Session) -> list[TopicListing]:
 
     counts: dict[int, int] = dict(session.exec(
         select(col(TopicPost.topic_id), func.count())
+        .where(relevant_clause())
         .group_by(col(TopicPost.topic_id))
     ).all())
 
@@ -225,9 +252,11 @@ def track_topic(
     subreddits: list[str] | None = None,
     days: int | None = None,
     exclude: str | None = None,
+    about: str | None = None,
     discover: bool = False,
     reset: bool = False,
     on_progress: Callable[[str, int], None] | None = None,
+    on_filter: Callable[[int], None] | None = None,
 ) -> TrackResult:
     """Pull every post matching the topic's keywords across its subreddit net."""
     now = _now()
@@ -245,6 +274,8 @@ def track_topic(
             topic.days = days
         if exclude is not None:
             topic.exclude_terms = exclude
+        if about is not None:
+            topic.about = about
         # Persist now so topicpost rows can reference a stable topic id.
         session.add(topic)
         session.flush()
@@ -302,8 +333,11 @@ def track_topic(
             if not batch:
                 return
             upsert(session, batch)
+            # update=False so re-linking an already-matched post on a full
+            # re-pull keeps its stored relevance verdict instead of resetting it
+            # to NULL (the verdict columns are TopicPost's only non-PK state).
             upsert(session, [TopicPost(topic_id=topic_id, post_id=p.post_id)
-                             for p in batch])
+                             for p in batch], update=False)
             session.commit()
             batch.clear()
 
@@ -364,6 +398,30 @@ def track_topic(
         session.add(topic)
         session.commit()
 
+        # Relevance pass: when an LLM key is set, classify this topic's UNSCORED
+        # matches (relevant IS NULL) and flag the false positives — the brand-name
+        # homonym noise substring search can't avoid. Scoring the unscored set,
+        # not just this run's new matches, also back-fills posts matched earlier
+        # without a key (e.g. the user just added one); already-scored rows are
+        # non-NULL so they're never re-paid. Skipped silently with no key, so
+        # keyless `track` is unchanged. Runs after the commit above, so a filter
+        # failure never loses the fetched archive.
+        relevance: FilterResult | None = None
+        key = llm_api_key()
+        if key:
+            unscored = list(session.exec(
+                select(TopicPost.post_id).where(
+                    TopicPost.topic_id == topic_id,
+                    col(TopicPost.relevant).is_(None))))
+            if unscored:
+                # Heads-up before a potentially large (and paid) LLM pass: the
+                # first keyed track of a big pre-existing topic back-fills every
+                # unscored row at once, so report the count we're about to spend on.
+                if on_filter:
+                    on_filter(len(unscored))
+                relevance = filter_topic(session, topic, unscored, key,
+                                         about=topic.about)
+
     return TrackResult(
         topic=topic,
         posts_new=posts_new,
@@ -371,6 +429,7 @@ def track_topic(
         discovered=discovered,
         per_subreddit=per_subreddit,
         failed=failed,
+        relevance=relevance,
     )
 
 
@@ -392,10 +451,14 @@ def pull_topic_comments(
         if topic is None:
             raise RedlensError(f"topic {name!r} not tracked yet")
         # Only posts that actually drew discussion are worth a request.
+        # Skip false-positive posts: fetching comment threads for off-topic
+        # matches wastes arctic requests (and stores junk). Unscored/on-topic
+        # posts are still pulled, so keyless behavior is unchanged.
         post_ids = list(session.exec(
             select(Post.post_id)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_id == topic.id, Post.num_comments > 0)
+            .where(TopicPost.topic_id == topic.id, Post.num_comments > 0,
+                   relevant_clause())
         ))
         written = 0
         for i, pid in enumerate(post_ids, 1):
@@ -413,25 +476,40 @@ def pull_topic_comments(
     return written
 
 
-def topic_posts(session: Session, name: str) -> list[Post]:
+def topic_drop_confidences(session: Session, name: str) -> list[float]:
+    """Distinct confidences (rounded to 0.1) at which the relevance filter dropped
+    a post — the breakpoints a confidence slider snaps to, where the visible set
+    actually changes. Empty when nothing was dropped (no slider needed)."""
+    vals = session.exec(
+        select(TopicPost.relevance_confidence)
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower(),
+               col(TopicPost.relevant).is_(False),
+               col(TopicPost.relevance_confidence).isnot(None))
+    ).all()
+    return sorted({round(v, 1) for v in vals if v is not None})
+
+
+def topic_posts(session: Session, name: str, min_confidence: float = 0.0) -> list[Post]:
     """Posts matched to a topic, highest-scoring first (post_id tie-break
-    keeps the order deterministic, matching the rendered page)."""
+    keeps the order deterministic, matching the rendered page). ``min_confidence``
+    keeps low-confidence drops visible (see :func:`relevant_clause`)."""
     return list(session.exec(
         select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
         .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower())
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
         .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
     ))
 
 
-def topic_comments(session: Session, name: str) -> list[Comment]:
+def topic_comments(session: Session, name: str, min_confidence: float = 0.0) -> list[Comment]:
     """Comments under a topic's matched posts (the link_id bridge)."""
     return list(session.exec(
         select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
         .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower())
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
         .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
     ))
 

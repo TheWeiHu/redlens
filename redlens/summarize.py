@@ -43,7 +43,12 @@ from redlens.models import (
     User,
 )
 from redlens.sentiment import WeekSentiment, _week_start
-from redlens.topics import require_topic, topic_comments, topic_posts
+from redlens.topics import (
+    relevant_clause,
+    require_topic,
+    topic_comments,
+    topic_posts,
+)
 
 _Activity = TypeVar("_Activity", Post, Comment)
 
@@ -426,14 +431,14 @@ def _build_topic_prompt(session: Session, topic: Topic, depth: str) -> str:
         session, template="topic", depth=depth,
         post_base=select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id),
+        .where(TopicPost.topic_id == topic_id, relevant_clause()),
         comment_base=select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id),
+        .where(TopicPost.topic_id == topic_id, relevant_clause()),
         sub_bases=[
             select(Post.subreddit_name)
             .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_id == topic_id),
+            .where(TopicPost.topic_id == topic_id, relevant_clause()),
         ],
         topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,

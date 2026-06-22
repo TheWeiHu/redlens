@@ -27,3 +27,6 @@ venv/
 
 # notebooks
 .ipynb_checkpoints/
+
+# agent scratch
+.context/

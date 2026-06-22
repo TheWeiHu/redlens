@@ -63,6 +63,14 @@ SUMMARY_MAX_TOKENS = 2400
 SUMMARY_TOP_SUBS = 10
 
 
+# --- topic relevance filter (BYO LLM key); see redlens/filter.py ------------
+# Bigger batch = more in-batch context = the model discriminates senses better and
+# catches markedly more off-topic (eval: junk-caught rose ~0.50→0.62 going 25→whole-
+# topic, at no recall cost). 50 keeps the JSON verdicts well under SUMMARY_MAX_TOKENS.
+FILTER_BATCH = 50            # matched posts classified per LLM request
+FILTER_SNIPPET_CHARS = 500   # per-post snippet width, centered on the matched keyword
+
+
 class DepthPreset(NamedTuple):
     """How much of the archive a ``--depth`` level samples. Named fields so the
     numbers below aren't opaque positional magic at the call site."""

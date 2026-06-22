@@ -30,9 +30,17 @@ T = TypeVar("T", bound=SQLModel)
 # Fresh databases skip migrations and are built straight at the latest schema;
 # databases from before versioning (user_version 0 with tables present) are
 # treated as version 1, the v0.2 baseline.
-SCHEMA_VERSION = 4
-MIGRATIONS: dict[int, tuple[str, ...]] = {
-    2: ("ALTER TABLE topic ADD COLUMN exclude_terms VARCHAR NOT NULL DEFAULT ''",),
+SCHEMA_VERSION = 6
+# Each migration step is a tuple of operations. An operation is either a raw SQL
+# string (run as-is) or an ("addcol", table, column, decl) tuple — an additive
+# column-add that is SKIPPED when the table is absent (a prior step dropped it
+# and create_all will rebuild it at the current schema, the new column included)
+# or the column already exists (idempotent). This guard matters because step 3
+# DROPs topic/topicpost: without it, the later column-adds would ALTER missing
+# tables and abort init_schema on any pre-v3 database (see _run_migration).
+AddCol = tuple[str, str, str, str]
+MIGRATIONS: dict[int, tuple[str | AddCol, ...]] = {
+    2: (("addcol", "topic", "exclude_terms", "VARCHAR NOT NULL DEFAULT ''"),),
     # v3 gave topic a surrogate id + keyword list and rekeyed topicpost on
     # topic_id; both change shape, so drop and let create_all rebuild. Tracked
     # topics are re-created by the next `track` (posts/comments are preserved).
@@ -41,7 +49,45 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # additive, so create_all builds it on the spot — no DDL needed here; this
     # empty step only advances user_version past 3 so the stamp stays honest.
     4: (),
+    # v5 adds the LLM relevance verdict to topicpost (additive, nullable):
+    # which matched posts a tracked topic's filter judged on-topic. All-null on
+    # existing rows means "unscored" — kept by default, so old archives read
+    # exactly as before until the next keyed `track` fills them in.
+    5: (
+        ("addcol", "topicpost", "relevant", "BOOLEAN"),
+        ("addcol", "topicpost", "relevance_confidence", "FLOAT"),
+        ("addcol", "topicpost", "relevance_reason", "VARCHAR"),
+        ("addcol", "topicpost", "relevance_model", "VARCHAR"),
+        ("addcol", "topicpost", "relevance_at", "INTEGER"),
+    ),
+    # v6 adds topic.about (additive): a one-line definition of the intended sense
+    # for the relevance filter (`track --about`), so the LLM pins the right
+    # meaning of an ambiguous name. Empty default = infer, unchanged behavior.
+    6: (("addcol", "topic", "about", "VARCHAR NOT NULL DEFAULT ''"),),
 }
+
+
+def _add_column(con: Any, table: str, column: str, decl: str) -> None:
+    """``ALTER TABLE … ADD COLUMN``, but a no-op when the table is absent (a
+    prior migration dropped it; create_all rebuilds it at the current schema with
+    this column already present) or the column already exists (idempotent)."""
+    has_table = con.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).first() is not None
+    if not has_table:
+        return
+    cols = {r[1] for r in con.exec_driver_sql(f"PRAGMA table_info({table})")}
+    if column in cols:
+        return
+    con.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _run_migration(con: Any, op: str | AddCol) -> None:
+    if isinstance(op, tuple):
+        _, table, column, decl = op
+        _add_column(con, table, column, decl)
+    else:
+        con.exec_driver_sql(op)
 
 
 def connect(path: str | Path = "redlens.db") -> Engine:
@@ -66,8 +112,8 @@ def init_schema(engine: Engine) -> None:
     # then rebuilds at the current ORM schema.
     with engine.begin() as con:
         for target in range(version + 1, SCHEMA_VERSION + 1):
-            for stmt in MIGRATIONS[target]:
-                con.exec_driver_sql(stmt)
+            for op in MIGRATIONS[target]:
+                _run_migration(con, op)
     SQLModel.metadata.create_all(engine)
     with engine.begin() as con:
         con.exec_driver_sql(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -77,13 +123,19 @@ def session(engine: Engine) -> Session:
     return Session(engine)
 
 
-def upsert(session: Session, items: list[T]) -> int:
+def upsert(session: Session, items: list[T], *, update: bool = True) -> int:
     """Insert ``items``, refreshing any whose primary key already exists.
 
     Returns the number of rows **newly inserted** — rows that already existed
     are updated but not counted, so re-syncing unchanged data returns 0. This
     is what lets callers report net-new (how many rows a sync actually added)
     and is the foundation for incremental sync.
+
+    ``update=False`` makes an existing row untouched on conflict (insert-or-
+    ignore). Use it when the non-PK columns carry state the caller must NOT
+    clobber from the incoming object's defaults — e.g. ``topicpost`` rows hold a
+    relevance verdict, so re-linking a post on a full re-pull must keep its
+    verdict rather than reset it to NULL.
     """
     if not items:
         return 0
@@ -96,15 +148,15 @@ def upsert(session: Session, items: list[T]) -> int:
         c.name: stmt.excluded[c.name]
         for c in table.columns
         if c.name not in set(pk_names)
-    }
+    } if update else {}
     if update_cols:
         session.execute(stmt.on_conflict_do_update(
             index_elements=pk_names,
             set_=update_cols,
         ))
     else:
-        # Every column is part of the key (pure join tables like topicpost):
-        # nothing to rewrite on conflict.
+        # Nothing to rewrite on conflict: a pure join table (every column is a
+        # key), or update=False (keep the existing row's non-PK state).
         session.execute(stmt.on_conflict_do_nothing())
     return new_count
 
