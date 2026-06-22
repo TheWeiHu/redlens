@@ -44,10 +44,6 @@ class FilterResult:
     errored: int = 0      # posts in a batch the LLM couldn't classify (left unscored)
 
 
-def _now() -> int:
-    return int(time.time())
-
-
 def _chunked(items: list[str], size: int) -> list[list[str]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
@@ -194,7 +190,7 @@ def filter_topic(
             continue
 
         model = llm.model_name()
-        at = _now()
+        at = int(time.time())
         for p in posts:
             verdict = verdicts.get(p.post_id)
             if verdict is None:
