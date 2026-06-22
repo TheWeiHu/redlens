@@ -29,8 +29,8 @@ from sqlmodel import Session, select
 from sqlmodel.sql.expression import SelectOfScalar
 
 from redlens import constants, llm, prompts
-from redlens.config import llm_api_key
-from redlens.errors import MissingKey, NotFound, RedlensError
+from redlens.config import require_llm_key
+from redlens.errors import NotFound, RedlensError
 from redlens.models import (
     Brand,
     Category,
@@ -43,9 +43,28 @@ from redlens.models import (
     User,
 )
 from redlens.sentiment import WeekSentiment, _week_start
-from redlens.topics import get_topic, relevant_clause, topic_comments
+from redlens.topics import (
+    relevant_clause,
+    require_topic,
+    topic_comments,
+    topic_posts,
+)
 
 _Activity = TypeVar("_Activity", Post, Comment)
+
+
+def _engagement_score(post: Post) -> int:
+    """How much a post drew engagement — upvotes plus weighted replies. The
+    shared ranking for "most-engaged" sampling across the LLM extractors."""
+    return max(post.score, 0) + constants.COMMENT_WEIGHT * post.num_comments
+
+
+def _complete_json(prompt: str, key: str) -> dict[str, Any]:
+    """One JSON-mode completion, parsed to a dict — the call every structured
+    extractor shares (same token budget and defensive parse)."""
+    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
+                       json_object=True)
+    return _parse_json(raw)
 
 
 def summarize_user(session: Session, username: str, *,
@@ -66,17 +85,9 @@ def summarize_user(session: Session, username: str, *,
         raise NotFound(f"u/{username} not in DB — sync first")
     canon = user.username
 
-    key = llm_api_key()
-    if not key:
-        raise MissingKey(
-            "no LLM API key — run `redlens setup` or set "
-            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
-        )
-
+    key = require_llm_key()
     prompt = _build_prompt(session, canon, resolved_depth)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
     try:
         return Profile.model_validate(
             {"username": canon, "model": llm.model_name(),
@@ -99,21 +110,10 @@ def summarize_topic(session: Session, name: str, *,
     """
     resolved_depth = _resolve_depth(depth)
 
-    topic = get_topic(session, name)
-    if topic is None:
-        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
-
-    key = llm_api_key()
-    if not key:
-        raise MissingKey(
-            "no LLM API key — run `redlens setup` or set "
-            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
-        )
-
+    topic = require_topic(session, name)
+    key = require_llm_key()
     prompt = _build_topic_prompt(session, topic, resolved_depth)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
     try:
         return TopicSummary.model_validate(
             {"topic": topic.name, "model": llm.model_name(),
@@ -133,24 +133,10 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
     :class:`~redlens.sentiment.WeekSentiment` per week (``mean`` in [-1, 1]),
     gaps zero-filled. Raises :class:`NotFound`/:class:`MissingKey` like
     :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
-    topic = get_topic(session, name)
-    if topic is None:
-        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+    topic = require_topic(session, name)
+    key = require_llm_key()
 
-    key = llm_api_key()
-    if not key:
-        raise MissingKey(
-            "no LLM API key — run `redlens setup` or set "
-            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
-        )
-
-    topic_id = topic.id
-    assert topic_id is not None
-    posts = list(session.exec(
-        select(Post)
-        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id, relevant_clause())
-    ))
+    posts = topic_posts(session, topic.name)
     if not posts:
         return []
     comments = topic_comments(session, topic.name)
@@ -166,9 +152,6 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
     active_weeks = set(posts_by_week) | set(comments_by_week)
     weeks = sorted(active_weeks)
 
-    def _engagement(p: Post) -> int:
-        return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
-
     def _snip(text: str) -> str:
         # Untrusted post/comment text goes into the prompt; sentiment.txt tells
         # the model to treat it as data, not instructions (defense-in-depth).
@@ -178,7 +161,7 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
 
     blocks = []
     for wk in weeks:
-        wkp = sorted(posts_by_week.get(wk, []), key=lambda p: -_engagement(p)
+        wkp = sorted(posts_by_week.get(wk, []), key=lambda p: -_engagement_score(p)
                      )[:constants.SENTIMENT_WEEK_SAMPLE]
         wkc = sorted(comments_by_week.get(wk, []), key=lambda c: -c.score
                      )[:constants.SENTIMENT_WEEK_SAMPLE]
@@ -195,9 +178,7 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
         "sentiment", topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,
         weeks="\n\n".join(blocks))
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
 
     rows = data.get("weeks")
     scores: dict[str, float] = {}
@@ -230,18 +211,11 @@ def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
     always aligned and non-empty. Raises :class:`MissingKey` with no key."""
     if not themes:
         return []
-    key = llm_api_key()
-    if not key:
-        raise MissingKey(
-            "no LLM API key — run `redlens setup` or set "
-            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
-        )
+    key = require_llm_key()
     listed = "\n".join(f"{i + 1}. {', '.join(words)}"
                        for i, words in enumerate(themes))
     prompt = prompts.render("theme_labels", topic=topic, themes=listed)
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
     given = data.get("labels")
     given = given if isinstance(given, list) else []
     out: list[str] = []
@@ -281,32 +255,16 @@ def _extract_labeled_terms(
     ``{"categories": [{"name", <terms_key>}]}`` list, and return
     ``(name, terms)`` pairs — blank names dropped, empty term lists falling back
     to ``[name]`` so every pair is countable."""
-    topic = get_topic(session, name)
-    if topic is None:
-        raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
+    topic = require_topic(session, name)
+    key = require_llm_key()
 
-    key = llm_api_key()
-    if not key:
-        raise MissingKey(
-            "no LLM API key — run `redlens setup` or set "
-            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
-        )
-
-    topic_id = topic.id
-    assert topic_id is not None
-    posts = list(session.exec(
-        select(Post)
-        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .where(TopicPost.topic_id == topic_id, relevant_clause())
-    ))
+    posts = topic_posts(session, topic.name)
     if not posts:
         return []
     comments = topic_comments(session, topic.name)
 
-    def _eng(p: Post) -> int:
-        return max(p.score, 0) + constants.COMMENT_WEIGHT * p.num_comments
-
-    top_posts = sorted(posts, key=lambda p: -_eng(p))[:constants.EXTRACT_SAMPLE_POSTS]
+    top_posts = sorted(posts, key=lambda p: -_engagement_score(p)
+                       )[:constants.EXTRACT_SAMPLE_POSTS]
     top_comments = sorted(comments, key=lambda c: -c.score
                           )[:constants.EXTRACT_SAMPLE_COMMENTS]
     lines = [f"- {p.title.strip()[:160]}" for p in top_posts
@@ -314,9 +272,7 @@ def _extract_labeled_terms(
     lines += [f"- {c.body.strip().replace(chr(10), ' ')[:160]}"
               for c in top_comments if c.body and c.body.strip()]
     prompt = prompts.render(prompt_name, topic=topic.name, sample="\n".join(lines))
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    data = _parse_json(raw)
+    data = _complete_json(prompt, key)
 
     # brands.txt returns {"brands": [...]}; complaints/use_cases return
     # {"categories": [...]} — accept whichever list the object carries.

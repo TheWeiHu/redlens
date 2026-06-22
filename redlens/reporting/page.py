@@ -22,27 +22,20 @@ from typing import TypeVar
 from urllib.parse import urlparse
 
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from redlens import constants
-from redlens.errors import NotFound
 from redlens.models import (
     Brand,
     Category,
     Comment,
     Post,
     Topic,
-    TopicPost,
     TopicSummary,
 )
 from redlens.reporting import lda
 from redlens.sentiment import WeekSentiment
-from redlens.topics import (
-    get_topic,
-    list_topics,
-    relevant_clause,
-    topic_comments,
-)
+from redlens.topics import list_topics, require_topic, topic_comments, topic_posts
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _Item = TypeVar("_Item", Post, Comment)
@@ -564,16 +557,9 @@ def render_topic_page(engine: Engine, name: str,
     omitted the themes show keywords only. The page stays fully keyless without
     any of them."""
     with Session(engine) as session:
-        topic = get_topic(session, name)
-        if topic is None:
-            raise NotFound(f"topic {name!r} not tracked yet — run `redlens track` first")
-        posts = list(session.exec(
-            select(Post)
-            .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-            .where(TopicPost.topic_id == topic.id, relevant_clause())
-            # post_id tie-break keeps the rendered page byte-deterministic
-            .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
-        ))
+        topic = require_topic(session, name)
+        # post_id tie-break keeps the rendered page byte-deterministic
+        posts = topic_posts(session, topic.name)
         comments = topic_comments(session, topic.name)
         section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
 

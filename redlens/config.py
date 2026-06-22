@@ -32,7 +32,7 @@ from typing import Any
 
 from platformdirs import user_config_dir, user_data_dir
 
-from redlens.errors import RedlensError
+from redlens.errors import MissingKey, RedlensError
 
 APP_NAME = "redlens"
 
@@ -126,3 +126,17 @@ def llm_api_key() -> str | None:
             return os.environ[var]
     key = load_config().get("llm", {}).get("api_key")
     return str(key) if key else None
+
+
+def require_llm_key() -> str:
+    """The configured LLM key, or raise :class:`MissingKey` with setup guidance.
+
+    For features that *need* a key; use :func:`llm_api_key` where absence is OK.
+    """
+    key = llm_api_key()
+    if not key:
+        raise MissingKey(
+            "no LLM API key — run `redlens setup` or set "
+            "OPENAI_API_KEY / REDLENS_LLM_API_KEY"
+        )
+    return key
