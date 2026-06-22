@@ -489,6 +489,27 @@ def topic_posts(session: Session, name: str, min_confidence: float = 0.0) -> lis
     ))
 
 
+def topic_hidden_posts(session: Session, name: str,
+                       min_confidence: float = 0.0) -> list[tuple[Post, float | None, str | None]]:
+    """The matched posts the relevance filter is currently *hiding* (judged
+    off-topic), each with the model's confidence + reason — for the page's
+    "reveal hidden matches" toggle. Mirrors :func:`relevant_clause`: at
+    ``min_confidence`` only the drops at/above that confidence are hidden, so this
+    returns exactly the complement of what :func:`topic_posts` shows."""
+    hidden: list[ColumnElement[bool]] = [col(TopicPost.relevant).is_(False)]
+    if min_confidence > 0:
+        hidden += [col(TopicPost.relevance_confidence).isnot(None),
+                   col(TopicPost.relevance_confidence) >= min_confidence]
+    rows = session.exec(
+        select(Post, TopicPost.relevance_confidence, TopicPost.relevance_reason)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower(), *hidden)
+        .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
+    ).all()
+    return [(p, conf, reason) for p, conf, reason in rows]
+
+
 def topic_comments(session: Session, name: str, min_confidence: float = 0.0) -> list[Comment]:
     """Comments under a topic's matched posts (the link_id bridge)."""
     return list(session.exec(

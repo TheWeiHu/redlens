@@ -35,7 +35,13 @@ from redlens.models import (
 )
 from redlens.reporting import lda
 from redlens.sentiment import WeekSentiment
-from redlens.topics import list_topics, require_topic, topic_comments, topic_posts
+from redlens.topics import (
+    list_topics,
+    require_topic,
+    topic_comments,
+    topic_hidden_posts,
+    topic_posts,
+)
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _Item = TypeVar("_Item", Post, Comment)
@@ -562,6 +568,7 @@ def render_topic_page(engine: Engine, name: str,
         # post_id tie-break keeps the rendered page byte-deterministic
         posts = topic_posts(session, topic.name, min_confidence)
         comments = topic_comments(session, topic.name, min_confidence)
+        hidden = topic_hidden_posts(session, topic.name, min_confidence)
         section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
 
         themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
@@ -588,7 +595,7 @@ def render_topic_page(engine: Engine, name: str,
             _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
         ) if use_cases else ""
         return _render(topic, posts, comments, summary, section, themes_html,
-                       brands_html, complaints_html, use_cases_html)
+                       brands_html, complaints_html, use_cases_html, hidden)
 
 
 def _sentiment_section(series: list[WeekSentiment]) -> str:
@@ -603,11 +610,33 @@ def _sentiment_section(series: list[WeekSentiment]) -> str:
             f' · LLM-scored</p>\n{svg}')
 
 
+def _hidden_section(hidden: list[tuple[Post, float | None, str | None]]) -> str:
+    """A no-JS <details> that reveals the posts the relevance filter judged
+    off-topic, each tagged with the model's confidence + reason — the on-page
+    counterpart to ``--min-confidence``, so a reader can audit what was hidden."""
+    if not hidden:
+        return ""
+    items = "".join(
+        f"<li><a href='https://reddit.com/comments/{p.post_id}'>"
+        f"{_trunc(p.title or '(untitled)')}</a> "
+        f"<span class='muted'>r/{html.escape(p.subreddit_name)} · flagged off-topic"
+        + (f" · {round((conf or 0) * 100)}% conf" if conf is not None else "")
+        + (f" · “{html.escape(reason)}”" if reason else "")
+        + "</span></li>"
+        for p, conf, reason in hidden)
+    n = len(hidden)
+    return (f'\n<details class="hidden-off"><summary>Show {n:,} off-topic '
+            f'match{"es" if n != 1 else ""} the relevance filter hid</summary>'
+            f'<p class="muted">judged off-topic by the LLM filter — kept in the '
+            f'archive, just not counted above</p><ul>{items}</ul></details>')
+
+
 def _render(topic: Topic, posts: list[Post], comments: list[Comment],
             summary: TopicSummary | None = None,
             sentiment_section: str = "", themes_html: str = "",
             brands_html: str = "", complaints_html: str = "",
-            use_cases_html: str = "") -> str:
+            use_cases_html: str = "",
+            hidden: list[tuple[Post, float | None, str | None]] | None = None) -> str:
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
     keywords = ", ".join(topic.keyword_list)
@@ -661,5 +690,5 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 <h2>Links</h2>
 {domains or '<div class="muted">no external links</div>'}
 <h2>Top posts</h2>
-<table>{top_rows}</table>"""
+<table>{top_rows}</table>{_hidden_section(hidden or [])}"""
     return _html_shell(topic.name, body)
