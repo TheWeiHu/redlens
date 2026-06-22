@@ -6,10 +6,12 @@ which has no notion of *meaning*: a topic named for a common word ("conductor",
 hardware, not the product. Those pollute the archive so ``page`` / ``summarize`` /
 ``export`` describe the wrong thing.
 
-This module asks one cheap LLM (the same OpenAI-compatible path as ``summarize``) to
-classify each matched post as **on-topic** vs **false positive**, inferring the
-intended sense of the topic from its name, the user's keywords, and the subreddits
-the posts came from — there is no user-supplied description. The verdict is stored on
+This module asks one LLM (the same OpenAI-compatible path as ``summarize``, default
+``gpt-4o-mini`` via ``[llm] model``) to classify each matched post as **on-topic** vs
+**false positive**, inferring the intended sense of the topic from its name, the user's
+keywords, the subreddits the posts came from, and the optional ``--about`` description.
+The eval numbers are a gpt-4o-mini floor; a stronger model raises accuracy at more cost,
+and a one-line ``--about`` matters more than the model. The verdict is stored on
 the ``topicpost`` join row (:class:`~redlens.models.TopicPost`), so it is computed
 once, never re-paid on re-runs, fully auditable, and reversible:
 
