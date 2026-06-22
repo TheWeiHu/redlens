@@ -693,8 +693,8 @@ def _slider_page(topic: Topic, views: list[str], counts: list[int],
 
     Needs a little JS — the only spot the page isn't pure HTML/CSS — because a
     draggable range input can't drive sibling visibility in CSS alone. The model's
-    confidence is coarse (see docs/relevance-filter.md), so the slider snaps to the
-    few breakpoints where the visible set actually changes."""
+    confidence is coarse (near-bimodal), so the slider snaps to the few breakpoints
+    where the visible set actually changes."""
     # views are ordered loosest→strictest (most posts → fewest). The strictest
     # (relevant-only) view is the default, shown on the RIGHT of the slider.
     total = max(counts)

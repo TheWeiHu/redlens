@@ -64,9 +64,9 @@ def relevant_clause(min_confidence: float = 0.0) -> ColumnElement[bool]:
     ``min_confidence`` (0–1) makes hiding confidence-gated: a False row is hidden
     only when the model was at least that sure (``relevance_confidence >=
     min_confidence``); lower-confidence drops are kept visible. 0 (the default)
-    hides every False, unchanged. Note the model is overconfident (see
-    docs/relevance-filter-calibration.png), so this is a blunt knob — but confident
-    drops are well-ordered, so a high threshold reliably keeps only the sure junk hidden."""
+    hides every False, unchanged. The model's confidence is coarse (overconfident,
+    near-bimodal), so this is a blunt knob — but confident drops are well-ordered,
+    so a high threshold reliably keeps only the sure junk hidden."""
     kept = col(TopicPost.relevant).isnot(False)
     if min_confidence <= 0:
         return kept
