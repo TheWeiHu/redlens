@@ -160,6 +160,7 @@ class Topic(SQLModel, table=True):
     subreddits: str = "[]"               # JSON array of subreddit names
     days: int = 180                       # trailing window for full pulls
     exclude_terms: str = ""              # comma-separated; matching posts dropped
+    about: str = ""                      # one-line sense for the relevance filter
     newest_seen_utc: int | None = None    # incremental cursor
     last_tracked_at: int | None = None
     fetched_at: int = Field(default_factory=_now)
@@ -180,10 +181,25 @@ class TopicPost(SQLModel, table=True):
     change without orphaning its matches. Posts stay in the shared
     ``post`` table (a post can match several topics, and user-sync and
     topic-track share the same archive).
+
+    The ``relevant*`` columns hold an optional LLM relevance verdict (see
+    :mod:`redlens.filter`). ``track`` matches by full-text substring, so a
+    brand whose name is a common word ("conductor", "shell") collects mostly
+    off-topic posts; when an LLM key is present ``track`` classifies each match
+    and records the verdict here. ``relevant`` is tri-state on purpose:
+    ``None`` = not yet scored (no key, or pre-filter rows), ``True`` = on-topic,
+    ``False`` = false positive. Downstream surfaces hide only explicit
+    ``False`` — unscored rows are kept, so keyless behavior is unchanged and
+    nothing fetched is ever deleted (the verdict is a soft, reversible flag).
     """
 
     topic_id: int = Field(primary_key=True, index=True)
     post_id: str = Field(primary_key=True, index=True)
+    relevant: bool | None = None             # None=unscored, True=on-topic, False=junk
+    relevance_confidence: float | None = None
+    relevance_reason: str | None = None
+    relevance_model: str | None = None       # which LLM produced the verdict
+    relevance_at: int | None = None          # unix seconds the verdict was recorded
 
 
 class Guess(BaseModel):

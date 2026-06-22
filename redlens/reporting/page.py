@@ -35,7 +35,13 @@ from redlens.models import (
 )
 from redlens.reporting import lda
 from redlens.sentiment import WeekSentiment
-from redlens.topics import list_topics, require_topic, topic_comments, topic_posts
+from redlens.topics import (
+    list_topics,
+    require_topic,
+    topic_comments,
+    topic_drop_confidences,
+    topic_posts,
+)
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _Item = TypeVar("_Item", Post, Comment)
@@ -47,6 +53,7 @@ _CSS = f"""
 body {{ font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto;
        padding: 0 1rem; line-height: 1.4; color: #222; }}
 h1, h2 {{ font-weight: 600; }}
+h1 {{ text-align: center; }}
 h2 {{ margin-top: 2rem; font-size: 1rem; text-transform: uppercase;
      letter-spacing: .05em; color: {_A}; border-bottom: 2px solid {_A};
      padding-bottom: .2rem; }}
@@ -62,6 +69,13 @@ details[open] > summary .bar {{ background: #faf3f0; }}
 details ul {{ margin: .2rem 0 .6rem 1rem; padding: 0; }}
 details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
+.cfslide {{ margin: .2rem 0 1.4rem; padding: .7rem .9rem; border: 1px solid #eee;
+  border-radius: 10px; background: #fafafa; }}
+.cfslide-top {{ text-align: center; margin-bottom: .55rem; }}
+.cfslide-top output {{ color: {_A}; font-weight: 600; font-size: .95rem; }}
+.cfslide-track {{ display: flex; align-items: center; gap: .7rem; }}
+.cfslide-track input[type=range] {{ flex: 1; accent-color: {_A}; }}
+.cfend {{ font-size: .72rem; color: #999; white-space: nowrap; }}
 svg {{ width: 100%; height: auto; }}
 svg rect, svg circle {{ fill: {_A}; }}
 svg rect.pos {{ fill: #2e8b57; }} svg rect.neg {{ fill: {_A}; }}
@@ -548,7 +562,8 @@ def render_topic_page(engine: Engine, name: str,
                       | None = None,
                       brands: list[Brand] | None = None,
                       complaints: list[Category] | None = None,
-                      use_cases: list[Category] | None = None) -> str:
+                      use_cases: list[Category] | None = None,
+                      min_confidence: float = 0.0) -> str:
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
     optional — when given, an AI-narrative section is added. ``sentiment_weeks``
     (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
@@ -558,36 +573,47 @@ def render_topic_page(engine: Engine, name: str,
     any of them."""
     with Session(engine) as session:
         topic = require_topic(session, name)
-        # post_id tie-break keeps the rendered page byte-deterministic
-        posts = topic_posts(session, topic.name)
-        comments = topic_comments(session, topic.name)
-        section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
 
-        themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
-        labels = (theme_labeler(topic.name, [words for _, words in themes])
-                  if theme_labeler and themes else None)
-        themes_html = _themes_html(themes, labels)
+        def build_view(min_conf: float, label_themes: bool) -> tuple[str, int]:
+            # post_id tie-break keeps the rendered page byte-deterministic
+            posts = topic_posts(session, topic.name, min_conf)
+            comments = topic_comments(session, topic.name, min_conf)
+            section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
+            themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
+            labels = (theme_labeler(topic.name, [words for _, words in themes])
+                      if theme_labeler and themes and label_themes else None)
+            themes_html = _themes_html(themes, labels)
+            brands_html = _mentions_section(
+                "Other brands mentioned",
+                "competitors and alternatives named in the discussion, by posts + "
+                "comments mentioning them · click to read",
+                _count_mentions([(b.name, b.aliases) for b in brands], posts, comments),
+            ) if brands else ""
+            complaints_html = _mentions_section(
+                "Top complaints",
+                "recurring problems people raise, by posts + comments mentioning "
+                "them · click to read",
+                _count_mentions([(c.name, c.terms) for c in complaints], posts, comments),
+            ) if complaints else ""
+            use_cases_html = _mentions_section(
+                "Use cases",
+                "what people use it for, by posts + comments mentioning it · "
+                "click to read",
+                _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
+            ) if use_cases else ""
+            return (_view(topic, posts, comments, summary, section, themes_html,
+                          brands_html, complaints_html, use_cases_html), len(posts))
 
-        brands_html = _mentions_section(
-            "Other brands mentioned",
-            "competitors and alternatives named in the discussion, by posts + "
-            "comments mentioning them · click to read",
-            _count_mentions([(b.name, b.aliases) for b in brands], posts, comments),
-        ) if brands else ""
-        complaints_html = _mentions_section(
-            "Top complaints",
-            "recurring problems people raise, by posts + comments mentioning "
-            "them · click to read",
-            _count_mentions([(c.name, c.terms) for c in complaints], posts, comments),
-        ) if complaints else ""
-        use_cases_html = _mentions_section(
-            "Use cases",
-            "what people use it for, by posts + comments mentioning it · "
-            "click to read",
-            _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
-        ) if use_cases else ""
-        return _render(topic, posts, comments, summary, section, themes_html,
-                       brands_html, complaints_html, use_cases_html)
+        # One full view per confidence breakpoint where the visible set changes
+        # (drops with confidence < threshold reappear). No drops -> a single view.
+        confs = topic_drop_confidences(session, topic.name)
+        if not confs:
+            return _html_shell(topic.name,
+                               f"{_header(topic)}\n{build_view(min_confidence, True)[0]}")
+        thresholds = [0.0] + [c + 1e-6 for c in confs]
+        built = [build_view(t, label_themes=(i == 0)) for i, t in enumerate(thresholds)]
+        return _slider_page(topic, [h for h, _ in built], [n for _, n in built],
+                            [round(c * 100) for c in confs])
 
 
 def _sentiment_section(series: list[WeekSentiment]) -> str:
@@ -602,14 +628,13 @@ def _sentiment_section(series: list[WeekSentiment]) -> str:
             f' · LLM-scored</p>\n{svg}')
 
 
-def _render(topic: Topic, posts: list[Post], comments: list[Comment],
-            summary: TopicSummary | None = None,
-            sentiment_section: str = "", themes_html: str = "",
-            brands_html: str = "", complaints_html: str = "",
-            use_cases_html: str = "") -> str:
+def _view(topic: Topic, posts: list[Post], comments: list[Comment],
+          summary: TopicSummary | None, sentiment_section: str, themes_html: str,
+          brands_html: str, complaints_html: str, use_cases_html: str) -> str:
+    """Everything from the headline counts down, computed for one post set — so the
+    same body renders twice (relevant-only and all-matched) for the toggle to swap."""
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
-    keywords = ", ".join(topic.keyword_list)
     ts = [p.created_utc for p in posts]
     span = f"{_date(min(ts))} – {_date(max(ts))}" if ts else "—"
     n_comments = len(comments) or sum(p.num_comments for p in posts)
@@ -626,21 +651,14 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
     )
     sub_groups = _by(posts, lambda p: p.subreddit_name)
     sub_rows = _ranked(subs, constants.TOP_SUBREDDITS)
-
-    infl = _influential(posts, comments)
     infl_html = _influence_drill(
-        infl, _by(posts, lambda p: p.author_username),
+        _influential(posts, comments), _by(posts, lambda p: p.author_username),
         _by(comments, lambda c: c.author_username))
-
-    domain_groups = _by(posts, _host)
     domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
-    domains = _drill(domain_rows, domain_groups) if domain_rows else ""
-
+    domains = _drill(domain_rows, _by(posts, _host)) if domain_rows else ""
     score = sum(p.score for p in posts) + sum(c.score for c in comments)
-    body = f"""<h1>{html.escape(topic.name)}</h1>
-<p class="muted">{html.escape(keywords)!r} · last {topic.days} days · {span}</p>
-<p>{len(posts):,} posts · {score:,} score ·
-{n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched</p>
+    return f"""<p>{len(posts):,} posts · {score:,} score ·
+{n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched · {span}</p>
 {_summary_section(summary) if summary else ""}
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts))}
@@ -661,4 +679,42 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 {domains or '<div class="muted">no external links</div>'}
 <h2>Top posts</h2>
 <table>{top_rows}</table>"""
-    return _html_shell(topic.name, body)
+
+
+def _header(topic: Topic) -> str:
+    return f"<h1>{html.escape(topic.name)}</h1>"
+
+
+def _slider_page(topic: Topic, views: list[str], counts: list[int],
+                 breakpoints: list[int]) -> str:
+    """A relevance-confidence slider near the top that recomputes the WHOLE page:
+    each ``views[i]`` is a full render that reveals more off-topic matches, and the
+    slider (drag right = require higher confidence to hide) selects which to show.
+
+    Needs a little JS — the only spot the page isn't pure HTML/CSS — because a
+    draggable range input can't drive sibling visibility in CSS alone. The model's
+    confidence is coarse (near-bimodal), so the slider snaps to the few breakpoints
+    where the visible set actually changes."""
+    # views are ordered loosest→strictest (most posts → fewest). The strictest
+    # (relevant-only) view is the default, shown on the RIGHT of the slider.
+    total = max(counts)
+    view_divs = "".join(
+        f'<div class="cfview"{" hidden" if n != min(counts) else ""}>{v}</div>'
+        for v, n in zip(views, counts, strict=True))
+    slider = (
+        '<div class="cfslide"><div class="cfslide-top"><output id="cflab"></output></div>'
+        '<div class="cfslide-track"><span class="cfend">all matches</span>'
+        '<input type="range" id="cf" min="0" max="100" step="1" value="100">'
+        '<span class="cfend">relevant only</span></div></div>')
+    js = (
+        "<script>(function(){"
+        f"var bp={breakpoints},counts={counts},total={total};"
+        "var s=document.getElementById('cf'),lab=document.getElementById('cflab'),"
+        "views=document.querySelectorAll('.cfview');"
+        # slider right = strict: invert v so higher = hide more (fewer posts shown)
+        "function u(){var v=+s.value,i=bp.filter(function(b){return b<(100-v);}).length;"
+        "views.forEach(function(el,k){el.hidden=k!==i;});var shown=counts[i];"
+        "lab.textContent=shown===total?'all '+total+' posts':"
+        "shown.toLocaleString()+' of '+total.toLocaleString()+' posts';}"
+        "s.addEventListener('input',u);u();})();</script>")
+    return _html_shell(topic.name, f"{_header(topic)}\n{slider}{view_divs}{js}")
