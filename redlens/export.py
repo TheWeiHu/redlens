@@ -20,7 +20,7 @@ from sqlmodel import Session, select
 
 from redlens.errors import NotFound, RedlensError
 from redlens.models import Comment, Post, User
-from redlens.topics import get_topic, topic_comments, topic_posts
+from redlens.topics import require_topic, topic_comments, topic_posts
 
 FORMATS = ("json", "csv", "jsonl")
 
@@ -114,9 +114,7 @@ def export_topic(session: Session, name: str, fmt: str, out: TextIO) -> tuple[in
     Returns ``(posts_written, comments_written)``. Raises ``NotFound`` if the
     topic isn't tracked yet.
     """
-    topic = get_topic(session, name)
-    if topic is None:
-        raise NotFound(f"topic {name!r} not tracked — run `redlens track` first")
+    topic = require_topic(session, name)
     canon = topic.name
 
     posts = topic_posts(session, canon)
