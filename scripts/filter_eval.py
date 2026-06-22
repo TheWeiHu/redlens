@@ -34,12 +34,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -60,7 +63,6 @@ GOLD_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "filt
 # keywords default to [brand]; `about` stays empty so the eval measures pure
 # sense-inference (the MVP path) — set one only to test an --about hint.
 BRANDS: dict[str, dict[str, object]] = {
-    "conductor": {"subreddits": ["macapps", "ClaudeAI", "artificial"]},
     "arc":       {"subreddits": ["browsers", "ArcBrowser"]},
     "linear":    {"subreddits": ["ProductManagement", "projectmanagement"]},
     "monday":    {"subreddits": ["projectmanagement", "Productivity"]},
@@ -70,6 +72,29 @@ BRANDS: dict[str, dict[str, object]] = {
     "corona":    {"subreddits": ["beer", "CraftBeer"]},
     "notion":    {"subreddits": ["Notion", "productivity"]},
     "dove":      {"subreddits": ["SkincareAddiction", "beauty"]},
+}
+
+
+# One-line authoritative sense per brand, for the `--about` path (the prompt's
+# $about slot). Pins the intended meaning so the model isn't guessing from context.
+ABOUT: dict[str, str] = {
+    "arc": "the Arc web browser by The Browser Company — not the game Arc Raiders, "
+           "electric arcs, story arcs, or architecture",
+    "bolt": "a bolt fastener / hardware bolt as discussed in DIY and construction — "
+            "not Pokemon cards (Raging/Black Bolt), lightning bolts, or Usain Bolt",
+    "corona": "Corona the Mexican beer — not the COVID virus, a cigar size, the "
+              "Xbox-360 'Corona' board, or the city",
+    "dove": "Dove personal-care products (soap, body wash, deodorant) by Unilever — "
+            "not Dove Cameron, the bird, or Italian 'dove' meaning 'where'",
+    "linear": "Linear the issue-tracking / project-management app (linear.app) — not "
+              "linear algebra, linear keyboard switches, or the adjective 'linear'",
+    "monday": "monday.com the project-management SaaS — not the weekday Monday",
+    "notion": "Notion the note-taking / productivity app (notion.so) — not the "
+              "everyday word 'notion' meaning an idea",
+    "shell": "Shell the oil and energy company — not a seashell, tortoise shell, a "
+             "Unix/command shell, or a shell company",
+    "square": "Square the payments company (Block) and its POS — not square footage, "
+              "a crochet granny square, 'back to square one', or Squarespace",
 }
 
 
@@ -116,30 +141,82 @@ def _raw_matches(brand: str, subreddits: list[str], days: int) -> list[Post]:
             os.environ["REDLENS_CONFIG"] = prev_cfg
 
 
+# Obvious NSFW / hookup subreddits — valid "off-topic" but unwanted in a
+# committed fixture, so they're dropped from the discovered net.
+_NSFW = re.compile(
+    r"nsfw|lewd|porn|booty|tits|boob|fuck|fap|cock|nude|gonewild|cum|sissy|"
+    r"deciders|personals|r4r|hookup|onlyfans|nsf|milf|gw\b", re.I)
+
+
+def _offtopic_net(brand: str, product_subs: list[str], want: int) -> list[str]:
+    """Communities where the brand WORD appears in some OTHER sense — the source
+    of negatives. Uses the same online discovery the real ``track`` does (PullPush
+    global full-text + arctic name search), minus the product subreddits and minus
+    NSFW noise."""
+    from redlens import discovery
+    from redlens.topics import search_subreddits as name_search
+    cand: list[str] = []
+    with contextlib.suppress(RedlensError):
+        cand += discovery.search_global(brand)        # PullPush: diverse senses
+    with contextlib.suppress(RedlensError):
+        cand += [c.name for c in name_search(brand)]  # arctic name match
+    prod = {p.lower() for p in product_subs}
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in cand:
+        k = n.lower()
+        if k in prod or k in seen or _NSFW.search(n):
+            continue
+        seen.add(k)
+        out.append(n)
+    return out[:want]
+
+
+def _freeze(fh: Any, brand: str, about: str, posts: list[Post], seen: set[str]) -> int:
+    n = 0
+    for p in posts:
+        if p.post_id in seen:
+            continue
+        seen.add(p.post_id)
+        fh.write(json.dumps({
+            "brand": brand, "keywords": [brand], "about": about,
+            "id": p.post_id, "subreddit": p.subreddit_name,
+            "title": p.title or "", "selftext": p.selftext or "",
+            "gold": None,  # Opus labels this: true=on-topic, false=off-topic
+        }) + "\n")
+        n += 1
+    return n
+
+
 def cmd_pull(args: argparse.Namespace) -> int:
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
     for brand in _brand_keys(args.brand):
         spec = BRANDS[brand]
-        subs = list(spec["subreddits"])  # type: ignore[arg-type]
+        product_subs = list(spec["subreddits"])  # type: ignore[arg-type]
         about = str(spec.get("about", ""))
-        print(f"pulling r/{', r/'.join(subs)} for {brand!r} "
-              f"(last {args.days} days)…", file=sys.stderr)
-        posts = _raw_matches(brand, subs, args.days)
         out = GOLD_DIR / f"{brand}.jsonl"
+        seen: set[str] = set()
         with out.open("w", encoding="utf-8") as fh:
-            for p in posts:
-                fh.write(json.dumps({
-                    "brand": brand,
-                    "keywords": [brand],
-                    "about": about,
-                    "id": p.post_id,
-                    "subreddit": p.subreddit_name,
-                    "title": p.title or "",
-                    "selftext": p.selftext or "",
-                    "gold": None,  # Opus labels this: true=on-topic, false=junk
-                }) + "\n")
-        print(f"  froze {len(posts)} raw matches -> {out} "
-              f"(label the 'gold' field next)", file=sys.stderr)
+            if not args.discover:
+                print(f"pulling r/{', r/'.join(product_subs)} for {brand!r}…",
+                      file=sys.stderr)
+                npos = _freeze(fh, brand, about,
+                               _raw_matches(brand, product_subs, args.days), seen)
+                print(f"  froze {npos} matches -> {out}", file=sys.stderr)
+                continue
+            # Discovery mode (option A): positives from the product seed, negatives
+            # from the online-discovered net, each capped so the brand has both.
+            off_subs = _offtopic_net(brand, product_subs, args.net)
+            print(f"{brand}: product r/{', r/'.join(product_subs)}  "
+                  f"| off-topic r/{', r/'.join(off_subs) or '(none found)'}",
+                  file=sys.stderr)
+            npos = _freeze(fh, brand, about,
+                           _raw_matches(brand, product_subs, args.days)[:args.pos], seen)
+            nneg = _freeze(fh, brand, about,
+                           _raw_matches(brand, off_subs, args.days)[:args.neg], seen) \
+                if off_subs else 0
+            print(f"  froze {npos} product-sub + {nneg} off-topic-sub = {npos + nneg} "
+                  f"-> {out}  (label gold next)", file=sys.stderr)
     return 0
 
 
@@ -184,7 +261,8 @@ def _field_seq(order: str) -> str:
 _SHIPPED_EXAMPLE = _example("reason-first")  # must match prompts/filter.txt verbatim
 
 
-def _predict(rows: list[dict], key: str, order: str = "reason-first") -> dict[str, bool]:
+def _predict(rows: list[dict], key: str, order: str = "reason-first",
+             batch: int = constants.FILTER_BATCH) -> dict[str, bool]:
     """Classify ``rows`` exactly as production does: same prompt, same parser,
     same batch size, same keep-when-unsure default for an omitted id. ``order``
     selects the requested JSON field order in the prompt's example object
@@ -193,7 +271,7 @@ def _predict(rows: list[dict], key: str, order: str = "reason-first") -> dict[st
     keywords = rows[0].get("keywords") or [brand]
     about = rows[0].get("about", "")
     pred: dict[str, bool] = {}
-    for chunk in _chunked([r["id"] for r in rows], constants.FILTER_BATCH):
+    for chunk in _chunked([r["id"] for r in rows], batch):
         by_id = {r["id"]: r for r in rows}
         posts = [Post(post_id=r["id"], author_username="", subreddit_name=r["subreddit"],
                       created_utc=0, title=r["title"], selftext=r["selftext"],
@@ -325,7 +403,12 @@ def cmd_grid(args: argparse.Namespace) -> int:
             and any(isinstance(r.get("gold"), bool) for r in _load_gold(b))}
     if not gold:
         sys.exit("no labeled gold — run `pull` and label first")
-    print(f"model={llm.model_name()} orders={orders} runs={args.runs} "
+    if args.about:  # inject the authoritative one-line sense (the --about path)
+        for b, rows in gold.items():
+            for r in rows:
+                r["about"] = ABOUT.get(b, "")
+    print(f"about={'on' if args.about else 'off'} "
+          f"model={llm.model_name()} orders={orders} runs={args.runs} "
           f"brands={len(gold)} workers={args.workers} "
           f"({len(orders) * args.runs * len(gold)} classifications)", file=sys.stderr)
 
@@ -337,7 +420,7 @@ def cmd_grid(args: argparse.Namespace) -> int:
 
     def work(t: tuple[str, int, str]) -> tuple[tuple[str, int, str], dict[str, float]]:
         order, run, brand = t
-        m = _confusion(gold[brand], _predict(gold[brand], key, order))
+        m = _confusion(gold[brand], _predict(gold[brand], key, order, args.batch))
         done[0] += 1
         if done[0] % 20 == 0 or done[0] == len(tasks):
             print(f"  {done[0]}/{len(tasks)} classifications", file=sys.stderr)
@@ -420,7 +503,13 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pull", help="freeze raw matches per brand for labeling")
     p.add_argument("--brand", help="one brand (default: all 10)")
-    p.add_argument("--days", type=int, default=30, help="trailing window (default 30)")
+    p.add_argument("--days", type=int, default=120, help="trailing window (default 120)")
+    p.add_argument("--discover", action="store_true",
+                   help="option A: positives from the product seed + negatives from the "
+                        "online-discovered net (PullPush/name), so each brand has both")
+    p.add_argument("--pos", type=int, default=15, help="cap on product-sub (positive) matches")
+    p.add_argument("--neg", type=int, default=15, help="cap on off-topic-sub (negative) matches")
+    p.add_argument("--net", type=int, default=8, help="how many off-topic subreddits to use")
     p.set_defaults(func=cmd_pull)
     s = sub.add_parser("score", help="score gpt-4o-mini over the labeled gold")
     s.add_argument("--brand", help="one brand (default: all labeled)")
@@ -438,6 +527,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="also emit one CSV row per brand (not just OVERALL)")
     g.add_argument("--workers", type=int, default=16,
                    help="concurrent LLM requests (default 16; the calls are independent)")
+    g.add_argument("--batch", type=int, default=constants.FILTER_BATCH,
+                   help=f"posts per LLM call (default {constants.FILTER_BATCH}; "
+                        "smaller = more attention per post)")
+    g.add_argument("--about", action="store_true",
+                   help="pass the per-brand authoritative one-line sense (the --about path)")
     g.set_defaults(func=cmd_grid)
     args = parser.parse_args(argv)
     return int(args.func(args))

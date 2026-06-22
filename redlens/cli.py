@@ -294,6 +294,27 @@ def _pick_subreddits(
               file=sys.stderr)
 
 
+def _prompt_about(topic: str, *, assume_yes: bool) -> str | None:
+    """Ask for a one-line description of what ``topic`` means, to anchor the
+    relevance filter. Returns the line, or ``None`` if skipped / non-interactive.
+
+    This is the single biggest lever on filter quality: a description like
+    "monday.com the project tool, not the weekday" roughly doubles how much
+    off-topic noise the filter catches vs. letting the model guess the sense.
+    """
+    if assume_yes or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    print(f"\nThe relevance filter works far better when it knows what {topic!r} means.\n"
+          f'  Describe it in one line — e.g. "monday.com the project tool, not the weekday".\n'
+          "  (blank = let the model infer it; it'll catch roughly half as much noise)",
+          file=sys.stderr)
+    try:
+        print("  about> ", end="", file=sys.stderr, flush=True)
+        return input().strip() or None
+    except EOFError:
+        return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="redlens")
     p.add_argument("--version", action="version", version=f"redlens {__version__}")
@@ -474,6 +495,7 @@ def main(argv: list[str] | None = None) -> int:
             # stored net without asking again.
             with session(engine) as s:
                 existing = get_topic(s, args.topic)
+            about = args.about
             if not (existing and existing.subreddit_list):
                 sources = _resolve_sources(args.sources, assume_yes=args.yes)
                 terms = query_terms(args.query) if args.query else [args.topic]
@@ -485,10 +507,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"+ casting over {len(popular)} popular subreddits",
                           file=sys.stderr)
                     subs = (subs or []) + popular
+                # First track + a key set: prompt for the sense (huge filter win).
+                if about is None and llm_api_key():
+                    about = _prompt_about(args.topic, assume_yes=args.yes)
             res = track_topic(
                 engine, args.topic,
                 query=args.query, subreddits=subs,
-                days=args.days, exclude=args.exclude, about=args.about,
+                days=args.days, exclude=args.exclude, about=about,
                 discover=args.discover, reset=args.reset,
                 on_progress=lambda sub, n: print(
                     f"  r/{sub}: {n} new", file=sys.stderr),
@@ -512,6 +537,13 @@ def main(argv: list[str] | None = None) -> int:
                 if rel.errored:
                     note += f"; {rel.errored:,} left unscored (LLM error)"
                 print(note, file=sys.stderr)
+                if not res.topic.about:
+                    print('  tip: re-track with --about "<one line>" — the filter is '
+                          "inferring this brand's meaning and catches ~half the noise "
+                          "it would with a description.", file=sys.stderr)
+            elif res.posts_new and not llm_api_key():
+                print("  relevance filter off (no LLM key) — every keyword match is "
+                      "kept; set a key to hide off-topic noise.", file=sys.stderr)
             if args.comments:
                 print("pulling comment threads under matched posts…",
                       file=sys.stderr)
