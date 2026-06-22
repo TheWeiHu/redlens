@@ -34,7 +34,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from sqlalchemy import ColumnElement, delete, func
+from sqlalchemy import ColumnElement, delete, func, or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
@@ -52,15 +52,27 @@ from redlens.filter import FilterResult, filter_topic
 from redlens.models import Comment, Post, Topic, TopicListing, TopicPost, User
 
 
-def relevant_clause() -> ColumnElement[bool]:
+def relevant_clause(min_confidence: float = 0.0) -> ColumnElement[bool]:
     """Predicate for ``topicpost`` rows a tracked topic's relevance filter kept.
 
     Tri-state ``relevant``: ``False`` is hidden (a judged false positive);
     ``None`` (unscored — no LLM key, or pre-filter rows) and ``True`` are kept. So
     ``IS NOT False`` keeps unscored rows, preserving keyless behavior exactly.
     Every surface that reads a topic's matched posts/comments ANDs this in so the
-    soft flag is honored uniformly."""
-    return col(TopicPost.relevant).isnot(False)
+    soft flag is honored uniformly.
+
+    ``min_confidence`` (0–1) makes hiding confidence-gated: a False row is hidden
+    only when the model was at least that sure (``relevance_confidence >=
+    min_confidence``); lower-confidence drops are kept visible. 0 (the default)
+    hides every False, unchanged. Note the model is overconfident (see
+    docs/relevance-filter-calibration.png), so this is a blunt knob — but confident
+    drops are well-ordered, so a high threshold reliably keeps only the sure junk hidden."""
+    kept = col(TopicPost.relevant).isnot(False)
+    if min_confidence <= 0:
+        return kept
+    return or_(kept,
+               col(TopicPost.relevance_confidence).is_(None),
+               col(TopicPost.relevance_confidence) < min_confidence)
 
 
 def _now() -> int:
@@ -464,25 +476,26 @@ def pull_topic_comments(
     return written
 
 
-def topic_posts(session: Session, name: str) -> list[Post]:
+def topic_posts(session: Session, name: str, min_confidence: float = 0.0) -> list[Post]:
     """Posts matched to a topic, highest-scoring first (post_id tie-break
-    keeps the order deterministic, matching the rendered page)."""
+    keeps the order deterministic, matching the rendered page). ``min_confidence``
+    keeps low-confidence drops visible (see :func:`relevant_clause`)."""
     return list(session.exec(
         select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
         .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
         .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
     ))
 
 
-def topic_comments(session: Session, name: str) -> list[Comment]:
+def topic_comments(session: Session, name: str, min_confidence: float = 0.0) -> list[Comment]:
     """Comments under a topic's matched posts (the link_id bridge)."""
     return list(session.exec(
         select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
         .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
         .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
     ))
 

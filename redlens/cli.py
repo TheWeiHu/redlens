@@ -439,6 +439,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--depth", choices=SUMMARY_DEPTHS, default=SUMMARY_DEFAULT_DEPTH,
                    help="how much of the archive the --summary samples "
                    f"(default: {SUMMARY_DEFAULT_DEPTH})")
+    g.add_argument("--min-confidence", type=float, default=0.0, metavar="0-1",
+                   help="only hide off-topic posts the relevance filter was at least "
+                   "this confident about; lower-confidence drops stay visible (default 0 "
+                   "= hide all). The model is overconfident, so treat this as a coarse dial.")
     ut = sub.add_parser(
         "untrack", help="stop tracking a topic and drop its orphaned matches")
     ut.add_argument("topic")
@@ -637,7 +641,8 @@ def main(argv: list[str] | None = None) -> int:
                     theme_labeler=_label_themes if args.summary else None,
                     brands=_brands(args.topic),
                     complaints=_categories(args.topic, "complaints"),
-                    use_cases=_categories(args.topic, "use_cases"))
+                    use_cases=_categories(args.topic, "use_cases"),
+                    min_confidence=args.min_confidence)
                 out = Path(args.out or f"{slug(args.topic)}.html")
                 out.write_text(html_doc, encoding="utf-8")
                 print(f"wrote {out} ({len(html_doc):,} bytes)")

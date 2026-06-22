@@ -548,7 +548,8 @@ def render_topic_page(engine: Engine, name: str,
                       | None = None,
                       brands: list[Brand] | None = None,
                       complaints: list[Category] | None = None,
-                      use_cases: list[Category] | None = None) -> str:
+                      use_cases: list[Category] | None = None,
+                      min_confidence: float = 0.0) -> str:
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
     optional — when given, an AI-narrative section is added. ``sentiment_weeks``
     (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
@@ -559,8 +560,8 @@ def render_topic_page(engine: Engine, name: str,
     with Session(engine) as session:
         topic = require_topic(session, name)
         # post_id tie-break keeps the rendered page byte-deterministic
-        posts = topic_posts(session, topic.name)
-        comments = topic_comments(session, topic.name)
+        posts = topic_posts(session, topic.name, min_confidence)
+        comments = topic_comments(session, topic.name, min_confidence)
         section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
 
         themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
