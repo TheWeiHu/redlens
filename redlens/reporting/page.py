@@ -35,13 +35,7 @@ from redlens.models import (
 )
 from redlens.reporting import lda
 from redlens.sentiment import WeekSentiment
-from redlens.topics import (
-    list_topics,
-    require_topic,
-    topic_comments,
-    topic_hidden_posts,
-    topic_posts,
-)
+from redlens.topics import list_topics, require_topic, topic_comments, topic_posts
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _Item = TypeVar("_Item", Post, Comment)
@@ -68,6 +62,16 @@ details[open] > summary .bar {{ background: #faf3f0; }}
 details ul {{ margin: .2rem 0 .6rem 1rem; padding: 0; }}
 details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
+.reltoggle-cb {{ position: absolute; opacity: 0; width: 0; height: 0; }}
+.reltoggle {{ display: inline-block; margin: 0 0 1.2rem; padding: .35rem .8rem;
+  border: 1px solid {_A}; border-radius: 999px; color: {_A}; cursor: pointer;
+  font-size: .85rem; user-select: none; }}
+.reltoggle:hover {{ background: #faf3f0; }}
+.reltoggle::before {{ content: "\\2610  "; }}
+#show-off:checked ~ .reltoggle::before {{ content: "\\2611  "; }}
+.view-all {{ display: none; }}
+#show-off:checked ~ .view-all {{ display: block; }}
+#show-off:checked ~ .view-filtered {{ display: none; }}
 svg {{ width: 100%; height: auto; }}
 svg rect, svg circle {{ fill: {_A}; }}
 svg rect.pos {{ fill: #2e8b57; }} svg rect.neg {{ fill: {_A}; }}
@@ -565,37 +569,45 @@ def render_topic_page(engine: Engine, name: str,
     any of them."""
     with Session(engine) as session:
         topic = require_topic(session, name)
-        # post_id tie-break keeps the rendered page byte-deterministic
-        posts = topic_posts(session, topic.name, min_confidence)
-        comments = topic_comments(session, topic.name, min_confidence)
-        hidden = topic_hidden_posts(session, topic.name, min_confidence)
-        section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
 
-        themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
-        labels = (theme_labeler(topic.name, [words for _, words in themes])
-                  if theme_labeler and themes else None)
-        themes_html = _themes_html(themes, labels)
+        def build_view(min_conf: float, label_themes: bool) -> str:
+            # post_id tie-break keeps the rendered page byte-deterministic
+            posts = topic_posts(session, topic.name, min_conf)
+            comments = topic_comments(session, topic.name, min_conf)
+            section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
+            themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
+            labels = (theme_labeler(topic.name, [words for _, words in themes])
+                      if theme_labeler and themes and label_themes else None)
+            themes_html = _themes_html(themes, labels)
+            brands_html = _mentions_section(
+                "Other brands mentioned",
+                "competitors and alternatives named in the discussion, by posts + "
+                "comments mentioning them · click to read",
+                _count_mentions([(b.name, b.aliases) for b in brands], posts, comments),
+            ) if brands else ""
+            complaints_html = _mentions_section(
+                "Top complaints",
+                "recurring problems people raise, by posts + comments mentioning "
+                "them · click to read",
+                _count_mentions([(c.name, c.terms) for c in complaints], posts, comments),
+            ) if complaints else ""
+            use_cases_html = _mentions_section(
+                "Use cases",
+                "what people use it for, by posts + comments mentioning it · "
+                "click to read",
+                _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
+            ) if use_cases else ""
+            return _view(topic, posts, comments, summary, section, themes_html,
+                         brands_html, complaints_html, use_cases_html)
 
-        brands_html = _mentions_section(
-            "Other brands mentioned",
-            "competitors and alternatives named in the discussion, by posts + "
-            "comments mentioning them · click to read",
-            _count_mentions([(b.name, b.aliases) for b in brands], posts, comments),
-        ) if brands else ""
-        complaints_html = _mentions_section(
-            "Top complaints",
-            "recurring problems people raise, by posts + comments mentioning "
-            "them · click to read",
-            _count_mentions([(c.name, c.terms) for c in complaints], posts, comments),
-        ) if complaints else ""
-        use_cases_html = _mentions_section(
-            "Use cases",
-            "what people use it for, by posts + comments mentioning it · "
-            "click to read",
-            _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
-        ) if use_cases else ""
-        return _render(topic, posts, comments, summary, section, themes_html,
-                       brands_html, complaints_html, use_cases_html, hidden)
+        # Filtered (the chosen threshold) vs all-matched (min_conf > 1 keeps every
+        # row). n_hidden drives whether the page gets a toggle at all.
+        n_shown = len(topic_posts(session, topic.name, min_confidence))
+        n_all = len(topic_posts(session, topic.name, 2.0))
+        view_filtered = build_view(min_confidence, label_themes=True)
+        # Re-label themes for the all view would double LLM calls, so keep keywords.
+        view_all = build_view(2.0, label_themes=False) if n_all > n_shown else ""
+        return _page(topic, view_filtered, view_all, n_all - n_shown)
 
 
 def _sentiment_section(series: list[WeekSentiment]) -> str:
@@ -610,36 +622,13 @@ def _sentiment_section(series: list[WeekSentiment]) -> str:
             f' · LLM-scored</p>\n{svg}')
 
 
-def _hidden_section(hidden: list[tuple[Post, float | None, str | None]]) -> str:
-    """A no-JS <details> that reveals the posts the relevance filter judged
-    off-topic, each tagged with the model's confidence + reason — the on-page
-    counterpart to ``--min-confidence``, so a reader can audit what was hidden."""
-    if not hidden:
-        return ""
-    items = "".join(
-        f"<li><a href='https://reddit.com/comments/{p.post_id}'>"
-        f"{_trunc(p.title or '(untitled)')}</a> "
-        f"<span class='muted'>r/{html.escape(p.subreddit_name)} · flagged off-topic"
-        + (f" · {round((conf or 0) * 100)}% conf" if conf is not None else "")
-        + (f" · “{html.escape(reason)}”" if reason else "")
-        + "</span></li>"
-        for p, conf, reason in hidden)
-    n = len(hidden)
-    return (f'\n<details class="hidden-off"><summary>Show {n:,} off-topic '
-            f'match{"es" if n != 1 else ""} the relevance filter hid</summary>'
-            f'<p class="muted">judged off-topic by the LLM filter — kept in the '
-            f'archive, just not counted above</p><ul>{items}</ul></details>')
-
-
-def _render(topic: Topic, posts: list[Post], comments: list[Comment],
-            summary: TopicSummary | None = None,
-            sentiment_section: str = "", themes_html: str = "",
-            brands_html: str = "", complaints_html: str = "",
-            use_cases_html: str = "",
-            hidden: list[tuple[Post, float | None, str | None]] | None = None) -> str:
+def _view(topic: Topic, posts: list[Post], comments: list[Comment],
+          summary: TopicSummary | None, sentiment_section: str, themes_html: str,
+          brands_html: str, complaints_html: str, use_cases_html: str) -> str:
+    """Everything from the headline counts down, computed for one post set — so the
+    same body renders twice (relevant-only and all-matched) for the toggle to swap."""
     subs = Counter(p.subreddit_name for p in posts)
     net = len(topic.subreddit_list)
-    keywords = ", ".join(topic.keyword_list)
     ts = [p.created_utc for p in posts]
     span = f"{_date(min(ts))} – {_date(max(ts))}" if ts else "—"
     n_comments = len(comments) or sum(p.num_comments for p in posts)
@@ -656,21 +645,14 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
     )
     sub_groups = _by(posts, lambda p: p.subreddit_name)
     sub_rows = _ranked(subs, constants.TOP_SUBREDDITS)
-
-    infl = _influential(posts, comments)
     infl_html = _influence_drill(
-        infl, _by(posts, lambda p: p.author_username),
+        _influential(posts, comments), _by(posts, lambda p: p.author_username),
         _by(comments, lambda c: c.author_username))
-
-    domain_groups = _by(posts, _host)
     domain_rows = _ranked(_link_domains(posts), constants.TOP_DOMAINS)
-    domains = _drill(domain_rows, domain_groups) if domain_rows else ""
-
+    domains = _drill(domain_rows, _by(posts, _host)) if domain_rows else ""
     score = sum(p.score for p in posts) + sum(c.score for c in comments)
-    body = f"""<h1>{html.escape(topic.name)}</h1>
-<p class="muted">{html.escape(keywords)!r} · last {topic.days} days · {span}</p>
-<p>{len(posts):,} posts · {score:,} score ·
-{n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched</p>
+    return f"""<p>{len(posts):,} posts · {score:,} score ·
+{n_comments:,} {comment_label} · {len(subs):,}/{net:,} subreddits matched · {span}</p>
 {_summary_section(summary) if summary else ""}
 <h2>Posts per day</h2>
 {_day_chart(_daily(posts))}
@@ -690,5 +672,24 @@ def _render(topic: Topic, posts: list[Post], comments: list[Comment],
 <h2>Links</h2>
 {domains or '<div class="muted">no external links</div>'}
 <h2>Top posts</h2>
-<table>{top_rows}</table>{_hidden_section(hidden or [])}"""
+<table>{top_rows}</table>"""
+
+
+def _page(topic: Topic, view_filtered: str, view_all: str, n_hidden: int) -> str:
+    """Wrap one or two views in the shell. With hidden off-topic matches, a
+    checkbox near the top swaps the WHOLE page between the filtered view and the
+    show-all view (CSS-only, no JS — matches the rest of the page)."""
+    keywords = ", ".join(topic.keyword_list)
+    header = (f"<h1>{html.escape(topic.name)}</h1>\n"
+              f'<p class="muted">{html.escape(keywords)!r} · last {topic.days} days</p>')
+    if not n_hidden:
+        return _html_shell(topic.name, f"{header}\n{view_filtered}")
+    es = "es" if n_hidden != 1 else ""
+    body = (f"{header}\n"
+            f'<input type="checkbox" id="show-off" class="reltoggle-cb">'
+            f'<label for="show-off" class="reltoggle">include {n_hidden:,} off-topic '
+            f'match{es} the relevance filter hid <span class="muted">— recomputes '
+            f"the whole page</span></label>\n"
+            f'<div class="view view-filtered">{view_filtered}</div>'
+            f'<div class="view view-all">{view_all}</div>')
     return _html_shell(topic.name, body)
