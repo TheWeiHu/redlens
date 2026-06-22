@@ -68,10 +68,13 @@ details[open] > summary .bar {{ background: #faf3f0; }}
 details ul {{ margin: .2rem 0 .6rem 1rem; padding: 0; }}
 details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
 .muted {{ color: #888; font-size: .85rem; }}
-.cfslide {{ margin: 0 0 1.3rem; padding: .5rem .8rem; border: 1px solid #eee;
-  border-radius: 8px; font-size: .85rem; color: #555; }}
-.cfslide input[type=range] {{ vertical-align: middle; width: 240px; accent-color: {_A}; }}
-.cfslide output {{ color: {_A}; font-weight: 600; }}
+.cfslide {{ margin: .2rem 0 1.4rem; padding: .7rem .9rem; border: 1px solid #eee;
+  border-radius: 10px; background: #fafafa; }}
+.cfslide-top {{ font-size: .9rem; color: #555; margin-bottom: .55rem; }}
+.cfslide-top output {{ color: {_A}; font-weight: 600; }}
+.cfslide-track {{ display: flex; align-items: center; gap: .7rem; }}
+.cfslide-track input[type=range] {{ flex: 1; accent-color: {_A}; }}
+.cfend {{ font-size: .72rem; color: #999; white-space: nowrap; }}
 svg {{ width: 100%; height: auto; }}
 svg rect, svg circle {{ fill: {_A}; }}
 svg rect.pos {{ fill: #2e8b57; }} svg rect.neg {{ fill: {_A}; }}
@@ -693,20 +696,28 @@ def _slider_page(topic: Topic, views: list[str], counts: list[int],
     draggable range input can't drive sibling visibility in CSS alone. The model's
     confidence is coarse (see docs/relevance-filter.md), so the slider snaps to the
     few breakpoints where the visible set actually changes."""
+    # views are ordered loosest→strictest (most posts → fewest). The strictest
+    # (relevant-only) view is the default, shown on the RIGHT of the slider.
+    total = max(counts)
     view_divs = "".join(
-        f'<div class="cfview"{"" if i == 0 else " hidden"}>{v}</div>'
-        for i, v in enumerate(views))
+        f'<div class="cfview"{" hidden" if n != min(counts) else ""}>{v}</div>'
+        for v, n in zip(views, counts, strict=True))
     slider = (
-        '<div class="cfslide"><label for="cf">relevance filter — hide off-topic '
-        'the model was at least</label> <input type="range" id="cf" min="0" max="100" '
-        'step="1" value="0"> <output id="cflab"></output></div>')
+        '<div class="cfslide"><div class="cfslide-top"><b>Relevance filter</b> · '
+        '<output id="cflab"></output></div><div class="cfslide-track">'
+        '<span class="cfend">all matches</span>'
+        '<input type="range" id="cf" min="0" max="100" step="1" value="100">'
+        '<span class="cfend">relevant only</span></div></div>')
     js = (
         "<script>(function(){"
-        f"var bp={breakpoints},counts={counts};"
+        f"var bp={breakpoints},counts={counts},total={total};"
         "var s=document.getElementById('cf'),lab=document.getElementById('cflab'),"
         "views=document.querySelectorAll('.cfview');"
-        "function u(){var v=+s.value,i=bp.filter(function(b){return b<v;}).length;"
+        # slider right = strict: invert v so higher = hide more (fewer posts shown)
+        "function u(){var v=+s.value,i=bp.filter(function(b){return b<(100-v);}).length;"
         "views.forEach(function(el,k){el.hidden=k!==i;});"
-        "lab.textContent=v+'% sure · '+counts[i].toLocaleString()+' posts shown';}"
+        "var shown=counts[i],hid=total-shown;"
+        "lab.textContent=shown.toLocaleString()+' posts'+(hid?' · '+hid+"
+        "' off-topic hidden':' · showing all');}"
         "s.addEventListener('input',u);u();})();</script>")
     return _html_shell(topic.name, f"{_header(topic)}\n{slider}{view_divs}{js}")
