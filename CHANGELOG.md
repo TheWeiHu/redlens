@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Projects: isolated databases per client.** A global `--project NAME` flag
+  (or `REDLENS_PROJECT`) gives each client a self-contained
+  `projects/<name>/{redlens.db, config.toml, reports/}` directory, so two
+  clients never share a database. With no project selected, paths are exactly the
+  previous top-level defaults — fully opt-in and back-compatible. Explicit
+  `--db`/`REDLENS_DB`/`REDLENS_CONFIG` still win; the env LLM key
+  (`OPENAI_API_KEY`/`REDLENS_LLM_API_KEY`) serves every project, while a key in a
+  config file is project-scoped. `redlens doctor` shows the active project
+  (`config.active_project()` / `config.project_dir()`).
 - **Top complaints & use cases.** With `page --summary`, two new sections
   surface the recurring problems people raise and what they use the topic for.
   Same recognize-then-count split as the brands section

@@ -22,6 +22,12 @@ everything works with no config at all. Recognized so far:
 
 The LLM key can also come from the environment, which always wins over the
 file: ``REDLENS_LLM_API_KEY`` (falling back to ``OPENAI_API_KEY``).
+
+``--project NAME`` (or ``REDLENS_PROJECT``) moves the db, config, and reports
+into a self-contained ``projects/<NAME>/`` dir, isolating one client's data. No
+project = the defaults above, unchanged. The explicit overrides still win. The
+env LLM key is environment-wide so it serves every project; a key saved in a
+config file is scoped to that project's config.
 """
 from __future__ import annotations
 
@@ -37,26 +43,63 @@ from redlens.errors import MissingKey, RedlensError
 APP_NAME = "redlens"
 
 
+def _validate_project_name(name: str) -> str:
+    """A project name becomes a directory under ``projects/``, so it must be a
+    single safe path segment. Reject separators, parent refs, and dotfiles."""
+    cleaned = name.strip()
+    if (not cleaned or cleaned.startswith(".") or "/" in cleaned
+            or "\\" in cleaned or os.sep in cleaned
+            or (os.altsep and os.altsep in cleaned)):
+        raise RedlensError(
+            f"invalid project name {name!r}: use a single path segment "
+            "(no slashes, no '..', no leading dot)")
+    return cleaned
+
+
+def active_project() -> str | None:
+    """The selected project (from ``--project``, surfaced as ``REDLENS_PROJECT``),
+    or ``None`` for the default top-level location. Validated — it names a dir."""
+    raw = os.environ.get("REDLENS_PROJECT")
+    if raw is None or not raw.strip():
+        return None
+    return _validate_project_name(raw)
+
+
+def project_dir(name: str) -> Path:
+    """The self-contained directory for a project — its own ``config.toml``,
+    ``redlens.db``, and ``reports/`` all live here."""
+    return Path(user_data_dir(APP_NAME)) / "projects" / _validate_project_name(name)
+
+
 def config_path() -> Path:
+    """The active config file. An explicit ``REDLENS_CONFIG`` always wins; a
+    selected project otherwise repoints this into its own directory."""
     env = os.environ.get("REDLENS_CONFIG")
     if env:
         return Path(env).expanduser()
+    project = active_project()
+    if project:
+        return project_dir(project) / "config.toml"
     return Path(user_config_dir(APP_NAME)) / "config.toml"
 
 
 def default_db_path() -> Path:
+    project = active_project()
+    if project:
+        return project_dir(project) / "redlens.db"
     return Path(user_data_dir(APP_NAME)) / "redlens.db"
 
 
 def default_report_dir() -> Path:
     """Where ``page --all`` writes the index plus per-topic pages by default —
-    a ``reports`` folder under the per-user data dir, kept apart from the DB."""
-    return Path(user_data_dir(APP_NAME)) / "reports"
+    a ``reports`` folder under the per-user data dir (or the project's dir),
+    kept apart from the DB."""
+    project = active_project()
+    base = project_dir(project) if project else Path(user_data_dir(APP_NAME))
+    return base / "reports"
 
 
-def load_config() -> dict[str, Any]:
-    """The parsed config file, or {} if there is none."""
-    path = config_path()
+def _load_toml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
@@ -64,6 +107,11 @@ def load_config() -> dict[str, Any]:
             return tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         raise RedlensError(f"bad config {path}: {exc}") from exc
+
+
+def load_config() -> dict[str, Any]:
+    """The parsed active config file (the project's, if one is selected), or {}."""
+    return _load_toml(config_path())
 
 
 def resolve_db_source(flag: str | None = None) -> tuple[Path, str]:
@@ -120,7 +168,9 @@ def save_config(updates: dict[str, dict[str, Any]]) -> Path:
 
 
 def llm_api_key() -> str | None:
-    """API key for AI summaries, from env or the config file."""
+    """API key for AI summaries, from env or the active config file. The env key
+    (``REDLENS_LLM_API_KEY`` / ``OPENAI_API_KEY``) is environment-wide, so it
+    serves every project; a key saved in a config file is scoped to that config."""
     for var in ("REDLENS_LLM_API_KEY", "OPENAI_API_KEY"):
         if os.environ.get(var):
             return os.environ[var]

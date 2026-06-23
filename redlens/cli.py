@@ -322,6 +322,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"redlens {__version__}")
     p.add_argument("--db", default=None, help="SQLite file (default: REDLENS_DB, "
                    "config.toml, or the per-user data dir)")
+    p.add_argument("--project", default=None, metavar="NAME",
+                   help="isolate a client: db, config, and reports move into a "
+                   "self-contained projects/NAME/ dir (or set REDLENS_PROJECT)")
     # metavar keeps the hidden verbs (the `analytics` deprecation alias and the
     # `__complete` helper, both registered without help=) out of the usage
     # line's {choices} brace; they're already absent from the command list.
@@ -464,6 +467,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     p = build_parser()
     args = p.parse_args(argv)
+
+    # A selected project repoints the db/config/reports into its own directory.
+    # Collapse the flag into the env var config.active_project() reads, so every
+    # config lookup — including the early-returning setup/doctor/completions
+    # branches below — sees it without threading a parameter through each one.
+    if args.project:
+        os.environ["REDLENS_PROJECT"] = args.project
 
     try:
         if args.verb == "completions":

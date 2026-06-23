@@ -34,9 +34,11 @@ from urllib.parse import urlparse
 
 from redlens.arctic import UA
 from redlens.config import (
+    active_project,
     config_path,
     llm_api_key,
     load_config,
+    project_dir,
     resolve_db_source,
 )
 from redlens.constants import ARCTIC_BASE, DOCTOR_PROBE_TIMEOUT_S, LLM_API_URL
@@ -74,6 +76,18 @@ def _resolve(db_flag: str | None) -> tuple[Path, str] | None:
         return resolve_db_source(db_flag)
     except RedlensError:
         return None
+
+
+def _check_project() -> Check:
+    """Which client project is active (``--project`` / ``REDLENS_PROJECT``), if
+    any. Shown first because it explains where every other path resolves to."""
+    try:
+        project = active_project()
+    except RedlensError as exc:
+        return Check("project", "fail", str(exc))
+    if project is None:
+        return Check("project", "skip", "none — default (top-level) location")
+    return Check("project", "ok", f"{project} → {project_dir(project)}")
 
 
 def _check_database(db_flag: str | None) -> Check:
@@ -185,6 +199,7 @@ def run_checks(db_flag: str | None = None, *, no_network: bool = False) -> list[
         if no_network else _check_arctic()
     )
     return [
+        _check_project(),
         _check_database(db_flag),
         _check_schema(db_flag),
         _check_config(),

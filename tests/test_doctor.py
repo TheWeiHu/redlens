@@ -18,6 +18,7 @@ _REAL_CHECK_ARCTIC = doctor._check_arctic
 def isolate_and_offline(monkeypatch, tmp_path):
     """Point config/DB at the tmp dir and stub the network probe to reachable."""
     monkeypatch.delenv("REDLENS_DB", raising=False)
+    monkeypatch.delenv("REDLENS_PROJECT", raising=False)
     monkeypatch.delenv("REDLENS_LLM_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("REDLENS_CONFIG", str(tmp_path / "absent.toml"))
@@ -28,6 +29,18 @@ def isolate_and_offline(monkeypatch, tmp_path):
 
 def _by_name(checks: list[doctor.Check]) -> dict[str, doctor.Check]:
     return {c.name: c for c in checks}
+
+
+def test_project_check_skips_by_default():
+    checks = _by_name(doctor.run_checks(no_network=True))
+    assert checks["project"].status == "skip"
+
+
+def test_project_check_shows_active(monkeypatch):
+    monkeypatch.setenv("REDLENS_PROJECT", "acme")
+    checks = _by_name(doctor.run_checks(no_network=True))
+    assert checks["project"].status == "ok"
+    assert "acme" in checks["project"].detail
 
 
 def test_fresh_env_passes(monkeypatch, tmp_path):
@@ -135,7 +148,8 @@ def test_json_output_is_scriptable(monkeypatch, tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     names = {c["name"] for c in payload["checks"]}
-    assert names == {"database", "schema", "config file", "arctic-shift", "LLM key"}
+    assert names == {"project", "database", "schema", "config file",
+                     "arctic-shift", "LLM key"}
 
 
 def test_loose_config_perms_warn_on_posix(monkeypatch, tmp_path):

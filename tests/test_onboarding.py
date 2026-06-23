@@ -9,6 +9,7 @@ from redlens import config, onboarding
 @pytest.fixture(autouse=True)
 def isolate_config(monkeypatch, tmp_path):
     monkeypatch.delenv("REDLENS_DB", raising=False)
+    monkeypatch.delenv("REDLENS_PROJECT", raising=False)
     for var in ("REDLENS_LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("REDLENS_CONFIG", str(tmp_path / "config.toml"))
@@ -47,6 +48,26 @@ def test_llm_key_prefers_env(monkeypatch):
 
 def test_llm_key_none_when_unset():
     assert config.llm_api_key() is None
+
+
+def test_env_llm_key_serves_every_project(monkeypatch, tmp_path):
+    # The env key is environment-wide, so a project with no key of its own still
+    # gets it — the simple, recommended way to share one key across clients.
+    proj = tmp_path / "proj.toml"
+    proj.write_text('[storage]\ndb = "x.db"\n')  # exists, but no key
+    monkeypatch.setattr(config, "config_path", lambda: proj)
+    monkeypatch.setenv("REDLENS_PROJECT", "acme")
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    assert config.llm_api_key() == "env-key"
+
+
+def test_project_config_key_is_used(monkeypatch, tmp_path):
+    # A key saved in the active project's config is scoped to that project.
+    proj = tmp_path / "proj.toml"
+    proj.write_text('[llm]\napi_key = "project"\n')
+    monkeypatch.setattr(config, "config_path", lambda: proj)
+    monkeypatch.setenv("REDLENS_PROJECT", "acme")
+    assert config.llm_api_key() == "project"
 
 
 def test_wizard_saves_llm_key(monkeypatch):

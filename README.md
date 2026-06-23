@@ -127,6 +127,19 @@ Everything lands in one SQLite file you own, created automatically on first use
 in your per-user data directory. Point elsewhere with the `--db` flag,
 `REDLENS_DB`, or `[storage] db` in the config file — see [DESIGN.md](DESIGN.md).
 
+## Projects (keep clients separate)
+
+Add `--project NAME` (or `export REDLENS_PROJECT=acme`) to give each client an
+isolated `projects/<name>/{redlens.db, config.toml, reports/}` — so two clients
+never share a database. With no project, redlens uses the single top-level DB as
+before. Keep your LLM key in `OPENAI_API_KEY`/`REDLENS_LLM_API_KEY` to share it
+across every project; a key saved in a config file is scoped to that project.
+
+```bash
+redlens --project acme   track "dua lipa"   # → projects/acme/redlens.db
+redlens --project globex sync someuser       # → projects/globex/redlens.db
+```
+
 ## Explore
 
 Browse the database in your browser — tables and row counts, schema, sortable
