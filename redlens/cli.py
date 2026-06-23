@@ -28,14 +28,14 @@ from redlens.ingest import sync_user
 from redlens.models import Brand, Category, Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
 from redlens.reporting.page import render_all, render_topic_page, slug
-from redlens.sentiment import WeekSentiment
+from redlens.sentiment import DaySentiment
 from redlens.summarize import (
+    daily_topic_sentiment,
     extract_categories,
     identify_brands,
     label_themes,
     summarize_topic,
     summarize_user,
-    weekly_topic_sentiment,
 )
 from redlens.topics import (
     SubredditCandidate,
@@ -583,9 +583,9 @@ def main(argv: list[str] | None = None) -> int:
                 return _section(t, "AI summary",
                                 lambda s: summarize_topic(s, t, depth=args.depth))
 
-            def _sentiment(t: str) -> list[WeekSentiment] | None:
+            def _sentiment(t: str) -> list[DaySentiment] | None:
                 return _section(t, "sentiment trend",
-                                lambda s: weekly_topic_sentiment(s, t))
+                                lambda s: daily_topic_sentiment(s, t))
 
             def _brands(t: str) -> list[Brand] | None:
                 return _section(t, "brands", lambda s: identify_brands(s, t))
@@ -637,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.topic:
                 html_doc = render_topic_page(
                     engine, args.topic, summary=_summary(args.topic),
-                    sentiment_weeks=_sentiment(args.topic),
+                    sentiment_days=_sentiment(args.topic),
                     theme_labeler=_label_themes if args.summary else None,
                     brands=_brands(args.topic),
                     complaints=_categories(args.topic, "complaints"),
