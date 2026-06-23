@@ -34,7 +34,7 @@ from redlens.models import (
     TopicSummary,
 )
 from redlens.reporting import lda
-from redlens.sentiment import WeekSentiment
+from redlens.sentiment import DaySentiment
 from redlens.topics import (
     list_topics,
     require_topic,
@@ -183,38 +183,38 @@ def _day_chart(series: list[tuple[str, int]]) -> str:
             f'{series[-1][0]}</text></svg>')
 
 
-def _sentiment_chart(series: list[WeekSentiment]) -> str:
-    """Inline-SVG diverging bar chart of weekly sentiment in [-1, 1]: bars rise
-    (green) above a neutral baseline for positive weeks and fall (red) below for
-    negative ones, height ~ magnitude; hover for the week's score and post
-    count. Unscored weeks (``mean is None`` — gaps or weeks the model left out)
-    draw no bar. Returns '' when no week carries a non-zero score."""
-    scored = [w for w in series if w.mean is not None]
-    if not scored or all(w.mean == 0.0 for w in scored):
+def _sentiment_chart(series: list[DaySentiment]) -> str:
+    """Inline-SVG diverging bar chart of daily sentiment in [-1, 1]: bars rise
+    (green) above a neutral baseline for positive days and fall (red) below for
+    negative ones, height ~ magnitude; hover for the day's score and post
+    count. Unscored days (``mean is None`` — gaps or days the model left out)
+    draw no bar. Returns '' when no day carries a non-zero score."""
+    scored = [d for d in series if d.mean is not None]
+    if not scored or all(d.mean == 0.0 for d in scored):
         return ""
     width, half, pad = 600.0, 38.0, 14.0
     center, total_h = half, half * 2
     bw = width / len(series)
     bars = []
-    for i, wk in enumerate(series):
-        if wk.mean is None:
+    for i, dy in enumerate(series):
+        if dy.mean is None:
             continue
-        bh = abs(wk.mean) * half
-        y = center - bh if wk.mean >= 0 else center
-        cls = "pos" if wk.mean >= 0 else "neg"
-        sign = "+" if wk.mean >= 0 else ""
-        counts = f"{wk.posts:,} posts" + (
-            f", {wk.comments:,} comments" if wk.comments else "")
+        bh = abs(dy.mean) * half
+        y = center - bh if dy.mean >= 0 else center
+        cls = "pos" if dy.mean >= 0 else "neg"
+        sign = "+" if dy.mean >= 0 else ""
+        counts = f"{dy.posts:,} posts" + (
+            f", {dy.comments:,} comments" if dy.comments else "")
         bars.append(
             f'<rect class="{cls}" x="{i * bw:.1f}" y="{y:.1f}" '
             f'width="{max(bw - 0.5, 0.4):.1f}" height="{max(bh, 0.6):.1f}">'
-            f"<title>{wk.week}: {sign}{wk.mean:.2f} · {counts}</title></rect>"
+            f"<title>{dy.day}: {sign}{dy.mean:.2f} · {counts}</title></rect>"
         )
     baseline = (f'<line x1="0" y1="{center:.1f}" x2="{width:.0f}" '
                 f'y2="{center:.1f}" stroke="#ccc" stroke-width="0.5"/>')
-    labels = (f'<text x="0" y="{total_h + pad - 2:.0f}">{series[0].week}</text>'
+    labels = (f'<text x="0" y="{total_h + pad - 2:.0f}">{series[0].day}</text>'
               f'<text x="{width:.0f}" y="{total_h + pad - 2:.0f}" '
-              f'text-anchor="end">{series[-1].week}</text>')
+              f'text-anchor="end">{series[-1].day}</text>')
     return (f'<svg viewBox="0 0 {width:.0f} {total_h + pad:.0f}">'
             f'{baseline}{"".join(bars)}{labels}</svg>')
 
@@ -484,7 +484,7 @@ def _html_shell(title: str, body: str) -> str:
 
 def render_all(engine: Engine, out_dir: Path,
                summarize: Callable[[str], TopicSummary | None] | None = None,
-               sentiment: Callable[[str], list[WeekSentiment] | None] | None = None,
+               sentiment: Callable[[str], list[DaySentiment] | None] | None = None,
                theme_labeler: Callable[[str, list[list[str]]], list[str]] | None = None,
                brands: Callable[[str], list[Brand] | None] | None = None,
                complaints: Callable[[str], list[Category] | None] | None = None,
@@ -516,12 +516,12 @@ def render_all(engine: Engine, out_dir: Path,
             results.append(PageResult(listing.name, s, 0, written=False))
             continue
         summary = summarize(listing.name) if summarize else None
-        weeks = sentiment(listing.name) if sentiment else None
+        days = sentiment(listing.name) if sentiment else None
         found_brands = brands(listing.name) if brands else None
         found_complaints = complaints(listing.name) if complaints else None
         found_uses = use_cases(listing.name) if use_cases else None
         doc = render_topic_page(engine, listing.name, summary=summary,
-                                sentiment_weeks=weeks, theme_labeler=theme_labeler,
+                                sentiment_days=days, theme_labeler=theme_labeler,
                                 brands=found_brands, complaints=found_complaints,
                                 use_cases=found_uses)
         (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
@@ -557,7 +557,7 @@ def render_index(results: list[PageResult]) -> str:
 
 def render_topic_page(engine: Engine, name: str,
                       summary: TopicSummary | None = None,
-                      sentiment_weeks: list[WeekSentiment] | None = None,
+                      sentiment_days: list[DaySentiment] | None = None,
                       theme_labeler: Callable[[str, list[list[str]]], list[str]]
                       | None = None,
                       brands: list[Brand] | None = None,
@@ -565,8 +565,8 @@ def render_topic_page(engine: Engine, name: str,
                       use_cases: list[Category] | None = None,
                       min_confidence: float = 0.0) -> str:
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
-    optional — when given, an AI-narrative section is added. ``sentiment_weeks``
-    (from ``weekly_topic_sentiment``) is the LLM-scored sentiment trend; when
+    optional — when given, an AI-narrative section is added. ``sentiment_days``
+    (from ``daily_topic_sentiment``) is the LLM-scored sentiment trend; when
     omitted the page shows no sentiment chart. ``theme_labeler`` (from
     ``label_themes``) turns each LDA keyword cluster into a readable label; when
     omitted the themes show keywords only. The page stays fully keyless without
@@ -578,7 +578,7 @@ def render_topic_page(engine: Engine, name: str,
             # post_id tie-break keeps the rendered page byte-deterministic
             posts = topic_posts(session, topic.name, min_conf)
             comments = topic_comments(session, topic.name, min_conf)
-            section = _sentiment_section(sentiment_weeks) if sentiment_weeks else ""
+            section = _sentiment_section(sentiment_days) if sentiment_days else ""
             themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
             labels = (theme_labeler(topic.name, [words for _, words in themes])
                       if theme_labeler and themes and label_themes else None)
@@ -616,15 +616,15 @@ def render_topic_page(engine: Engine, name: str,
                             [round(c * 100) for c in confs])
 
 
-def _sentiment_section(series: list[WeekSentiment]) -> str:
+def _sentiment_section(series: list[DaySentiment]) -> str:
     """The 'Sentiment over time' heading + caption + chart, or '' when there's
     nothing to chart. The series is always LLM-scored (see
-    ``weekly_topic_sentiment``)."""
+    ``daily_topic_sentiment``)."""
     svg = _sentiment_chart(series)
     if not svg:
         return ""
     return ('<h2>Sentiment over time</h2>\n'
-            '<p class="muted">weekly sentiment, −1 (negative) to +1 (positive)'
+            '<p class="muted">daily sentiment, −1 (negative) to +1 (positive)'
             f' · LLM-scored</p>\n{svg}')
 
 

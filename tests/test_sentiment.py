@@ -1,29 +1,28 @@
-"""Sentiment-over-time chart rendering + the ISO-week helper. Sentiment scoring
-itself is LLM-based (see tests/test_summarize.py); this covers the keyless
-plumbing the page shares."""
+"""Sentiment-over-time chart rendering + the calendar-day helper. Sentiment
+scoring itself is LLM-based (see tests/test_summarize.py); this covers the
+keyless plumbing the page shares."""
 from datetime import UTC, datetime
 
 from redlens.reporting.page import _sentiment_chart
-from redlens.sentiment import WeekSentiment, _week_start
+from redlens.sentiment import DaySentiment, _day_start
 
 
-def test_week_start_is_the_monday_utc():
-    # 2024-01-03 is a Wednesday -> its ISO week starts Mon 2024-01-01.
+def test_day_start_is_the_calendar_day_utc():
     ts = int(datetime(2024, 1, 3, 12, 0, tzinfo=UTC).timestamp())
-    assert _week_start(ts) == "2024-01-01"
+    assert _day_start(ts) == "2024-01-03"
 
 
 def test_sentiment_chart_renders_both_polarities():
     series = [
-        WeekSentiment("2024-01-01", 0.5, 3, 3),
-        WeekSentiment("2024-01-08", -0.4, 2, 2),
+        DaySentiment("2024-01-01", 0.5, 3, 3),
+        DaySentiment("2024-01-02", -0.4, 2, 2),
     ]
     svg = _sentiment_chart(series)
     assert svg.startswith("<svg") and 'class="pos"' in svg and 'class="neg"' in svg
-    assert "+0.50 · 3 posts" in svg and "2024-01-08" in svg
+    assert "+0.50 · 3 posts" in svg and "2024-01-02" in svg
 
 
 def test_sentiment_chart_empty_when_no_signal():
     assert _sentiment_chart([]) == ""
-    # posts present but every week neutral -> nothing to show
-    assert _sentiment_chart([WeekSentiment("2024-01-01", 0.0, 0, 5)]) == ""
+    # posts present but every day neutral -> nothing to show
+    assert _sentiment_chart([DaySentiment("2024-01-01", 0.0, 0, 5)]) == ""
