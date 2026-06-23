@@ -217,25 +217,26 @@ def test_topic_representative_payload_and_structured_summary(
     assert "DEFINING ARGUMENT about policy tradeoffs" in data  # top-voted comment
 
 
-def test_weekly_topic_sentiment_no_key_raises(topic_db):
+def test_daily_topic_sentiment_no_key_raises(topic_db):
     from redlens.errors import MissingKey
-    from redlens.summarize import weekly_topic_sentiment
+    from redlens.summarize import daily_topic_sentiment
     with Session(connect(str(topic_db))) as s, pytest.raises(MissingKey):
-        weekly_topic_sentiment(s, "climate")
+        daily_topic_sentiment(s, "climate")
 
 
-def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
-    """Posts are bucketed by week, the week's titles are handed to the model,
-    and the returned -100..100 scores map to [-1,1] with gaps zero-filled."""
+def test_daily_topic_sentiment_buckets_llm_scores(db, monkeypatch):
+    """Posts are bucketed by calendar day, the day's titles are handed to the
+    model, and the returned -100..100 scores map to [-1,1] with gaps
+    zero-filled."""
     from datetime import UTC, datetime
 
-    from redlens.sentiment import _week_start
-    from redlens.summarize import weekly_topic_sentiment
+    from redlens.sentiment import _day_start
+    from redlens.summarize import daily_topic_sentiment
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    t1 = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())   # week Mon 2024-01-01
-    t2 = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())  # week Mon 2024-01-15
-    w1, w2 = _week_start(t1), _week_start(t2)
+    t1 = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())   # day 2024-01-03
+    t2 = int(datetime(2024, 1, 5, tzinfo=UTC).timestamp())   # day 2024-01-05
+    d1, d2 = _day_start(t1), _day_start(t2)
     with Session(connect(str(db))) as s:
         topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
                       subreddits=json.dumps(["vpn"]), last_tracked_at=t2)
@@ -249,7 +250,7 @@ def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
         ]
         upsert(s, posts)
         upsert(s, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
-        # a comment under post "a" (bridged by link_id == post_id), week 1
+        # a comment under post "a" (bridged by link_id == post_id), day 1
         upsert(s, [Comment(comment_id="c1", author_username="z",
                            subreddit_name="vpn", link_id="a", parent_id=None,
                            created_utc=t1, score=7, body="totally agree, love it")])
@@ -259,24 +260,24 @@ def test_weekly_topic_sentiment_buckets_llm_scores(db, monkeypatch):
 
     def fake_complete(prompt, key, **kwargs):
         seen["prompt"] = prompt
-        return json.dumps({"weeks": [{"week": w1, "score": 80},
-                                     {"week": w2, "score": -60}]})
+        return json.dumps({"days": [{"day": d1, "score": 80},
+                                    {"day": d2, "score": -60}]})
 
     monkeypatch.setattr(llm, "complete", fake_complete)
     with Session(connect(str(db))) as s:
-        weeks = weekly_topic_sentiment(s, "vpn")
+        days = daily_topic_sentiment(s, "vpn")
 
-    assert [w.week for w in weeks] == ["2024-01-01", "2024-01-08", "2024-01-15"]
-    assert weeks[0].mean == 0.8 and weeks[0].posts == 1 and weeks[0].comments == 1
-    assert weeks[1].posts == 0 and weeks[1].mean is None     # gap -> unscored, not 0.0
-    assert weeks[2].mean == -0.6 and weeks[2].posts == 1
+    assert [d.day for d in days] == ["2024-01-03", "2024-01-04", "2024-01-05"]
+    assert days[0].mean == 0.8 and days[0].posts == 1 and days[0].comments == 1
+    assert days[1].posts == 0 and days[1].mean is None      # gap -> unscored, not 0.0
+    assert days[2].mean == -0.6 and days[2].posts == 1
     # both the post titles and the comment body were handed to the model
     assert "works great" in seen["prompt"] and "keeps crashing" in seen["prompt"]
     assert "totally agree, love it" in seen["prompt"] and "comments:" in seen["prompt"]
 
 
-def _vpn_topic_with_two_weeks(db, t1, t2):
-    """Two posts in two different weeks under topic 'vpn'; returns nothing,
+def _vpn_topic_with_two_days(db, t1, t2):
+    """Two posts on two different days under topic 'vpn'; returns nothing,
     just seeds the DB. Shared by the robustness tests below."""
     with Session(connect(str(db))) as s:
         topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
@@ -294,51 +295,51 @@ def _vpn_topic_with_two_weeks(db, t1, t2):
         s.commit()
 
 
-def test_weekly_topic_sentiment_robust_to_bad_scores(db, monkeypatch):
-    """A week the model omits, or scores out-of-range / non-numeric / bool, must
+def test_daily_topic_sentiment_robust_to_bad_scores(db, monkeypatch):
+    """A day the model omits, or scores out-of-range / non-numeric / bool, must
     not be laundered into a confident 0.0 — it stays unscored (mean is None)."""
     from datetime import UTC, datetime
 
-    from redlens.sentiment import _week_start
-    from redlens.summarize import weekly_topic_sentiment
+    from redlens.sentiment import _day_start
+    from redlens.summarize import daily_topic_sentiment
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     t1 = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())
-    t2 = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())
-    w1, w2 = _week_start(t1), _week_start(t2)
-    _vpn_topic_with_two_weeks(db, t1, t2)
+    t2 = int(datetime(2024, 1, 5, tzinfo=UTC).timestamp())
+    d1, d2 = _day_start(t1), _day_start(t2)
+    _vpn_topic_with_two_days(db, t1, t2)
 
     def fake_complete(prompt, key, **kwargs):
-        # w1 scored 150 (out of range -> clamped to 1.0); w2 OMITTED entirely;
-        # plus a bool score and an invented week the code must ignore.
-        return json.dumps({"weeks": [
-            {"week": w1, "score": 150},
-            {"week": "2024-02-05", "score": 50},   # not an active week -> ignored
-            {"week": w2, "score": True},           # bool -> rejected
+        # d1 scored 150 (out of range -> clamped to 1.0); d2 OMITTED entirely;
+        # plus a bool score and an invented day the code must ignore.
+        return json.dumps({"days": [
+            {"day": d1, "score": 150},
+            {"day": "2024-02-05", "score": 50},    # not an active day -> ignored
+            {"day": d2, "score": True},            # bool -> rejected
         ]})
 
     monkeypatch.setattr(llm, "complete", fake_complete)
     with Session(connect(str(db))) as s:
-        weeks = weekly_topic_sentiment(s, "vpn")
+        days = daily_topic_sentiment(s, "vpn")
 
-    by = {w.week: w for w in weeks}
-    assert by[w1].mean == 1.0                       # 150/100 clamped to 1.0
-    assert by[w2].mean is None and by[w2].posts == 1  # omitted+bool -> unscored, NOT 0.0
-    assert "2024-02-05" not in by                   # invented week dropped
+    by = {d.day: d for d in days}
+    assert by[d1].mean == 1.0                       # 150/100 clamped to 1.0
+    assert by[d2].mean is None and by[d2].posts == 1  # omitted+bool -> unscored, NOT 0.0
+    assert "2024-02-05" not in by                   # invented day dropped
 
 
-def test_weekly_topic_sentiment_includes_comment_only_weeks(db, monkeypatch):
-    """A week with comments but no posts is shown to the model and charted, not
+def test_daily_topic_sentiment_includes_comment_only_days(db, monkeypatch):
+    """A day with comments but no posts is shown to the model and charted, not
     silently dropped or forced neutral."""
     from datetime import UTC, datetime
 
-    from redlens.sentiment import _week_start
-    from redlens.summarize import weekly_topic_sentiment
+    from redlens.sentiment import _day_start
+    from redlens.summarize import daily_topic_sentiment
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    t_post = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())    # week 2024-01-01
-    t_comment = int(datetime(2024, 1, 17, tzinfo=UTC).timestamp())  # week 2024-01-15
-    wp, wc = _week_start(t_post), _week_start(t_comment)
+    t_post = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp())     # day 2024-01-03
+    t_comment = int(datetime(2024, 1, 5, tzinfo=UTC).timestamp())  # day 2024-01-05
+    dp, dc = _day_start(t_post), _day_start(t_comment)
     with Session(connect(str(db))) as s:
         topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
                       subreddits=json.dumps(["vpn"]), last_tracked_at=t_comment)
@@ -347,7 +348,7 @@ def test_weekly_topic_sentiment_includes_comment_only_weeks(db, monkeypatch):
         upsert(s, [Post(post_id="a", author_username="x", subreddit_name="vpn",
                         created_utc=t_post, title="works great", score=5)])
         upsert(s, [TopicPost(topic_id=topic.id, post_id="a")])
-        # comment lands in a LATER week than any post (comment-only week)
+        # comment lands on a LATER day than any post (comment-only day)
         upsert(s, [Comment(comment_id="c1", author_username="z",
                            subreddit_name="vpn", link_id="a", parent_id=None,
                            created_utc=t_comment, score=7, body="this broke for me")])
@@ -357,17 +358,17 @@ def test_weekly_topic_sentiment_includes_comment_only_weeks(db, monkeypatch):
 
     def fake_complete(prompt, key, **kwargs):
         seen["prompt"] = prompt
-        return json.dumps({"weeks": [{"week": wp, "score": 40},
-                                     {"week": wc, "score": -80}]})
+        return json.dumps({"days": [{"day": dp, "score": 40},
+                                    {"day": dc, "score": -80}]})
 
     monkeypatch.setattr(llm, "complete", fake_complete)
     with Session(connect(str(db))) as s:
-        weeks = weekly_topic_sentiment(s, "vpn")
+        days = daily_topic_sentiment(s, "vpn")
 
-    by = {w.week: w for w in weeks}
-    assert wc in by                                  # comment-only week present
-    assert by[wc].posts == 0 and by[wc].comments == 1
-    assert by[wc].mean == -0.8                       # scored, not forced 0.0
+    by = {d.day: d for d in days}
+    assert dc in by                                  # comment-only day present
+    assert by[dc].posts == 0 and by[dc].comments == 1
+    assert by[dc].mean == -0.8                       # scored, not forced 0.0
     assert "this broke for me" in seen["prompt"]     # comment shown to the model
 
 

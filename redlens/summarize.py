@@ -42,7 +42,7 @@ from redlens.models import (
     TopicSummary,
     User,
 )
-from redlens.sentiment import WeekSentiment, _week_start
+from redlens.sentiment import DaySentiment, _day_start
 from redlens.topics import (
     relevant_clause,
     require_topic,
@@ -123,14 +123,14 @@ def summarize_topic(session: Session, name: str, *,
             f"LLM topic summary didn't match the expected shape: {exc}") from exc
 
 
-def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
-    """LLM-scored weekly sentiment trend for a tracked topic.
+def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
+    """LLM-scored daily sentiment trend for a tracked topic.
 
-    Buckets the topic's matched posts into UTC ISO weeks, samples each week's
-    most-engaged titles, and asks ONE LLM call to score every week from -100 to
+    Buckets the topic's matched posts into UTC calendar days, samples each day's
+    most-engaged titles, and asks ONE LLM call to score every day from -100 to
     +100 — handling the sarcasm and negation a lexicon can't ("X no longer
     works" is negative; "another amazing feature" may be sarcastic). Returns one
-    :class:`~redlens.sentiment.WeekSentiment` per week (``mean`` in [-1, 1]),
+    :class:`~redlens.sentiment.DaySentiment` per day (``mean`` in [-1, 1]),
     gaps zero-filled. Raises :class:`NotFound`/:class:`MissingKey` like
     :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
     topic = require_topic(session, name)
@@ -141,66 +141,66 @@ def weekly_topic_sentiment(session: Session, name: str) -> list[WeekSentiment]:
         return []
     comments = topic_comments(session, topic.name)
 
-    posts_by_week: dict[str, list[Post]] = defaultdict(list)
+    posts_by_day: dict[str, list[Post]] = defaultdict(list)
     for p in posts:
-        posts_by_week[_week_start(p.created_utc)].append(p)
-    comments_by_week: dict[str, list[Comment]] = defaultdict(list)
+        posts_by_day[_day_start(p.created_utc)].append(p)
+    comments_by_day: dict[str, list[Comment]] = defaultdict(list)
     for c in comments:
-        comments_by_week[_week_start(c.created_utc)].append(c)
-    # Bucket on posts AND comments: a comment-only week is real activity the
+        comments_by_day[_day_start(c.created_utc)].append(c)
+    # Bucket on posts AND comments: a comment-only day is real activity the
     # prompt is told to weigh, so it must be shown to the model and charted.
-    active_weeks = set(posts_by_week) | set(comments_by_week)
-    weeks = sorted(active_weeks)
+    active_days = set(posts_by_day) | set(comments_by_day)
+    days = sorted(active_days)
 
     def _snip(text: str) -> str:
         # Untrusted post/comment text goes into the prompt; sentiment.txt tells
         # the model to treat it as data, not instructions (defense-in-depth).
         # Residual risk is low: the output is an advisory chart and the blast
-        # radius of any slip is a single week's bar.
+        # radius of any slip is a single day's bar.
         return text.strip().replace("\n", " ")[:140]
 
     blocks = []
-    for wk in weeks:
-        wkp = sorted(posts_by_week.get(wk, []), key=lambda p: -_engagement_score(p)
-                     )[:constants.SENTIMENT_WEEK_SAMPLE]
-        wkc = sorted(comments_by_week.get(wk, []), key=lambda c: -c.score
-                     )[:constants.SENTIMENT_WEEK_SAMPLE]
-        lines = [f"Week {wk} ({len(posts_by_week.get(wk, []))} posts, "
-                 f"{len(comments_by_week.get(wk, []))} comments):", "posts:"]
-        lines += [f"- {_snip(p.title)}" for p in wkp
+    for dy in days:
+        dyp = sorted(posts_by_day.get(dy, []), key=lambda p: -_engagement_score(p)
+                     )[:constants.SENTIMENT_DAY_SAMPLE]
+        dyc = sorted(comments_by_day.get(dy, []), key=lambda c: -c.score
+                     )[:constants.SENTIMENT_DAY_SAMPLE]
+        lines = [f"Day {dy} ({len(posts_by_day.get(dy, []))} posts, "
+                 f"{len(comments_by_day.get(dy, []))} comments):", "posts:"]
+        lines += [f"- {_snip(p.title)}" for p in dyp
                   if p.title and p.title.strip()] or ["- (none)"]
-        if any(c.body and c.body.strip() for c in wkc):
+        if any(c.body and c.body.strip() for c in dyc):
             lines.append("comments:")
-            lines += [f"- {_snip(c.body)}" for c in wkc if c.body and c.body.strip()]
+            lines += [f"- {_snip(c.body)}" for c in dyc if c.body and c.body.strip()]
         blocks.append("\n".join(lines))
 
     prompt = prompts.render(
         "sentiment", topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,
-        weeks="\n\n".join(blocks))
+        days="\n\n".join(blocks))
     data = _complete_json(prompt, key)
 
-    rows = data.get("weeks")
+    rows = data.get("days")
     scores: dict[str, float] = {}
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        wk = str(row.get("week", ""))
+        dy = str(row.get("day", ""))
         val = row.get("score")
-        if (wk in active_weeks and isinstance(val, (int, float))
+        if (dy in active_days and isinstance(val, (int, float))
                 and not isinstance(val, bool)):
-            scores[wk] = max(-1.0, min(1.0, float(val) / 100.0))
+            scores[dy] = max(-1.0, min(1.0, float(val) / 100.0))
 
-    # mean is None for any week the model didn't score (or a true gap): distinct
+    # mean is None for any day the model didn't score (or a true gap): distinct
     # from a real 0.0 neutral, so the chart skips it instead of inventing one.
-    out: list[WeekSentiment] = []
-    cur, end = date.fromisoformat(weeks[0]), date.fromisoformat(weeks[-1])
+    out: list[DaySentiment] = []
+    cur, end = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
     while cur <= end:
-        wk = cur.isoformat()
-        out.append(WeekSentiment(wk, scores.get(wk),
-                                 len(posts_by_week.get(wk, [])),
-                                 len(comments_by_week.get(wk, []))))
-        cur += timedelta(days=7)
+        dy = cur.isoformat()
+        out.append(DaySentiment(dy, scores.get(dy),
+                                len(posts_by_day.get(dy, [])),
+                                len(comments_by_day.get(dy, []))))
+        cur += timedelta(days=1)
     return out
 
 
