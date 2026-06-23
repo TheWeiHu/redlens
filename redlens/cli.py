@@ -328,7 +328,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="verb", required=True, metavar="<command>")
     sub.add_parser("init", help="create or migrate the database, then exit")
     sy = sub.add_parser("sync", help="archive a user's history (incremental by default)")
-    sy.add_argument("username")
+    sy.add_argument("username", nargs="?", help="user to sync (omit with --all)")
+    sy.add_argument("--all", action="store_true", dest="all_users",
+                    help="re-sync every user already in the DB (incremental); "
+                    "one user's failure is skipped, not fatal")
     sy.add_argument("--full", action="store_true",
                     help="ignore saved cursors and re-pull the entire history")
     sh = sub.add_parser("show", help="print a user's (or --topic's) roll-up stats")
@@ -490,9 +493,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "init":
             print(f"schema applied to {db}")
         elif args.verb == "sync":
-            r = sync_user(args.username, engine, full=args.full)
-            print(f"u/{r.user.username}: "
-                  f"{r.posts_written:,} posts, {r.comments_written:,} comments")
+            if args.all_users:
+                with session(engine) as s:
+                    usernames = [row.username for row in list_users(s)]
+                if not usernames:
+                    print("no users in DB — sync one with: redlens sync <user>",
+                          file=sys.stderr)
+                total_p = total_c = 0
+                failed: list[str] = []
+                for name in usernames:
+                    try:
+                        r = sync_user(name, engine, full=args.full)
+                    except RedlensError as exc:
+                        # One vanished/erroring user must not abort the batch
+                        # (NotFound + arctic network errors are both RedlensError).
+                        failed.append(name)
+                        print(f"warning: u/{name} skipped: {exc}", file=sys.stderr)
+                        continue
+                    total_p += r.posts_written
+                    total_c += r.comments_written
+                    print(f"u/{r.user.username}: "
+                          f"{r.posts_written:,} posts, {r.comments_written:,} comments")
+                if usernames:
+                    print(f"synced {len(usernames) - len(failed)}/{len(usernames)} "
+                          f"user(s): {total_p:,} new posts, {total_c:,} new comments"
+                          + (f" ({len(failed)} skipped)" if failed else ""))
+            elif args.username:
+                r = sync_user(args.username, engine, full=args.full)
+                print(f"u/{r.user.username}: "
+                      f"{r.posts_written:,} posts, {r.comments_written:,} comments")
+            else:
+                raise RedlensError("sync: give a username or pass --all")
         elif args.verb == "track":
             subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
                     if args.subreddits else None)

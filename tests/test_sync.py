@@ -289,3 +289,73 @@ def test_sync_without_user_meta_peeks_then_archives(monkeypatch):
     assert (r.posts_written, r.comments_written) == (10, 5)
     with Session(engine) as s:
         assert s.exec(select(func.count()).select_from(Comment)).one() == 5
+
+
+# --- `sync --all`: re-sync every user already in the DB --------------------
+
+def test_sync_all_iterates_users_skips_failures_and_summarizes(
+        tmp_path, monkeypatch, capsys):
+    """`sync --all` re-syncs every user in the DB; a single user that errors
+    (NotFound / arctic network blips are both RedlensError) is skipped, not
+    fatal; a roll-up line reports how many synced."""
+    from redlens.cli import main
+    from redlens.db import upsert
+    from redlens.errors import NotFound
+    from redlens.ingest import SyncResult
+    from redlens.models import User
+
+    path = tmp_path / "all.db"
+    engine = connect(str(path))
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [User(username="alice"), User(username="bob")])
+        s.commit()
+
+    seen: list[tuple[str, bool]] = []
+
+    def fake_sync(name, _engine, *, full=False):
+        seen.append((name, full))
+        if name == "bob":
+            raise NotFound("u/bob not in arctic")
+        return SyncResult(User(username=name), 3, 5)
+
+    monkeypatch.setattr("redlens.cli.sync_user", fake_sync)
+
+    assert main(["--db", str(path), "sync", "--all"]) == 0
+    out = capsys.readouterr()
+    assert sorted(n for n, _ in seen) == ["alice", "bob"]   # both attempted
+    assert "u/alice: 3 posts, 5 comments" in out.out
+    assert "bob skipped" in out.err                         # one failure, non-fatal
+    assert "synced 1/2 user(s): 3 new posts, 5 new comments (1 skipped)" in out.out
+
+
+def test_sync_all_forwards_full_flag(tmp_path, monkeypatch):
+    from redlens.cli import main
+    from redlens.db import upsert
+    from redlens.ingest import SyncResult
+    from redlens.models import User
+
+    path = tmp_path / "full.db"
+    engine = connect(str(path))
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [User(username="alice")])
+        s.commit()
+
+    captured: dict[str, bool] = {}
+
+    def fake_sync(name, _engine, *, full=False):
+        captured["full"] = full
+        return SyncResult(User(username=name), 0, 0)
+
+    monkeypatch.setattr("redlens.cli.sync_user", fake_sync)
+    assert main(["--db", str(path), "sync", "--all", "--full"]) == 0
+    assert captured["full"] is True
+
+
+def test_sync_without_username_or_all_errors(tmp_path):
+    from redlens.cli import main
+
+    path = tmp_path / "e.db"
+    init_schema(connect(str(path)))
+    assert main(["--db", str(path), "sync"]) == 1   # RedlensError -> exit 1

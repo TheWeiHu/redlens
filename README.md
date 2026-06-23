@@ -19,6 +19,7 @@ pip install -e ".[dev]"
 
 ```bash
 redlens sync KimJongFunk              # archive a user's public history
+redlens sync --all                    # refresh every already-archived user (incremental)
 redlens show KimJongFunk              # print rollup
 redlens show KimJongFunk --json       # or as JSON
 redlens list                          # every archived user (counts, last activity)
