@@ -200,6 +200,36 @@ def test_topic_analytics_rolls_up_matched_posts(db_session):
         ("alice", 2), ("bob", 1)]
 
 
+def test_topic_analytics_folds_comment_karma_into_score(db_session):
+    # Mirrors the HTML page headline (page.py _view): total score = post karma +
+    # comment karma. Post p1 scores 100; three comments under it score 50 each.
+    _topic(db_session, "vpn", net=["vpn"],
+           posts=[_post("alice", "p1", sub="vpn", score=100)])
+    upsert(db_session, [
+        Comment(comment_id=f"c{i}", author_username="commenter",
+                subreddit_name="vpn", link_id="p1", parent_id=None,
+                created_utc=1_700_000_001, score=50)
+        for i in range(3)])
+    db_session.commit()
+    a = compute_topic_analytics(db_session, "vpn")
+    assert a.matched_posts == 1                   # comments don't inflate the post count
+    assert a.total_score == 250                   # 100 (post) + 3x50 (comments)
+
+
+def test_topic_analytics_excludes_comments_under_other_topics_posts(db_session):
+    # A comment only counts when its parent post is one of this topic's matches.
+    _topic(db_session, "ubi", net=["basicincome"],
+           posts=[_post("alice", "p1", sub="basicincome", score=5)])
+    _topic(db_session, "crypto", net=["bitcoin"],
+           posts=[_post("bob", "p2", sub="bitcoin", score=7)])
+    upsert(db_session, [
+        Comment(comment_id="c1", author_username="carol", subreddit_name="bitcoin",
+                link_id="p2", parent_id=None, created_utc=1_700_000_001, score=99)])
+    db_session.commit()
+    assert compute_topic_analytics(db_session, "ubi").total_score == 5     # no leak
+    assert compute_topic_analytics(db_session, "crypto").total_score == 106  # 7 + 99
+
+
 def test_topic_analytics_excludes_bot_authors(db_session):
     posts = [
         _post("AutoModerator", "p1", sub="basicincome"),
