@@ -8,13 +8,15 @@ history into a local SQLite DB you own, and analyze it) cleaner?"
 
 ```bash
 pip install -e ".[dev]"   # install with dev extras
-pytest                    # tests run offline; network-marked: pytest -m integration
-ruff check .              # lint
-mypy redlens              # types
+make install-hooks        # one-time: pre-push runs `make check` automatically
+make check                # the exact checks CI runs (ruff + mypy + pytest)
 ```
 
-CI runs the same three checks (`.github/workflows/ci.yml`): `pytest`, `ruff`,
-and `mypy --strict`. Keep them green. Tests are offline by default — the
+`make check` mirrors CI (`.github/workflows/ci.yml`) one-for-one: `ruff check`,
+`mypy --strict`, then `pytest -m "not integration"`. Run it before pushing —
+`make install-hooks` wires it to a `git push` pre-push hook so a red build never
+reaches GitHub (bypass with `git push --no-verify`). On `main`, the `ci-gate`
+status check must pass before a PR can merge. Tests are offline by default — the
 `integration` marker (network/arctic) is deselected unless you opt in with
 `pytest -m integration`.
 
