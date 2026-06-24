@@ -271,7 +271,15 @@ def _extract_labeled_terms(
              if p.title and p.title.strip()]
     lines += [f"- {c.body.strip().replace(chr(10), ' ')[:160]}"
               for c in top_comments if c.body and c.body.strip()]
-    prompt = prompts.render(prompt_name, topic=topic.name, sample="\n".join(lines))
+    # Pin the authoritative sense of an ambiguous topic so the brands recognizer
+    # knows what the subject IS — and therefore what counts as the subject's own
+    # products (excluded) vs a real competitor. Empty `about` → no line; brands.txt
+    # is the only prompt with an `$about` slot, so this is ignored elsewhere.
+    about = topic.about.strip()
+    about_line = (f'The subject "{topic.name}" is, authoritatively: {about}.\n'
+                  if about else "")
+    prompt = prompts.render(prompt_name, topic=topic.name, about=about_line,
+                            sample="\n".join(lines))
     data = _complete_json(prompt, key)
 
     # brands.txt returns {"brands": [...]}; complaints/use_cases return
