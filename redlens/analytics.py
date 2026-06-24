@@ -132,6 +132,18 @@ def compute_topic_analytics(session: Session, name: str) -> TopicAnalytics:
         func.count(func.distinct(Post.subreddit_name)).label("distinct_subreddits"),
     )).one()
 
+    # Fold comment karma into the headline so the CLI roll-up matches the HTML
+    # page, which sums post + comment scores (page.py ``_view``). Same comment→
+    # topic bridge and relevant filter as ``topic_comments`` — but as a SQL
+    # aggregate (the 0007 convention), so no Comment rows load into Python.
+    comment_score = session.execute(
+        select(func.coalesce(func.sum(Comment.score), 0))
+        .select_from(Comment)
+        .join(TopicPost, TopicPost.post_id == Comment.link_id)
+        .where(TopicPost.topic_id == topic.id, relevant_clause())
+    ).scalar_one()
+    total_score = row.total_score + comment_score
+
     top_subreddits = _top(col(Post.subreddit_name), constants.TOP_SUBREDDITS)
     # Drop bot/placeholder names so "top authors" reflects real voices.
     top_authors = _top(
@@ -144,7 +156,7 @@ def compute_topic_analytics(session: Session, name: str) -> TopicAnalytics:
         keywords=topic.keyword_list,
         net_size=len(topic.subreddit_list),
         matched_posts=row.matched_posts,
-        total_score=row.total_score,
+        total_score=total_score,
         distinct_subreddits=row.distinct_subreddits,
         first_post_at=row.first_post_at,
         last_post_at=row.last_post_at,
