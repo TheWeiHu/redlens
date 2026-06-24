@@ -436,6 +436,49 @@ def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
     assert "carbon tax debate heats up" in seen["prompt"]  # archive sampled
 
 
+def test_identify_brands_passes_about_to_exclude_own_products(db, monkeypatch):
+    """A topic's `about` is threaded into the brands prompt as the authoritative
+    sense, so the recognizer can tell the subject's own products from competitors;
+    the exclusion rule covers the subject's own offerings, not just its name."""
+    from redlens.summarize import identify_brands
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with Session(connect(str(db))) as s:
+        t = _seed_topic(s, name="anthropic")
+        t.about = "the AI company Anthropic"
+        s.add(t)
+        s.commit()
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"brands": []})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "anthropic")
+
+    assert "authoritatively: the AI company Anthropic" in seen["prompt"]
+    assert "own products" in seen["prompt"]   # the strengthened exclusion rule
+
+
+def test_identify_brands_omits_about_line_when_blank(topic_db, monkeypatch):
+    """With no `about`, the prompt carries no authoritative-sense line (the
+    template slot collapses) — the keyless/sparse path stays clean."""
+    from redlens.summarize import identify_brands
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"brands": []})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(topic_db))) as s:
+        identify_brands(s, "climate")
+
+    assert "authoritatively:" not in seen["prompt"]
+
+
 def test_extract_categories_parses_complaints(topic_db, monkeypatch):
     """Complaints/use-cases go through the same core, reading the 'categories'
     list and 'phrases' terms; empty phrases fall back to the name."""
