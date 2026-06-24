@@ -27,6 +27,20 @@ jobs:
       - run: mypy redlens
       - run: pytest -m "not integration"
 
+  # Single required status check for branch protection. `needs: test` collapses
+  # the 9-way matrix into one pass/fail, so the required check stays valid as the
+  # matrix grows. integration is schedule-only, so it is intentionally excluded.
+  ci-gate:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "test matrix did not pass (result=${{ needs.test.result }})"
+            exit 1
+          fi
+
   integration:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest

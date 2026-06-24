@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run the same checks CI runs, before anything leaves the machine, so a red
+# build never reaches GitHub. Bypass in a pinch with `git push --no-verify`.
+exec make check
