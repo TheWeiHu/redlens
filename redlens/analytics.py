@@ -139,7 +139,7 @@ def compute_topic_analytics(session: Session, name: str) -> TopicAnalytics:
     comment_score = session.execute(
         select(func.coalesce(func.sum(Comment.score), 0))
         .select_from(Comment)
-        .join(TopicPost, TopicPost.post_id == Comment.link_id)
+        .join(TopicPost, col(TopicPost.post_id) == col(Comment.link_id))
         .where(TopicPost.topic_id == topic.id, relevant_clause())
     ).scalar_one()
     total_score = row.total_score + comment_score
