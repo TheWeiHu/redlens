@@ -114,6 +114,15 @@ Tracking several topics? `redlens page --all` renders each one plus a small
 reports dir); topics with no matched posts yet are skipped and noted on the
 index.
 
+> **RAM floor on large topics.** `page` loads a topic's full post + comment set
+> into memory to chart it, so peak RAM scales with the matched-document count —
+> roughly **6 KB per document** (~1 GB at 180k docs). A very popular topic can
+> OOM a small VPS (a 419 MB box was killed on a ~182k-document topic; it rendered
+> fine on 16 GB). Before the heavy load, `page` estimates the peak from a cheap
+> row count and prints a one-line stderr warning when a topic is large. If you
+> hit it, render on a machine with more RAM or raise `--min-confidence` to drop
+> low-relevance posts from the page.
+
 See `redlens track --help` for every discovery source (`name`, `global`, `web`,
 `popular`, `llm`) and `--discover`, which widens the net by following the
 authors of matched posts.
