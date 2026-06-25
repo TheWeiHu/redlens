@@ -261,6 +261,27 @@ def identify_brands(session: Session, name: str) -> list[Brand]:
     return [Brand(name=n, aliases=terms) for n, terms in named]
 
 
+def pin_brands(spec: str) -> list[Brand]:
+    """Build a FIXED brand list from a user-supplied comma-separated ``spec``,
+    bypassing :func:`identify_brands` entirely — no LLM call, no key. Each name
+    is counted by itself as a whole-word alias, so the page's ``(?<!\\w)…(?!\\w)``
+    regex matches symbol-edged names (``C++``, ``.NET``) while still rejecting
+    substrings (``Go`` won't hit ``Google``). Blank entries are dropped and
+    case-insensitive duplicates collapse to their first spelling, so the result
+    is stable run-to-run. A trustworthy competitor ranking needs a fixed entity
+    list, not the recognizer's non-deterministic output (see the brand-recognition
+    notes in the llm-enrichment architecture)."""
+    out: list[Brand] = []
+    seen: set[str] = set()
+    for raw in spec.split(","):
+        name = raw.strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        out.append(Brand(name=name, aliases=[name]))
+    return out
+
+
 def extract_categories(session: Session, name: str, kind: str) -> list[Category]:
     """One LLM call to surface discussion categories — ``kind`` is
     ``"complaints"`` (recurring problems) or ``"use_cases"`` (what people use the
