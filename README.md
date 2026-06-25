@@ -39,6 +39,19 @@ redlens page  "dua lipa"   # render a standalone HTML report
 redlens page  --all        # render every topic + an index.html linking them
 ```
 
+Compare topics against each other by how much each is discussed:
+
+```bash
+redlens landscape vpn nordvpn expressvpn   # share-of-voice table
+redlens compare   --all --days 30          # every topic, last 30 days
+redlens landscape vpn nordvpn -o land.html # standalone HTML page
+```
+
+By default the window is the topics' *overlapping* date range, so a long-running
+topic and a brand new one compare fairly; `--days N` forces a common trailing
+window. Volume is comparable across topics; brand mentions are not (each topic's
+subreddit net is near-disjoint), so `landscape` compares volume, not brands.
+
 `track` builds a subreddit net (arctic has no global text search) from
 several discovery sources you pick from, plus a curating picker. Run
 `redlens track --help` for the discovery sources and flags.
