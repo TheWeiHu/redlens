@@ -73,6 +73,37 @@ def test_matched_window_clips_the_longer_topic(engine):
     assert by["vpn"].posts == 1           # the 100-day-old post is clipped out
 
 
+def test_matched_window_ends_at_earliest_last_post(engine):
+    # Regression: the overlap window must END at the earliest last-post across
+    # topics, not the global newest. vpn keeps posting after nordvpn goes quiet;
+    # those later vpn posts have no nordvpn coverage and must be excluded.
+    with Session(engine) as s:
+        _topic(s, "vpn", [("a1", "vpn", NOW - 20 * DAY),
+                          ("a2", "vpn", NOW - 10 * DAY),
+                          ("a3", "vpn", NOW)])
+        _topic(s, "nordvpn", [("b1", "nordvpn", NOW - 20 * DAY),
+                              ("b2", "nordvpn", NOW - 10 * DAY)])
+        land = compare_topics(s, ["vpn", "nordvpn"])
+
+    assert land.window_start == NOW - 20 * DAY    # latest first-post
+    assert land.window_end == NOW - 10 * DAY      # earliest last-post, not NOW
+    by = {t.name: t for t in land.topics}
+    assert by["vpn"].posts == 2        # a3 (after nordvpn went quiet) excluded
+    assert by["nordvpn"].posts == 2
+
+
+def test_disjoint_ranges_rejected_not_silently_matched(engine):
+    # Regression: fully non-overlapping ranges must raise, not produce a
+    # "matched" comparison over a window only one topic actually covers.
+    with Session(engine) as s:
+        _topic(s, "vpn", [("a1", "vpn", NOW - 100 * DAY),
+                          ("a2", "vpn", NOW - 90 * DAY)])
+        _topic(s, "nordvpn", [("b1", "nordvpn", NOW - 10 * DAY),
+                              ("b2", "nordvpn", NOW)])
+        with pytest.raises(RedlensError):
+            compare_topics(s, ["vpn", "nordvpn"])
+
+
 def test_days_flag_forces_a_common_window(engine):
     with Session(engine) as s:
         _topic(s, "vpn", [("a1", "vpn", NOW - 100 * DAY), ("a2", "vpn", NOW)])

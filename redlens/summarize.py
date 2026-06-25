@@ -18,6 +18,7 @@ slice of recent activity. How much is sampled is the ``depth`` knob — see
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter, defaultdict
 from dataclasses import asdict
@@ -355,6 +356,14 @@ def _extract_labeled_terms(
     topic = require_topic(session, name)
     assert topic.id is not None
     version = topic_data_version(session, topic.name)
+    # brands.txt disambiguates the subject via topic.about (to exclude the
+    # subject's own products), so an `--about` edit must invalidate the cached
+    # brands even when the matched post/comment set is unchanged. Fold `about`
+    # into the version. complaints/use_cases ignore `about`, so their key is
+    # untouched (empty/unchanged about → identical version → still cached).
+    if prompt_name == "brands":
+        about_hash = hashlib.sha256(topic.about.strip().encode()).hexdigest()[:12]
+        version = f"{version}:{about_hash}"
     cached = cache.get(session, topic.id, prompt_name, "", version)
     if cached is not None:
         return [(n, list(terms)) for n, terms in json.loads(cached)]

@@ -344,6 +344,48 @@ def test_daily_topic_sentiment_days_cap_separate_cache_variant(db, monkeypatch):
     assert capped[0].day == "2024-01-09"        # capped window is independent
 
 
+def test_identify_brands_cache_busts_on_about_change(db, monkeypatch):
+    """An `--about` edit must invalidate the cached brands even when the matched
+    post/comment set is unchanged. The brands prompt disambiguates the subject
+    via `about` (to exclude the subject's own products), so a stale cache would
+    keep showing competitors recognized under the old sense of the topic."""
+    from sqlmodel import select
+
+    from redlens.summarize import identify_brands
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with Session(connect(str(db))) as s:
+        _seed_topic(s, "apple")
+        topic = s.exec(select(Topic).where(Topic.name == "apple")).one()
+        topic.about = "the fruit and orchard growing"
+        s.add(topic)
+        s.commit()
+
+    calls = {"n": 0}
+
+    def fake_complete(*a, **k):
+        calls["n"] += 1
+        return json.dumps({"brands": [{"name": "Gala", "aliases": ["gala"]}]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "apple")           # miss -> 1 completion
+        identify_brands(s, "apple")           # hit  -> still 1
+    assert calls["n"] == 1
+
+    # Redefine the subject; same matched set, but brands must be recomputed.
+    with Session(connect(str(db))) as s:
+        topic = s.exec(select(Topic).where(Topic.name == "apple")).one()
+        topic.about = "the technology company and its devices"
+        s.add(topic)
+        s.commit()
+
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "apple")           # about changed -> recompute
+    assert calls["n"] == 2
+
+
 def _vpn_topic_with_two_days(db, t1, t2):
     """Two posts on two different days under topic 'vpn'; returns nothing,
     just seeds the DB. Shared by the robustness tests below."""

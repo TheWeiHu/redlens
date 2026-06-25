@@ -90,9 +90,12 @@ def compare_topics(session: Session, names: list[str],
         start, end = newest - days * DAY, newest
         window_days, matched = days, False
     else:
-        # The overlap: start at the latest first-post so every topic covers it.
+        # The overlap: every topic must cover the whole window, so clamp it to
+        # the latest first-post .. earliest last-post across topics. Using the
+        # global newest post as the end would count a shorter topic's missing
+        # tail (and could call non-overlapping ranges a "matched" comparison).
         start = max(min(p.created_utc for p in posts) for _, posts, _ in loaded)
-        end = newest
+        end = min(max(p.created_utc for p in posts) for _, posts, _ in loaded)
         if start > end:
             raise RedlensError(
                 "landscape: topics' date ranges don't overlap — pass --days to "
