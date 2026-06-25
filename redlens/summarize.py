@@ -18,6 +18,7 @@ slice of recent activity. How much is sampled is the ``depth`` knob — see
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter, defaultdict
 from datetime import date, timedelta
@@ -28,13 +29,12 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 from sqlmodel.sql.expression import SelectOfScalar
 
-from redlens import constants, llm, prompts
+from redlens import cache, constants, llm, prompts
 from redlens.config import require_llm_key
 from redlens.errors import NotFound, RedlensError
 from redlens.models import (
-    Brand,
-    Category,
     Comment,
+    MentionGroup,
     Post,
     Profile,
     Topic,
@@ -47,6 +47,7 @@ from redlens.topics import (
     relevant_clause,
     require_topic,
     topic_comments,
+    topic_data_version,
     topic_posts,
 )
 
@@ -111,19 +112,31 @@ def summarize_topic(session: Session, name: str, *,
     resolved_depth = _resolve_depth(depth)
 
     topic = require_topic(session, name)
+    assert topic.id is not None
+    # Read-through cache (see cache.py), keyed by depth + data-version and checked
+    # before the key, so an unchanged re-render stays keyless.
+    version = topic_data_version(session, topic.name)
+    cached = cache.get(session, topic.id, "summary", resolved_depth, version)
+    if cached is not None:
+        return TopicSummary.model_validate_json(cached)
+
     key = require_llm_key()
     prompt = _build_topic_prompt(session, topic, resolved_depth)
     data = _complete_json(prompt, key)
     try:
-        return TopicSummary.model_validate(
+        summary = TopicSummary.model_validate(
             {"topic": topic.name, "model": llm.model_name(),
              "depth": resolved_depth, **data})
     except ValidationError as exc:
         raise RedlensError(
             f"LLM topic summary didn't match the expected shape: {exc}") from exc
+    cache.put(session, topic.id, "summary", resolved_depth, version,
+              summary.model_dump_json(), summary.model)
+    return summary
 
 
-def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
+def daily_topic_sentiment(session: Session, name: str,
+                          days_cap: int | None = None) -> list[DaySentiment]:
     """LLM-scored daily sentiment trend for a tracked topic.
 
     Buckets the topic's matched posts into UTC calendar days, samples each day's
@@ -132,8 +145,23 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
     works" is negative; "another amazing feature" may be sarcastic). Returns one
     :class:`~redlens.sentiment.DaySentiment` per day (``mean`` in [-1, 1]),
     gaps zero-filled. Raises :class:`NotFound`/:class:`MissingKey` like
-    :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
+    :func:`summarize_topic`; returns ``[]`` for a topic with no posts.
+
+    ``days_cap`` (when > 0) limits the trend to the most recent N calendar days
+    of activity. Since the whole series is sent in ONE prompt, the cap is the
+    lever that bounds prompt/context size on long high-volume topics (the real
+    limit, not dollars) — it shrinks both the LLM prompt and the charted window.
+    """
     topic = require_topic(session, name)
+    assert topic.id is not None
+    # Read-through cache (see cache.py). The cap goes in the variant so capped and
+    # uncapped renders keep distinct rows instead of clobbering each other.
+    variant = f"d{days_cap}" if days_cap and days_cap > 0 else ""
+    version = topic_data_version(session, topic.name)
+    cached = cache.get(session, topic.id, "sentiment", variant, version)
+    if cached is not None:
+        return [DaySentiment.model_validate(row) for row in json.loads(cached)]
+
     key = require_llm_key()
 
     posts = topic_posts(session, topic.name)
@@ -151,6 +179,14 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
     # prompt is told to weigh, so it must be shown to the model and charted.
     active_days = set(posts_by_day) | set(comments_by_day)
     days = sorted(active_days)
+    # Cap the charted window to the most recent N calendar days of activity.
+    # Trimming here (before blocks AND the zero-fill loop) bounds the prompt and
+    # the chart in one place; the dropped days never reach the LLM.
+    if days_cap and days_cap > 0 and days:
+        cutoff = (date.fromisoformat(days[-1])
+                  - timedelta(days=days_cap - 1)).isoformat()
+        days = [dy for dy in days if dy >= cutoff]
+        active_days = set(days)
 
     def _snip(text: str) -> str:
         # Untrusted post/comment text goes into the prompt; sentiment.txt tells
@@ -197,20 +233,40 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
     cur, end = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
     while cur <= end:
         dy = cur.isoformat()
-        out.append(DaySentiment(dy, scores.get(dy),
-                                len(posts_by_day.get(dy, [])),
-                                len(comments_by_day.get(dy, []))))
+        out.append(DaySentiment(day=dy, mean=scores.get(dy),
+                                posts=len(posts_by_day.get(dy, [])),
+                                comments=len(comments_by_day.get(dy, []))))
         cur += timedelta(days=1)
+    cache.put(session, topic.id, "sentiment", variant, version,
+              json.dumps([d.model_dump() for d in out]), llm.model_name())
     return out
 
 
-def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
+def label_themes(topic: str, themes: list[list[str]], *,
+                 session: Session | None = None) -> list[str]:
     """Short, human-readable labels for LDA keyword clusters — one LLM call for
     all of them. Returns one label per input theme, in order; any theme the
     model skips or mangles falls back to its joined keywords, so the result is
-    always aligned and non-empty. Raises :class:`MissingKey` with no key."""
+    always aligned and non-empty. Raises :class:`MissingKey` with no key.
+
+    When ``session`` is given (the page render path), the labels are read-through
+    cached (see cache.py). LDA is deterministically seeded and keywords are in the
+    data-version, so the cluster set is stable for a version and the cached labels
+    stay aligned to it. Called without a session it always recomputes.
+    """
     if not themes:
         return []
+    topic_id: int | None = None
+    version = ""
+    if session is not None:
+        cached_topic = require_topic(session, topic)
+        assert cached_topic.id is not None
+        topic_id = cached_topic.id
+        version = topic_data_version(session, cached_topic.name)
+        cached = cache.get(session, topic_id, "themes", "", version)
+        if cached is not None:
+            labels: list[str] = json.loads(cached)
+            return labels
     key = require_llm_key()
     listed = "\n".join(f"{i + 1}. {', '.join(words)}"
                        for i, words in enumerate(themes))
@@ -222,10 +278,13 @@ def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
     for i, words in enumerate(themes):
         label = given[i].strip() if i < len(given) and isinstance(given[i], str) else ""
         out.append(label or ", ".join(words[:4]))
+    if session is not None and topic_id is not None:
+        cache.put(session, topic_id, "themes", "", version,
+                  json.dumps(out), llm.model_name())
     return out
 
 
-def identify_brands(session: Session, name: str) -> list[Brand]:
+def identify_brands(session: Session, name: str) -> list[MentionGroup]:
     """One LLM call to surface the OTHER brands/products that come up in a
     tracked topic's discussion (competitors, alternatives) — with the spelling
     variants to count them by. The caller does the actual counting; the LLM only
@@ -233,10 +292,28 @@ def identify_brands(session: Session, name: str) -> list[Brand]:
     :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
     named = _extract_labeled_terms(
         session, name, prompt_name="brands", terms_key="aliases")
-    return [Brand(name=n, aliases=terms) for n, terms in named]
+    return [MentionGroup(name=n, terms=terms) for n, terms in named]
 
 
-def extract_categories(session: Session, name: str, kind: str) -> list[Category]:
+def pin_brands(spec: str) -> list[MentionGroup]:
+    """Build a FIXED brand list from a comma-separated ``spec``, bypassing
+    :func:`identify_brands` (no LLM call, no key) — a trustworthy competitor
+    ranking needs a fixed entity list, not the recognizer's jittery output. Each
+    name is its own whole-word term; blanks are dropped and case-insensitive
+    duplicates collapse to their first spelling, so the result is stable
+    run-to-run. (Matching semantics are pinned by the test suite.)"""
+    out: list[MentionGroup] = []
+    seen: set[str] = set()
+    for raw in spec.split(","):
+        name = raw.strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        out.append(MentionGroup(name=name, terms=[name]))
+    return out
+
+
+def extract_categories(session: Session, name: str, kind: str) -> list[MentionGroup]:
     """One LLM call to surface discussion categories — ``kind`` is
     ``"complaints"`` (recurring problems) or ``"use_cases"`` (what people use the
     topic for) — each with the signature phrases to count it by. Same
@@ -244,7 +321,7 @@ def extract_categories(session: Session, name: str, kind: str) -> list[Category]
     prompt_name = "complaints" if kind == "complaints" else "use_cases"
     named = _extract_labeled_terms(
         session, name, prompt_name=prompt_name, terms_key="phrases")
-    return [Category(name=n, terms=terms) for n, terms in named]
+    return [MentionGroup(name=n, terms=terms) for n, terms in named]
 
 
 def _extract_labeled_terms(
@@ -254,8 +331,24 @@ def _extract_labeled_terms(
     sample the most-engaged posts/comments, ask ``prompt_name`` for a
     ``{"categories": [{"name", <terms_key>}]}`` list, and return
     ``(name, terms)`` pairs — blank names dropped, empty term lists falling back
-    to ``[name]`` so every pair is countable."""
+    to ``[name]`` so every pair is countable.
+
+    Read-through cached (see cache.py) under ``kind=prompt_name``, so brands /
+    complaints / use-cases don't clobber each other; persisting the output also
+    pins the otherwise jittery entity SET across re-renders."""
     topic = require_topic(session, name)
+    assert topic.id is not None
+    version = topic_data_version(session, topic.name)
+    # The brands prompt disambiguates the subject via topic.about, so an `--about`
+    # edit must bust the brands cache even when the matched set is unchanged.
+    # complaints/use_cases ignore `about`, so their key is untouched.
+    if prompt_name == "brands":
+        about_hash = hashlib.sha256(topic.about.strip().encode()).hexdigest()[:12]
+        version = f"{version}:{about_hash}"
+    cached = cache.get(session, topic.id, prompt_name, "", version)
+    if cached is not None:
+        return [(n, list(terms)) for n, terms in json.loads(cached)]
+
     key = require_llm_key()
 
     posts = topic_posts(session, topic.name)
@@ -308,6 +401,8 @@ def _extract_labeled_terms(
             continue
         seen[norm] = len(out)
         out.append((label, terms or [label]))
+    cache.put(session, topic.id, prompt_name, "", version,
+              json.dumps(out), llm.model_name())
     return out
 
 

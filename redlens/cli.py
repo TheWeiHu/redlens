@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO, TypeVar
 
+from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
 from redlens import __version__, completions, discovery, export, onboarding
@@ -25,15 +26,22 @@ from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.models import Brand, Category, Profile, TopicAnalytics, TopicSummary
+from redlens.models import MentionGroup, Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
-from redlens.reporting.page import render_all, render_topic_page, slug
+from redlens.reporting.page import (
+    Renderers,
+    Sections,
+    render_all,
+    render_topic_page,
+    slug,
+)
 from redlens.sentiment import DaySentiment
 from redlens.summarize import (
     daily_topic_sentiment,
     extract_categories,
     identify_brands,
     label_themes,
+    pin_brands,
     summarize_topic,
     summarize_user,
 )
@@ -436,9 +444,20 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--summary", action="store_true",
                    help="embed an AI narrative of the discussion in the page "
                    "(one LLM call per topic; BYO key)")
+    g.add_argument("--brands", metavar="a,b,c",
+                   help="comma-separated competitor/product names to count "
+                   "deterministically (whole-word over posts + comments), "
+                   "skipping the LLM brand recognizer — reproducible run-to-run "
+                   "and needs no key; renders the brands section on its own, "
+                   "without --summary")
     g.add_argument("--depth", choices=SUMMARY_DEPTHS, default=SUMMARY_DEFAULT_DEPTH,
                    help="how much of the archive the --summary samples "
                    f"(default: {SUMMARY_DEFAULT_DEPTH})")
+    g.add_argument("--days", type=int, default=None, metavar="N",
+                   help="cap the sentiment-over-time chart to the most recent N "
+                   "days of activity (default: no cap). The whole trend is one "
+                   "LLM prompt, so this bounds prompt size on long high-volume "
+                   "topics; distinct from track --days (the archive pull window)")
     g.add_argument("--min-confidence", type=float, default=0.0, metavar="0-1",
                    help="only hide off-topic posts the relevance filter was at least "
                    "this confident about; lower-confidence drops stay visible (default 0 "
@@ -459,6 +478,181 @@ def build_parser() -> argparse.ArgumentParser:
     if onboarding.ENABLED:
         sub.add_parser("setup")
     return p
+
+
+def _cmd_track(args: argparse.Namespace, engine: Engine) -> None:
+    subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
+            if args.subreddits else None)
+    # First track of a topic: pick discovery sources, gather, and
+    # let the user curate the resulting net. Re-tracks reuse the
+    # stored net without asking again.
+    with session(engine) as s:
+        existing = get_topic(s, args.topic)
+    about = args.about
+    if not (existing and existing.subreddit_list):
+        sources = _resolve_sources(args.sources, assume_yes=args.yes)
+        terms = query_terms(args.query) if args.query else [args.topic]
+        found, popular = _gather_candidates(terms, sources)
+        if found:
+            subs = (subs or []) + _pick_subreddits(
+                found, assume_yes=args.yes)
+        if popular:
+            print(f"+ casting over {len(popular)} popular subreddits",
+                  file=sys.stderr)
+            subs = (subs or []) + popular
+        # First track + a key set: prompt for the sense (huge filter win).
+        if about is None and llm_api_key():
+            about = _prompt_about(args.topic, assume_yes=args.yes)
+    res = track_topic(
+        engine, args.topic,
+        query=args.query, subreddits=subs,
+        days=args.days, exclude=args.exclude, about=about,
+        discover=args.discover, reset=args.reset,
+        on_progress=lambda sub, n: print(
+            f"  r/{sub}: {n} new", file=sys.stderr),
+        on_filter=lambda n: print(
+            f"  classifying {n:,} matched posts for relevance (LLM)…",
+            file=sys.stderr),
+    )
+    if res.discovered:
+        print(f"discovered: {', '.join('r/' + s for s in res.discovered)}",
+              file=sys.stderr)
+    for failed_sub, err in res.failed.items():
+        print(f"warning: r/{failed_sub} skipped: {err}", file=sys.stderr)
+    print(f"{res.topic.name!r}: {res.posts_new:,} new posts across "
+          f"{res.subreddits_searched} subreddits "
+          f"(keywords {', '.join(res.topic.keyword_list)!r}, "
+          f"last {res.topic.days} days)")
+    if res.relevance and res.relevance.scored:
+        rel = res.relevance
+        note = (f"  relevance filter: {rel.filtered:,} off-topic hidden, "
+                f"{rel.relevant:,} kept (of {rel.scored:,} judged)")
+        if rel.errored:
+            note += f"; {rel.errored:,} left unscored (LLM error)"
+        print(note, file=sys.stderr)
+        if not res.topic.about:
+            print('  tip: re-track with --about "<one line>" — the filter is '
+                  "inferring this brand's meaning and catches ~half the noise "
+                  "it would with a description.", file=sys.stderr)
+    elif res.posts_new and not llm_api_key():
+        print("  relevance filter off (no LLM key) — every keyword match is "
+              "kept; set a key to hide off-topic noise.", file=sys.stderr)
+    if args.comments:
+        print("pulling comment threads under matched posts…",
+              file=sys.stderr)
+        n = pull_topic_comments(
+            engine, args.topic,
+            on_progress=lambda i, total: print(
+                f"  comments: {i}/{total} posts", file=sys.stderr),
+        )
+        print(f"{res.topic.name!r}: {n:,} comments stored")
+    print(f"next: redlens page {res.topic.name!r}")
+
+
+def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
+    # Each --summary section is best-effort and DB-backed: gated off
+    # without --summary, run in its own session, and a RedlensError
+    # (missing key, bad LLM response) drops just that section with a
+    # warning instead of aborting the page — critical for --all, where
+    # one topic's failure would otherwise sink the batch and skip
+    # index.html. One LLM request each, against the topic's archive.
+    def _section(topic_name: str, what: str,
+                 work: Callable[[Session], _T]) -> _T | None:
+        if not args.summary:
+            return None
+        try:
+            with session(engine) as s:
+                return work(s)
+        except RedlensError as exc:
+            print(f"  {topic_name}: {what} skipped — {exc}",
+                  file=sys.stderr)
+            return None
+
+    def _summary(t: str) -> TopicSummary | None:
+        return _section(t, "AI summary",
+                        lambda s: summarize_topic(s, t, depth=args.depth))
+
+    def _sentiment(t: str) -> list[DaySentiment] | None:
+        return _section(t, "sentiment trend",
+                        lambda s: daily_topic_sentiment(
+                            s, t, days_cap=args.days))
+
+    # --brands pins a fixed entity list: skip the LLM recognizer and
+    # count the user-supplied names deterministically. No key, no LLM
+    # call, and it renders the brands section even without --summary.
+    _pinned_brands = pin_brands(args.brands) if args.brands else None
+
+    def _brands(t: str) -> list[MentionGroup] | None:
+        if _pinned_brands is not None:
+            return _pinned_brands
+        return _section(t, "brands", lambda s: identify_brands(s, t))
+
+    def _categories(t: str, kind: str) -> list[MentionGroup] | None:
+        return _section(t, kind, lambda s: extract_categories(s, t, kind))
+
+    def _complaints(t: str) -> list[MentionGroup] | None:
+        return _categories(t, "complaints")
+
+    def _use_cases(t: str) -> list[MentionGroup] | None:
+        return _categories(t, "use_cases")
+
+    # Theme labels are the one section with no DB and a non-None
+    # fallback: one LLM call mapping LDA keyword clusters to readable
+    # labels, degrading to keyword-only labels on any failure.
+    def _label_themes(s: Session, topic_name: str,
+                      word_lists: list[list[str]]) -> list[str]:
+        try:
+            return label_themes(topic_name, word_lists, session=s)
+        except RedlensError as exc:
+            print(f"  {topic_name}: theme labels skipped — {exc}",
+                  file=sys.stderr)
+            return []
+
+    if args.all_topics:
+        out_dir = Path(args.out) if args.out else default_report_dir()
+        results = render_all(
+            engine, out_dir,
+            Renderers(
+                summarize=_summary if args.summary else None,
+                sentiment=_sentiment if args.summary else None,
+                theme_labeler=_label_themes if args.summary else None,
+                brands=(_brands if args.summary or _pinned_brands is not None
+                        else None),
+                complaints=_complaints if args.summary else None,
+                use_cases=_use_cases if args.summary else None,
+            ))
+        written = [pg for pg in results if pg.written]
+        skipped = [pg for pg in results if not pg.written]
+        for pg in written:
+            print(f"wrote {out_dir / (pg.slug + '.html')}")
+        if skipped:
+            print(f"skipped {len(skipped)} topic(s) with no matched "
+                  f"posts: {', '.join(pg.name for pg in skipped)}",
+                  file=sys.stderr)
+        index = out_dir / "index.html"
+        print(f"index: {index} "
+              f"({len(written)} topic{'' if len(written) == 1 else 's'})")
+        if args.open and not args.no_browser:
+            webbrowser.open(index.resolve().as_uri())
+    elif args.topic:
+        html_doc = render_topic_page(
+            engine, args.topic,
+            Sections(
+                summary=_summary(args.topic),
+                sentiment_days=_sentiment(args.topic),
+                theme_labeler=_label_themes if args.summary else None,
+                brands=_brands(args.topic),
+                complaints=_categories(args.topic, "complaints"),
+                use_cases=_categories(args.topic, "use_cases"),
+            ),
+            min_confidence=args.min_confidence)
+        out = Path(args.out or f"{slug(args.topic)}.html")
+        out.write_text(html_doc, encoding="utf-8")
+        print(f"wrote {out} ({len(html_doc):,} bytes)")
+        if args.open and not args.no_browser:
+            webbrowser.open(out.resolve().as_uri())
+    else:
+        raise RedlensError("page: give a topic or pass --all")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -494,162 +688,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"u/{r.user.username}: "
                   f"{r.posts_written:,} posts, {r.comments_written:,} comments")
         elif args.verb == "track":
-            subs = ([s.strip() for s in args.subreddits.split(",") if s.strip()]
-                    if args.subreddits else None)
-            # First track of a topic: pick discovery sources, gather, and
-            # let the user curate the resulting net. Re-tracks reuse the
-            # stored net without asking again.
-            with session(engine) as s:
-                existing = get_topic(s, args.topic)
-            about = args.about
-            if not (existing and existing.subreddit_list):
-                sources = _resolve_sources(args.sources, assume_yes=args.yes)
-                terms = query_terms(args.query) if args.query else [args.topic]
-                found, popular = _gather_candidates(terms, sources)
-                if found:
-                    subs = (subs or []) + _pick_subreddits(
-                        found, assume_yes=args.yes)
-                if popular:
-                    print(f"+ casting over {len(popular)} popular subreddits",
-                          file=sys.stderr)
-                    subs = (subs or []) + popular
-                # First track + a key set: prompt for the sense (huge filter win).
-                if about is None and llm_api_key():
-                    about = _prompt_about(args.topic, assume_yes=args.yes)
-            res = track_topic(
-                engine, args.topic,
-                query=args.query, subreddits=subs,
-                days=args.days, exclude=args.exclude, about=about,
-                discover=args.discover, reset=args.reset,
-                on_progress=lambda sub, n: print(
-                    f"  r/{sub}: {n} new", file=sys.stderr),
-                on_filter=lambda n: print(
-                    f"  classifying {n:,} matched posts for relevance (LLM)…",
-                    file=sys.stderr),
-            )
-            if res.discovered:
-                print(f"discovered: {', '.join('r/' + s for s in res.discovered)}",
-                      file=sys.stderr)
-            for failed_sub, err in res.failed.items():
-                print(f"warning: r/{failed_sub} skipped: {err}", file=sys.stderr)
-            print(f"{res.topic.name!r}: {res.posts_new:,} new posts across "
-                  f"{res.subreddits_searched} subreddits "
-                  f"(keywords {', '.join(res.topic.keyword_list)!r}, "
-                  f"last {res.topic.days} days)")
-            if res.relevance and res.relevance.scored:
-                rel = res.relevance
-                note = (f"  relevance filter: {rel.filtered:,} off-topic hidden, "
-                        f"{rel.relevant:,} kept (of {rel.scored:,} judged)")
-                if rel.errored:
-                    note += f"; {rel.errored:,} left unscored (LLM error)"
-                print(note, file=sys.stderr)
-                if not res.topic.about:
-                    print('  tip: re-track with --about "<one line>" — the filter is '
-                          "inferring this brand's meaning and catches ~half the noise "
-                          "it would with a description.", file=sys.stderr)
-            elif res.posts_new and not llm_api_key():
-                print("  relevance filter off (no LLM key) — every keyword match is "
-                      "kept; set a key to hide off-topic noise.", file=sys.stderr)
-            if args.comments:
-                print("pulling comment threads under matched posts…",
-                      file=sys.stderr)
-                n = pull_topic_comments(
-                    engine, args.topic,
-                    on_progress=lambda i, total: print(
-                        f"  comments: {i}/{total} posts", file=sys.stderr),
-                )
-                print(f"{res.topic.name!r}: {n:,} comments stored")
-            print(f"next: redlens page {res.topic.name!r}")
+            _cmd_track(args, engine)
         elif args.verb == "page":
-            # Each --summary section is best-effort and DB-backed: gated off
-            # without --summary, run in its own session, and a RedlensError
-            # (missing key, bad LLM response) drops just that section with a
-            # warning instead of aborting the page — critical for --all, where
-            # one topic's failure would otherwise sink the batch and skip
-            # index.html. One LLM request each, against the topic's archive.
-            def _section(topic_name: str, what: str,
-                         work: Callable[[Session], _T]) -> _T | None:
-                if not args.summary:
-                    return None
-                try:
-                    with session(engine) as s:
-                        return work(s)
-                except RedlensError as exc:
-                    print(f"  {topic_name}: {what} skipped — {exc}",
-                          file=sys.stderr)
-                    return None
-
-            def _summary(t: str) -> TopicSummary | None:
-                return _section(t, "AI summary",
-                                lambda s: summarize_topic(s, t, depth=args.depth))
-
-            def _sentiment(t: str) -> list[DaySentiment] | None:
-                return _section(t, "sentiment trend",
-                                lambda s: daily_topic_sentiment(s, t))
-
-            def _brands(t: str) -> list[Brand] | None:
-                return _section(t, "brands", lambda s: identify_brands(s, t))
-
-            def _categories(t: str, kind: str) -> list[Category] | None:
-                return _section(t, kind, lambda s: extract_categories(s, t, kind))
-
-            def _complaints(t: str) -> list[Category] | None:
-                return _categories(t, "complaints")
-
-            def _use_cases(t: str) -> list[Category] | None:
-                return _categories(t, "use_cases")
-
-            # Theme labels are the one section with no DB and a non-None
-            # fallback: one LLM call mapping LDA keyword clusters to readable
-            # labels, degrading to keyword-only labels on any failure.
-            def _label_themes(topic_name: str,
-                              word_lists: list[list[str]]) -> list[str]:
-                try:
-                    return label_themes(topic_name, word_lists)
-                except RedlensError as exc:
-                    print(f"  {topic_name}: theme labels skipped — {exc}",
-                          file=sys.stderr)
-                    return []
-
-            if args.all_topics:
-                out_dir = Path(args.out) if args.out else default_report_dir()
-                results = render_all(
-                    engine, out_dir,
-                    summarize=_summary if args.summary else None,
-                    sentiment=_sentiment if args.summary else None,
-                    theme_labeler=_label_themes if args.summary else None,
-                    brands=_brands if args.summary else None,
-                    complaints=_complaints if args.summary else None,
-                    use_cases=_use_cases if args.summary else None)
-                written = [pg for pg in results if pg.written]
-                skipped = [pg for pg in results if not pg.written]
-                for pg in written:
-                    print(f"wrote {out_dir / (pg.slug + '.html')}")
-                if skipped:
-                    print(f"skipped {len(skipped)} topic(s) with no matched "
-                          f"posts: {', '.join(pg.name for pg in skipped)}",
-                          file=sys.stderr)
-                index = out_dir / "index.html"
-                print(f"index: {index} "
-                      f"({len(written)} topic{'' if len(written) == 1 else 's'})")
-                if args.open and not args.no_browser:
-                    webbrowser.open(index.resolve().as_uri())
-            elif args.topic:
-                html_doc = render_topic_page(
-                    engine, args.topic, summary=_summary(args.topic),
-                    sentiment_days=_sentiment(args.topic),
-                    theme_labeler=_label_themes if args.summary else None,
-                    brands=_brands(args.topic),
-                    complaints=_categories(args.topic, "complaints"),
-                    use_cases=_categories(args.topic, "use_cases"),
-                    min_confidence=args.min_confidence)
-                out = Path(args.out or f"{slug(args.topic)}.html")
-                out.write_text(html_doc, encoding="utf-8")
-                print(f"wrote {out} ({len(html_doc):,} bytes)")
-                if args.open and not args.no_browser:
-                    webbrowser.open(out.resolve().as_uri())
-            else:
-                raise RedlensError("page: give a topic or pass --all")
+            _cmd_page(args, engine)
         elif args.verb == "untrack":
             with session(engine) as s:
                 if get_topic(s, args.topic) is None:
