@@ -135,17 +135,22 @@ def _post_links(posts: list[Post]) -> str:
 
 
 def _drill(rows: list[tuple[str, int]], groups: dict[str, list[Post]],
-           prefix: str = "") -> str:
+           prefix: str = "", comment_counts: Counter[str] | None = None) -> str:
     """Bar rows that expand (no JS, via <details>) to the posts behind them,
-    best first."""
+    best first. When ``comment_counts`` is given, each expansion also reports
+    the total comments pulled under that row's posts."""
     peak = max((n for _, n in rows), default=1)
     out = []
     for label, n in rows:
         posts = sorted(groups.get(label, []),
                        key=lambda p: (-p.score, p.post_id))
+        meta = ""
+        if comment_counts is not None:
+            meta = (f"<div class='muted'>{n:,} posts · "
+                    f"{comment_counts.get(label, 0):,} comments</div>")
         out.append(
             f"<details><summary>{_bar(label, n, peak, prefix)}</summary>"
-            f"{_post_links(posts)}</details>"
+            f"{meta}{_post_links(posts)}</details>"
         )
     return "\n".join(out)
 
@@ -231,13 +236,17 @@ def _punchcard(posts: list[Post], comments: list[Comment]) -> str:
         counts[(dt.weekday(), dt.hour)] += 1
     if not counts:
         return ""
+    # Pulled comments sit at their real time; without them we fold each post's
+    # reported count into the post's own hour — so label honestly per mode.
+    unit = "posts + comments" if comments else "posts + reported comments"
     peak = max(counts.values())
     cell, left, top = 22, 32, 4
     w, h = left + 24 * cell, top + 7 * cell + 14
     dots = "".join(
         f'<circle cx="{left + hr * cell + cell / 2:.0f}" '
         f'cy="{top + d * cell + cell / 2:.0f}" r="{1 + 8 * (n / peak) ** 0.5:.1f}">'
-        f"<title>{_WEEKDAYS[d]} {hr:02d}:00 UTC — {n:,}</title></circle>"
+        f"<title>{_WEEKDAYS[d]} {hr:02d}:00 UTC — {n:,} {unit}</title>"
+        f"</circle>"
         for (d, hr), n in sorted(counts.items())
     )
     labels = "".join(
@@ -639,6 +648,16 @@ def _view(topic: Topic, posts: list[Post], comments: list[Comment],
     span = f"{_date(min(ts))} – {_date(max(ts))}" if ts else "—"
     n_comments = len(comments) or sum(p.num_comments for p in posts)
     comment_label = "comments analyzed" if comments else "comments on posts"
+    # Per-subreddit comment totals for the drill: real pulled comments when we
+    # have them, else each subreddit's reported num_comments (mirrors the
+    # headline's `len(comments) or sum(num_comments)`), so an un-pulled topic
+    # shows true reported volume instead of a misleading 0.
+    if comments:
+        sub_comment_counts = Counter(c.subreddit_name for c in comments)
+    else:
+        sub_comment_counts = Counter()
+        for p in posts:
+            sub_comment_counts[p.subreddit_name] += p.num_comments
 
     top_rows = "\n".join(
         f"<tr><td><a href='https://reddit.com/comments/{p.post_id}'>"
@@ -664,10 +683,11 @@ def _view(topic: Topic, posts: list[Post], comments: list[Comment],
 {_day_chart(_daily(posts))}
 {sentiment_section}
 <h2>By weekday &amp; hour (UTC)</h2>
+<p class="muted">{"posts + comments" if comments else "posts (+ reported comment counts)"} · dot area ~ volume</p>
 {_punchcard(posts, comments)}
 <h2>Subreddits</h2>
 <p class="muted">click any row to see the posts behind it</p>
-{_drill(sub_rows, sub_groups, prefix="r/")}
+{_drill(sub_rows, sub_groups, prefix="r/", comment_counts=sub_comment_counts)}
 <h2>Most influential</h2>
 {infl_html}
 <h2>Themes</h2>
