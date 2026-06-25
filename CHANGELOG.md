@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Cap the sentiment chart's window — `page --days N`.** The sentiment-over-time
+  trend is sent to the model as a single prompt, so on long high-volume topics the
+  binding limit is prompt/context size, not cost. `--days N` keeps only the most
+  recent N days of activity, shrinking both the LLM prompt and the charted window
+  (default: no cap). Distinct from `track --days`, which is the archive *pull*
+  window. Each cap is cached separately, so a capped and an uncapped render don't
+  clobber each other.
 - **Top complaints & use cases.** With `page --summary`, two new sections
   surface the recurring problems people raise and what they use the topic for.
   Same recognize-then-count split as the brands section
@@ -19,6 +26,14 @@ adheres to [Semantic Versioning](https://semver.org/).
   variants; the page then counts mentions **deterministically** (whole-word,
   case-insensitive, across posts + comments) — so the frequency is exact, not
   the model's guess. Each brand bar drills down to the posts/comments naming it.
+- **Pin a fixed brand list — `page --brands a,b,c`.** Pass a comma-separated list
+  of competitor/product names and the brands section skips the LLM recognizer
+  entirely, counting *only* those names deterministically (whole-word, across
+  posts + comments). Keyless, no LLM call, and **reproducible run-to-run** — the
+  recognizer's set drifts between runs, so a trustworthy competitor ranking needs
+  a fixed entity list. Renders on its own without `--summary`, and lets you fix
+  the long-tail names the sampler misses. Without the flag, behavior is unchanged
+  (the LLM recognizes).
 - **Readable theme labels.** With `page --summary`, each LDA keyword cluster on
   the topic page gets a short human-readable label from one LLM call
   (`summarize.label_themes()`); the cluster's keywords stay alongside as muted

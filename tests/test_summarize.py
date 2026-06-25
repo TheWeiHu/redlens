@@ -276,6 +276,116 @@ def test_daily_topic_sentiment_buckets_llm_scores(db, monkeypatch):
     assert "totally agree, love it" in seen["prompt"] and "comments:" in seen["prompt"]
 
 
+def _vpn_topic_with_three_days(db, ts):
+    """Three posts across the given UTC timestamps under topic 'vpn'."""
+    titles = ["ancient gripe", "works great", "keeps crashing"]
+    last = max(ts)
+    with Session(connect(str(db))) as s:
+        topic = Topic(name="vpn", keywords=json.dumps(["vpn"]),
+                      subreddits=json.dumps(["vpn"]), last_tracked_at=last)
+        s.add(topic)
+        s.flush()
+        posts = [Post(post_id=pid, author_username="x", subreddit_name="vpn",
+                      created_utc=t, title=ti, score=5)
+                 for pid, t, ti in zip("abc", ts, titles, strict=True)]
+        upsert(s, posts)
+        upsert(s, [TopicPost(topic_id=topic.id, post_id=p.post_id) for p in posts])
+        s.commit()
+
+
+def test_daily_topic_sentiment_days_cap_trims_window(db, monkeypatch):
+    """``days_cap`` keeps only the most recent N calendar days of activity —
+    both the returned series and the LLM prompt are bounded, and the dropped
+    earlier day never reaches the model."""
+    from datetime import UTC, datetime
+
+    from redlens.summarize import daily_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    ts = [int(datetime(2024, 1, d, tzinfo=UTC).timestamp()) for d in (1, 9, 10)]
+    _vpn_topic_with_three_days(db, ts)
+
+    seen = {}
+
+    def fake_complete(prompt, key, **kwargs):
+        seen["prompt"] = prompt
+        return json.dumps({"days": [{"day": "2024-01-09", "score": 20},
+                                    {"day": "2024-01-10", "score": 40}]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    with Session(connect(str(db))) as s:
+        days = daily_topic_sentiment(s, "vpn", days_cap=3)
+
+    # cutoff is 2024-01-08 (3 days ending at the latest activity): the 01-01 day
+    # is dropped, the span is the surviving active days (01-09..01-10).
+    assert [d.day for d in days] == ["2024-01-09", "2024-01-10"]
+    assert days[-1].mean == 0.4
+    assert "works great" in seen["prompt"] and "keeps crashing" in seen["prompt"]
+    assert "ancient gripe" not in seen["prompt"]    # the dropped old post
+
+
+def test_daily_topic_sentiment_days_cap_separate_cache_variant(db, monkeypatch):
+    """A capped render must not be served the uncapped cached series (or vice
+    versa): the cap is part of the cache key, so each is computed once."""
+    from datetime import UTC, datetime
+
+    from redlens.summarize import daily_topic_sentiment
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    ts = [int(datetime(2024, 1, d, tzinfo=UTC).timestamp()) for d in (1, 9, 10)]
+    _vpn_topic_with_three_days(db, ts)
+
+    monkeypatch.setattr(llm, "complete",
+                        lambda *a, **k: json.dumps({"days": []}))
+    with Session(connect(str(db))) as s:
+        full = daily_topic_sentiment(s, "vpn")           # uncapped, cached as ""
+        capped = daily_topic_sentiment(s, "vpn", days_cap=3)  # cached as "d3"
+    assert full[0].day == "2024-01-01"          # uncapped spans from the old day
+    assert capped[0].day == "2024-01-09"        # capped window is independent
+
+
+def test_identify_brands_cache_busts_on_about_change(db, monkeypatch):
+    """An `--about` edit must invalidate the cached brands even when the matched
+    post/comment set is unchanged. The brands prompt disambiguates the subject
+    via `about` (to exclude the subject's own products), so a stale cache would
+    keep showing competitors recognized under the old sense of the topic."""
+    from sqlmodel import select
+
+    from redlens.summarize import identify_brands
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with Session(connect(str(db))) as s:
+        _seed_topic(s, "apple")
+        topic = s.exec(select(Topic).where(Topic.name == "apple")).one()
+        topic.about = "the fruit and orchard growing"
+        s.add(topic)
+        s.commit()
+
+    calls = {"n": 0}
+
+    def fake_complete(*a, **k):
+        calls["n"] += 1
+        return json.dumps({"brands": [{"name": "Gala", "aliases": ["gala"]}]})
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "apple")           # miss -> 1 completion
+        identify_brands(s, "apple")           # hit  -> still 1
+    assert calls["n"] == 1
+
+    # Redefine the subject; same matched set, but brands must be recomputed.
+    with Session(connect(str(db))) as s:
+        topic = s.exec(select(Topic).where(Topic.name == "apple")).one()
+        topic.about = "the technology company and its devices"
+        s.add(topic)
+        s.commit()
+
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "apple")           # about changed -> recompute
+    assert calls["n"] == 2
+
+
 def _vpn_topic_with_two_days(db, t1, t2):
     """Two posts on two different days under topic 'vpn'; returns nothing,
     just seeds the DB. Shared by the robustness tests below."""
@@ -412,7 +522,7 @@ def test_identify_brands_no_key_raises(topic_db):
 
 
 def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
-    """Brands are parsed into name + aliases; blank names dropped, empty aliases
+    """Brands are parsed into name + terms; blank names dropped, empty terms
     fall back to the name, and the sample handed to the model is the archive."""
     from redlens.summarize import identify_brands
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -431,9 +541,21 @@ def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
         brands = identify_brands(s, "climate")
 
     assert [b.name for b in brands] == ["Tesla", "BYD"]
-    assert brands[0].aliases == ["tesla", "tsla"]
-    assert brands[1].aliases == ["BYD"]                  # empty -> [name]
+    assert brands[0].terms == ["tesla", "tsla"]
+    assert brands[1].terms == ["BYD"]                    # empty -> [name]
     assert "carbon tax debate heats up" in seen["prompt"]  # archive sampled
+
+
+def test_pin_brands_parses_dedupes_and_drops_blanks():
+    """`page --brands` builds a fixed, key-free list: split on commas, strip,
+    drop blanks, collapse case-insensitive dupes (first spelling wins). Each
+    name is its own whole-word term so symbol-edged names ('C++') count."""
+    from redlens.summarize import pin_brands
+
+    brands = pin_brands(" C++ , .NET, Rust , c++ , ,Rust")
+    assert [b.name for b in brands] == ["C++", ".NET", "Rust"]   # deduped, ordered
+    assert all(b.terms == [b.name] for b in brands)             # self as term
+    assert pin_brands("") == [] and pin_brands("  , ,") == []    # nothing to pin
 
 
 def test_identify_brands_passes_about_to_exclude_own_products(db, monkeypatch):

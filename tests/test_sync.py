@@ -69,9 +69,9 @@ def _mem():
 
 def test_migration_upgrades_v3_through_latest(tmp_path):
     """A v3 database upgrades to the current schema: it gains the v4 sync_state
-    table, the v5 topicpost relevance columns, and the v6 topic.about column.
-    (Build the latest schema, then strip what v4/v5/v6 added so the starting DB
-    faithfully looks like v3.)"""
+    table, the v5 topicpost relevance columns, the v6 topic.about column, and the
+    v7 topic_cache table. (Build the latest schema, then strip what v4/v5/v6/v7
+    added so the starting DB faithfully looks like v3.)"""
     db = tmp_path / "v3.db"
     engine = connect(db)
     SQLModel.metadata.create_all(engine)
@@ -81,6 +81,7 @@ def test_migration_upgrades_v3_through_latest(tmp_path):
                   "relevance_model", "relevance_at"):         # v5 added these
             con.exec_driver_sql(f"ALTER TABLE topicpost DROP COLUMN {c}")
         con.exec_driver_sql("ALTER TABLE topic DROP COLUMN about")  # v6 added this
+        con.exec_driver_sql("DROP TABLE topic_cache")         # v7 added this
         con.exec_driver_sql("PRAGMA user_version = 3")
 
     init_schema(engine)
@@ -90,12 +91,16 @@ def test_migration_upgrades_v3_through_latest(tmp_path):
         sync_state = con.exec_driver_sql(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_state'"
         ).first()
+        topic_cache = con.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='topic_cache'"
+        ).first()
         tp_cols = {r[1] for r in con.exec_driver_sql(
             "PRAGMA table_info(topicpost)")}
         topic_cols = {r[1] for r in con.exec_driver_sql(
             "PRAGMA table_info(topic)")}
-    assert version == SCHEMA_VERSION == 6
+    assert version == SCHEMA_VERSION == 7
     assert sync_state is not None
+    assert topic_cache is not None
     assert {"relevant", "relevance_confidence", "relevance_reason",
             "relevance_model", "relevance_at"} <= tp_cols
     assert "about" in topic_cols
@@ -127,8 +132,12 @@ def test_migration_upgrades_pre_versioning_v1_db(tmp_path):
         version = int(con.exec_driver_sql("PRAGMA user_version").scalar())
         tp_cols = {r[1] for r in con.exec_driver_sql("PRAGMA table_info(topicpost)")}
         topic_cols = {r[1] for r in con.exec_driver_sql("PRAGMA table_info(topic)")}
-    assert version == SCHEMA_VERSION == 6
+        topic_cache = con.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='topic_cache'"
+        ).first()
+    assert version == SCHEMA_VERSION == 7
     assert "relevant" in tp_cols and "about" in topic_cols
+    assert topic_cache is not None
 
 
 # --- incremental no-op -----------------------------------------------------

@@ -26,9 +26,8 @@ from sqlmodel import Session
 
 from redlens import constants
 from redlens.models import (
-    Brand,
-    Category,
     Comment,
+    MentionGroup,
     Post,
     Topic,
     TopicSummary,
@@ -491,26 +490,49 @@ def _html_shell(title: str, body: str) -> str:
         f'<style>{_CSS}</style></head><body>\n{body}\n</body></html>')
 
 
+# A theme labeler maps a topic's LDA keyword clusters to readable labels; it
+# stays a callable because the clusters are computed during the render.
+ThemeLabeler = Callable[[Session, str, list[list[str]]], list[str]]
+
+
+@dataclass(frozen=True)
+class Renderers:
+    """Optional per-topic providers for :func:`render_all` — each maps a topic
+    name to its LLM-derived section, or ``None`` to omit that section. Each is
+    best-effort: a per-topic failure drops just that section (see the CLI
+    guards). ``render_all`` resolves these into a :class:`Sections` per topic."""
+    summarize: Callable[[str], TopicSummary | None] | None = None
+    sentiment: Callable[[str], list[DaySentiment] | None] | None = None
+    theme_labeler: ThemeLabeler | None = None
+    brands: Callable[[str], list[MentionGroup] | None] | None = None
+    complaints: Callable[[str], list[MentionGroup] | None] | None = None
+    use_cases: Callable[[str], list[MentionGroup] | None] | None = None
+
+
+@dataclass(frozen=True)
+class Sections:
+    """The resolved optional sections for one topic page; a ``None``/empty field
+    omits its section. ``theme_labeler`` stays a callable — it needs the LDA
+    clusters computed during the render."""
+    summary: TopicSummary | None = None
+    sentiment_days: list[DaySentiment] | None = None
+    theme_labeler: ThemeLabeler | None = None
+    brands: list[MentionGroup] | None = None
+    complaints: list[MentionGroup] | None = None
+    use_cases: list[MentionGroup] | None = None
+
+
 def render_all(engine: Engine, out_dir: Path,
-               summarize: Callable[[str], TopicSummary | None] | None = None,
-               sentiment: Callable[[str], list[DaySentiment] | None] | None = None,
-               theme_labeler: Callable[[str, list[list[str]]], list[str]] | None = None,
-               brands: Callable[[str], list[Brand] | None] | None = None,
-               complaints: Callable[[str], list[Category] | None] | None = None,
-               use_cases: Callable[[str], list[Category] | None] | None = None,
-               ) -> list[PageResult]:
+               renderers: Renderers | None = None) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
     index) since there is nothing to chart. Returns one result per topic,
     in the same most-recently-tracked-first order as the index.
 
-    ``summarize`` is an optional per-topic AI-narrative provider (one LLM call
-    each). ``sentiment`` is an optional per-topic LLM sentiment-trend provider;
-    without it the page shows no sentiment chart. ``theme_labeler`` turns each
-    page's LDA clusters into readable labels. ``brands`` surfaces the other
-    brands named in each topic's discussion. When given, every rendered page
-    gets those (each provider is best-effort: a per-topic LLM failure drops just
-    that section, see the CLI guards)."""
+    ``renderers`` supplies the optional per-topic LLM sections (narrative,
+    sentiment trend, theme labels, brands, complaints, use cases); omit it for a
+    keyless render with none of them."""
+    renderers = renderers or Renderers()
     out_dir.mkdir(parents=True, exist_ok=True)
     with Session(engine) as session:
         listings = list_topics(session)
@@ -524,15 +546,16 @@ def render_all(engine: Engine, out_dir: Path,
         if listing.matched_posts == 0:
             results.append(PageResult(listing.name, s, 0, written=False))
             continue
-        summary = summarize(listing.name) if summarize else None
-        days = sentiment(listing.name) if sentiment else None
-        found_brands = brands(listing.name) if brands else None
-        found_complaints = complaints(listing.name) if complaints else None
-        found_uses = use_cases(listing.name) if use_cases else None
-        doc = render_topic_page(engine, listing.name, summary=summary,
-                                sentiment_days=days, theme_labeler=theme_labeler,
-                                brands=found_brands, complaints=found_complaints,
-                                use_cases=found_uses)
+        name = listing.name
+        sections = Sections(
+            summary=renderers.summarize(name) if renderers.summarize else None,
+            sentiment_days=renderers.sentiment(name) if renderers.sentiment else None,
+            theme_labeler=renderers.theme_labeler,
+            brands=renderers.brands(name) if renderers.brands else None,
+            complaints=renderers.complaints(name) if renderers.complaints else None,
+            use_cases=renderers.use_cases(name) if renderers.use_cases else None,
+        )
+        doc = render_topic_page(engine, name, sections=sections)
         (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
         results.append(
             PageResult(listing.name, s, listing.matched_posts, written=True))
@@ -565,21 +588,13 @@ def render_index(results: list[PageResult]) -> str:
 
 
 def render_topic_page(engine: Engine, name: str,
-                      summary: TopicSummary | None = None,
-                      sentiment_days: list[DaySentiment] | None = None,
-                      theme_labeler: Callable[[str, list[list[str]]], list[str]]
-                      | None = None,
-                      brands: list[Brand] | None = None,
-                      complaints: list[Category] | None = None,
-                      use_cases: list[Category] | None = None,
+                      sections: Sections | None = None,
                       min_confidence: float = 0.0) -> str:
-    """Render one topic's page. ``summary`` (from ``summarize --topic``) is
-    optional — when given, an AI-narrative section is added. ``sentiment_days``
-    (from ``daily_topic_sentiment``) is the LLM-scored sentiment trend; when
-    omitted the page shows no sentiment chart. ``theme_labeler`` (from
-    ``label_themes``) turns each LDA keyword cluster into a readable label; when
-    omitted the themes show keywords only. The page stays fully keyless without
-    any of them."""
+    """Render one topic's page. ``sections`` carries the optional LLM-derived
+    parts (AI narrative, sentiment trend, theme labeler, brands, complaints, use
+    cases); any field left ``None`` omits its section, so the page stays fully
+    keyless when ``sections`` is omitted entirely."""
+    sec = sections or Sections()
     with Session(engine) as session:
         topic = require_topic(session, name)
 
@@ -587,30 +602,31 @@ def render_topic_page(engine: Engine, name: str,
             # post_id tie-break keeps the rendered page byte-deterministic
             posts = topic_posts(session, topic.name, min_conf)
             comments = topic_comments(session, topic.name, min_conf)
-            section = _sentiment_section(sentiment_days) if sentiment_days else ""
+            section = _sentiment_section(sec.sentiment_days) if sec.sentiment_days else ""
             themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
-            labels = (theme_labeler(topic.name, [words for _, words in themes])
-                      if theme_labeler and themes and label_themes else None)
+            labels = (sec.theme_labeler(session, topic.name,
+                                        [words for _, words in themes])
+                      if sec.theme_labeler and themes and label_themes else None)
             themes_html = _themes_html(themes, labels)
             brands_html = _mentions_section(
                 "Other brands mentioned",
                 "competitors and alternatives named in the discussion, by posts + "
                 "comments mentioning them · click to read",
-                _count_mentions([(b.name, b.aliases) for b in brands], posts, comments),
-            ) if brands else ""
+                _count_mentions([(g.name, g.terms) for g in sec.brands], posts, comments),
+            ) if sec.brands else ""
             complaints_html = _mentions_section(
                 "Top complaints",
                 "recurring problems people raise, by posts + comments mentioning "
                 "them · click to read",
-                _count_mentions([(c.name, c.terms) for c in complaints], posts, comments),
-            ) if complaints else ""
+                _count_mentions([(g.name, g.terms) for g in sec.complaints], posts, comments),
+            ) if sec.complaints else ""
             use_cases_html = _mentions_section(
                 "Use cases",
                 "what people use it for, by posts + comments mentioning it · "
                 "click to read",
-                _count_mentions([(c.name, c.terms) for c in use_cases], posts, comments),
-            ) if use_cases else ""
-            return (_view(topic, posts, comments, summary, section, themes_html,
+                _count_mentions([(g.name, g.terms) for g in sec.use_cases], posts, comments),
+            ) if sec.use_cases else ""
+            return (_view(topic, posts, comments, sec.summary, section, themes_html,
                           brands_html, complaints_html, use_cases_html), len(posts))
 
         # One full view per confidence breakpoint where the visible set changes

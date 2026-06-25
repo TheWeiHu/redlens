@@ -19,7 +19,7 @@ from redlens.cli import main
 from redlens.db import connect, init_schema
 from redlens.errors import NotFound, RedlensError
 from redlens.models import Comment, Post, TopicPost, User
-from redlens.reporting.page import render_topic_page
+from redlens.reporting.page import Sections, render_topic_page
 from redlens.topics import get_topic, list_topics, track_topic, untrack_topic
 
 NOW = int(time.time())
@@ -194,7 +194,7 @@ def test_page_embeds_ai_summary_when_given(engine, monkeypatch):
         overview="Fans discuss the <wedding> & tour.",
         themes=[Theme(title="Tour", summary="dates & venues")],
         sentiment="Mostly positive.", viewpoints="Little disagreement.")
-    doc = render_topic_page(engine, "dua lipa", summary=summary)
+    doc = render_topic_page(engine, "dua lipa", Sections(summary=summary))
     assert "AI summary" in doc
     assert "gpt-test" in doc
     assert "Fans discuss the &lt;wedding&gt; &amp; tour." in doc   # escaped
@@ -257,6 +257,39 @@ def test_cli_page_all_renders_index_and_skips_empty(engine, tmp_path,
     index = (out / "index.html").read_text()
     assert "dua-lipa.html" in index                   # links the rendered page
     assert "ozempic" in index                          # but noted as skipped
+
+
+def test_cli_page_brands_pins_fixed_list_with_no_llm(engine, tmp_path, monkeypatch):
+    """`page --brands a,b,c` counts a user-supplied entity list deterministically
+    and never touches the LLM recognizer: it renders the brands section without
+    --summary and without a key, with exact whole-word counts (C++/.NET match;
+    'Go' does not fire on 'Google')."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query({"dev": [
+        raw("p1", "dev", title="I love C++ and .NET for backend work"),
+        raw("p2", "dev", title="driving the expressway in Google Maps"),
+        raw("p3", "dev", title="another C++ thread, no .NET here"),
+    ]}))
+    monkeypatch.chdir(tmp_path)
+    assert main(["--db", str(db), "track", "dev",
+                 "--subreddits", "dev", "--yes"]) == 0
+
+    # Any call to the recognizer is a bug — the flag must bypass it entirely.
+    import redlens.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "identify_brands", lambda *a, **k: pytest.fail(
+        "identify_brands must not be called when --brands is given"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)   # no key, still works
+
+    assert main(["--db", str(db), "page", "dev", "--brands", "C++, .NET, Go"]) == 0
+    doc = (tmp_path / "dev.html").read_text()
+    assert "Other brands mentioned" in doc
+    # exact whole-word counts: C++ in p1+p3 (2), .NET in p1 only (1)
+    assert '<div>C++</div>' in doc and '<div class="v">2</div>' in doc
+    assert '<div>.NET</div>' in doc
+    assert '<div>Go</div>' not in doc                     # 'Google' must not count Go
+    # deterministic re-render: byte-identical, still no LLM
+    assert main(["--db", str(db), "page", "dev", "--brands", "C++, .NET, Go"]) == 0
+    assert (tmp_path / "dev.html").read_text() == doc
 
 
 def test_cli_page_needs_topic_or_all(engine, tmp_path):

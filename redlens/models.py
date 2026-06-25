@@ -202,6 +202,37 @@ class TopicPost(SQLModel, table=True):
     relevance_at: int | None = None          # unix seconds the verdict was recorded
 
 
+class TopicCache(SQLModel, table=True):
+    """Persisted output of an expensive per-topic LLM render, keyed by a
+    data-version so a re-render reuses it instead of re-paying the model. A soft,
+    additive, reversible record that a stale read simply ignores — the same shape
+    as the relevance filter's verdict cache on :class:`TopicPost`.
+
+    Keyed on ``(topic_id, kind, variant)`` — one live row per output flavor:
+
+    - ``kind`` — which output (``"summary"`` | ``"sentiment"`` | a recognizer
+      name like ``"brands"``).
+    - ``variant`` — parameters that change the output but not the data, so two
+      flavors don't clobber each other: the sampling ``depth`` for a summary,
+      the day-cap for sentiment, ``""`` otherwise.
+    - ``version`` — the data-version the payload was computed for (a HIT only
+      when it equals the topic's current version; see
+      :func:`redlens.topics.topic_data_version`).
+    - ``payload`` — the result as JSON, deserialized on read.
+    - ``model`` — which LLM produced it (provenance; not part of the key).
+    """
+
+    __tablename__ = "topic_cache"
+
+    topic_id: int = Field(primary_key=True)
+    kind: str = Field(primary_key=True)          # "summary" | "sentiment"
+    variant: str = Field(primary_key=True, default="")
+    version: str = ""
+    payload: str = ""
+    model: str = ""
+    created_at: int = Field(default_factory=_now)
+
+
 class Guess(BaseModel):
     """One ranked inference: a label, a 0-100 confidence, and the evidence."""
     label: str
@@ -314,18 +345,14 @@ class NameCount(BaseModel):
     count: int
 
 
-class Brand(BaseModel):
-    """An other brand/product the LLM spotted in a topic's discussion, with the
-    spelling variants used to count its mentions (canonical name is also tried
-    as an alias when the list is empty)."""
-    name: str
-    aliases: list[str] = []
+class MentionGroup(BaseModel):
+    """A named group of things to count in a topic's discussion, with the match
+    ``terms`` used to count it (the name is tried too when the list is empty).
 
-
-class Category(BaseModel):
-    """An LLM-recognized discussion category — a complaint or a use case — with
-    the signature phrases used to count the posts/comments that express it (name
-    is tried too when the phrase list is empty)."""
+    One shape for every recognize-then-count section: a brand/competitor (terms
+    are spelling variants), a complaint, or a use case (terms are signature
+    phrases). The LLM — or a user via ``--brands`` — supplies the group; the page
+    counts the posts/comments matching its terms (see ``page._count_mentions``)."""
     name: str
     terms: list[str] = []
 
