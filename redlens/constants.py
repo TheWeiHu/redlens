@@ -134,6 +134,17 @@ EXTRACT_SAMPLE_COMMENTS = 80    # most-upvoted comment snippets sent with them
 TOP_MENTIONS = 12               # rows shown per mention section (brands/complaints/uses)
 ACCENT = "#d93a00"             # redlens red — the page's one accent color
 
+# --- render memory preflight ------------------------------------------------
+# The topic-page renderer holds every matched post+comment in memory and builds
+# a transient tokenized copy for LDA, so peak RAM scales with the matched-doc
+# count. Hard data point: a ~182k-document topic OOM-killed a 419 MB box and
+# rendered fine on 16 GB (brain llm-enrichment-architecture). These rough
+# per-document footprints (ORM row + text + transient LDA tokens) drive a cheap
+# COUNT-based preflight that warns *before* the load when a topic risks OOM.
+RENDER_BYTES_PER_POST = 4096      # post row: title + selftext + metadata
+RENDER_BYTES_PER_COMMENT = 2048   # comment row: body + metadata
+RENDER_WARN_MB = 512              # warn when estimated peak exceeds this (the RAM floor)
+
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 
 

@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Large-topic memory preflight.** `page` now estimates peak render RAM from a
+  cheap `COUNT(*)` of the topic's matched posts + comments *before* the load, and
+  prints a one-line stderr warning when a topic is big enough to risk being
+  OOM-killed on a small machine — pointing at the two levers (more RAM, or
+  `--min-confidence`). The RAM floor (~4 KB/post + 2 KB/comment) is now documented
+  in the README, so a ~180k-document topic no longer dies mid-render with no
+  explanation.
 - **Top complaints & use cases.** With `page --summary`, two new sections
   surface the recurring problems people raise and what they use the topic for.
   Same recognize-then-count split as the brands section

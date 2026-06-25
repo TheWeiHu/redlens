@@ -181,6 +181,45 @@ def test_themes_html_with_and_without_labels():
         '<div class="muted">not enough text for topic modeling</div>'
 
 
+def test_render_memory_estimate_and_warning():
+    """The preflight estimate scales with doc count and only warns past the
+    documented RAM floor — the small-machine guard, no rows loaded."""
+    from redlens import constants
+    from redlens.reporting.page import (
+        estimate_render_memory_mb,
+        large_topic_warning,
+    )
+    # a tiny topic fits comfortably → no warning
+    assert estimate_render_memory_mb(0, 0) == 0
+    assert large_topic_warning(10, 20) is None
+    # the on-record OOM case (~182k docs) lands well past the floor and warns
+    est = estimate_render_memory_mb(90_000, 92_000)
+    assert est > constants.RENDER_WARN_MB
+    msg = large_topic_warning(90_000, 92_000)
+    assert msg is not None
+    assert "90,000 posts" in msg and "92,000 comments" in msg
+    assert f"{est:,} MB" in msg
+    assert "--min-confidence" in msg            # names a real lever
+
+
+def test_page_warns_on_large_topic(engine, monkeypatch, capsys):
+    """render_topic_page emits the large-topic warning to stderr (and still
+    renders) once the matched-doc count crosses the floor."""
+    from redlens import constants
+    from redlens.topics import topic_doc_counts
+    data = {"vpn": [raw("p1", "vpn", score=100, num_comments=3)]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "vpn", subreddits=["vpn"])
+    with Session(engine) as s:
+        assert topic_doc_counts(s, "vpn") == (1, 0)   # cheap COUNT mirrors the load
+
+    # force the floor below this tiny topic's estimate so the guard fires
+    monkeypatch.setattr(constants, "RENDER_WARN_MB", 0)
+    doc = render_topic_page(engine, "vpn")
+    assert "<h1>vpn</h1>" in doc                       # still renders
+    assert "large topic" in capsys.readouterr().err    # warned on stderr
+
+
 def test_page_embeds_ai_summary_when_given(engine, monkeypatch):
     """`page --summary` threads a TopicSummary into the HTML; the narrative is
     rendered and escaped, and absent otherwise."""

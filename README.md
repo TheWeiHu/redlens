@@ -101,6 +101,17 @@ Tracking several topics? `redlens page --all` renders each one plus a small
 reports dir); topics with no matched posts yet are skipped and noted on the
 index.
 
+### Memory: rendering big topics
+
+`page` loads every matched post and comment into memory (and builds a transient
+tokenized copy for theme modeling), so peak RAM scales with the matched-document
+count — roughly **4 KB per post + 2 KB per comment**. A very large topic
+(~180k documents, e.g. a year of a high-volume subject) needs **~0.5–1 GB** and
+will be OOM-killed on a small VPS; it renders fine on a 16 GB machine. Before the
+load, `page` prints a one-line stderr warning when a topic crosses that floor. If
+you hit it, either render on a box with more RAM or pass `--min-confidence` to
+drop low-relevance matches and shrink the working set.
+
 See `redlens track --help` for every discovery source (`name`, `global`, `web`,
 `popular`, `llm`) and `--discover`, which widens the net by following the
 authors of matched posts.

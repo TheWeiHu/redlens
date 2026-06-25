@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import re
+import sys
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from redlens.topics import (
     list_topics,
     require_topic,
     topic_comments,
+    topic_doc_counts,
     topic_drop_confidences,
     topic_posts,
 )
@@ -491,6 +493,34 @@ def _html_shell(title: str, body: str) -> str:
         f'<style>{_CSS}</style></head><body>\n{body}\n</body></html>')
 
 
+def estimate_render_memory_mb(n_posts: int, n_comments: int) -> int:
+    """Rough peak-RAM estimate (MB) for rendering a topic of this size.
+
+    The renderer materializes every matched post and comment in memory and
+    builds a transient tokenized copy for LDA, so peak memory scales with the
+    matched-document count. Calibrated against the one hard data point on
+    record — a ~182k-document topic OOM-killed a 419 MB box and rendered on
+    16 GB (see brain llm-enrichment-architecture). Deliberately conservative:
+    it exists to warn *before* the load, not to be exact."""
+    total = (n_posts * constants.RENDER_BYTES_PER_POST
+             + n_comments * constants.RENDER_BYTES_PER_COMMENT)
+    return total // (1024 * 1024)
+
+
+def large_topic_warning(n_posts: int, n_comments: int) -> str | None:
+    """A one-line caution when a topic is big enough to risk OOM on a small
+    machine, else ``None`` when it comfortably fits. Names the estimate and the
+    two levers that shrink the working set: render on a box with more RAM, or
+    raise ``--min-confidence`` to drop low-relevance matches."""
+    est = estimate_render_memory_mb(n_posts, n_comments)
+    if est < constants.RENDER_WARN_MB:
+        return None
+    return (f"large topic: ~{n_posts:,} posts + {n_comments:,} comments "
+            f"(~{est:,} MB peak RAM to render). On a small box this can be "
+            f"OOM-killed — render on a machine with more RAM, or raise "
+            f"--min-confidence to shrink the set.")
+
+
 def render_all(engine: Engine, out_dir: Path,
                summarize: Callable[[str], TopicSummary | None] | None = None,
                sentiment: Callable[[str], list[DaySentiment] | None] | None = None,
@@ -582,6 +612,13 @@ def render_topic_page(engine: Engine, name: str,
     any of them."""
     with Session(engine) as session:
         topic = require_topic(session, name)
+
+        # Memory preflight: cheap COUNT(*) before the (potentially huge) load, so
+        # a topic that would OOM a small box warns up front instead of dying
+        # mid-render. See estimate_render_memory_mb / brain llm-enrichment-architecture.
+        warning = large_topic_warning(*topic_doc_counts(session, topic.name, min_confidence))
+        if warning:
+            print(f"  {topic.name}: {warning}", file=sys.stderr)
 
         def build_view(min_conf: float, label_themes: bool) -> tuple[str, int]:
             # post_id tie-break keeps the rendered page byte-deterministic

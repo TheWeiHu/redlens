@@ -523,6 +523,29 @@ def topic_comments(session: Session, name: str, min_confidence: float = 0.0) -> 
     ))
 
 
+def topic_doc_counts(session: Session, name: str,
+                     min_confidence: float = 0.0) -> tuple[int, int]:
+    """``(matched post count, matched comment count)`` for a topic — cheap
+    ``COUNT(*)`` queries that mirror :func:`topic_posts`/:func:`topic_comments`
+    without materializing the rows. Used by the page renderer's memory preflight
+    to estimate peak RAM before the (potentially huge) load happens."""
+    posts = session.exec(
+        select(func.count())
+        .select_from(Post)
+        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
+    ).one()
+    comments = session.exec(
+        select(func.count())
+        .select_from(Comment)
+        .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
+    ).one()
+    return int(posts), int(comments)
+
+
 def _chunked(items: list[str], size: int = 400) -> list[list[str]]:
     """Split an id list into SQLite-IN-safe chunks (the variadic limit is
     ~999; 400 leaves headroom for other bound params)."""
