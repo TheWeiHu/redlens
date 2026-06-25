@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-26
+
 ### Added
 - **Cap the sentiment chart's window — `page --days N`.** The sentiment-over-time
   trend is sent to the model as a single prompt, so on long high-volume topics the
