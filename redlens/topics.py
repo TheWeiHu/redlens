@@ -465,13 +465,22 @@ def pull_topic_comments(
             try:
                 batch = [Comment.from_arctic(raw)
                          for raw in arctic.iter_post_comments(pid)]
+                if batch:
+                    upsert(session, batch)
+                    written += len(batch)
             except RedlensError:
-                continue  # one unreachable thread shouldn't sink the pull
-            if batch:
-                upsert(session, batch)
-                written += len(batch)
-            if on_progress and (i % 50 == 0 or i == len(post_ids)):
-                on_progress(i, len(post_ids))
+                pass  # one unreachable thread shouldn't sink the pull
+            # Checkpoint by post count regardless of any per-thread fetch
+            # failure above, so a long comment pull is durable and resumable
+            # (idempotent upsert) — a single terminal commit would lose hours
+            # of work on any interruption and balloon memory. Folding the
+            # checkpoint into the try's `continue` would skip it whenever a
+            # failing thread landed exactly on a boundary post.
+            if i % 50 == 0 or i == len(post_ids):
+                session.commit()
+                session.expunge_all()
+                if on_progress:
+                    on_progress(i, len(post_ids))
         session.commit()
     return written
 
