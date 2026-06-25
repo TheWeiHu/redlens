@@ -524,32 +524,6 @@ def topic_comments(session: Session, name: str, min_confidence: float = 0.0) -> 
     ))
 
 
-def topic_match_counts(session: Session, name: str,
-                       min_confidence: float = 0.0) -> tuple[int, int]:
-    """``(post_count, comment_count)`` for a topic's relevant matched set — the
-    COUNT-only preflight the renderer uses to estimate peak RAM *before* it
-    materializes the full :func:`topic_posts`/:func:`topic_comments` lists in
-    memory (the unbounded cost that OOMs small boxes on popular topics). Two
-    COUNT queries that honor the same ``relevant_clause`` every read surface
-    uses, so the figures match what the page will actually load; no rows are
-    pulled, so this stays cheap on a 100k-doc topic."""
-    posts = session.exec(
-        select(func.count())
-        .select_from(Post)
-        .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
-    ).one()
-    comments = session.exec(
-        select(func.count())
-        .select_from(Comment)
-        .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
-        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
-    ).one()
-    return int(posts), int(comments)
-
-
 def topic_data_version(session: Session, name: str) -> str:
     """A short, keyless hash of the inputs a topic's LLM renders depend on.
 

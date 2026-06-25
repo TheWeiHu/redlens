@@ -8,12 +8,12 @@ day helper that the scorer and the page renderer share.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from pydantic import BaseModel
 
-@dataclass(frozen=True)
-class DaySentiment:
+
+class DaySentiment(BaseModel):
     """One UTC calendar-day bucket. ``day`` is the date as ``YYYY-MM-DD``,
     ``mean`` the day's sentiment in ``[-1, 1]`` or ``None`` when the day was
     *not scored* (a gap with no activity, or a day the model left out of its

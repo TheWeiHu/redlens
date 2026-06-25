@@ -345,18 +345,14 @@ class NameCount(BaseModel):
     count: int
 
 
-class Brand(BaseModel):
-    """An other brand/product the LLM spotted in a topic's discussion, with the
-    spelling variants used to count its mentions (canonical name is also tried
-    as an alias when the list is empty)."""
-    name: str
-    aliases: list[str] = []
+class MentionGroup(BaseModel):
+    """A named group of things to count in a topic's discussion, with the match
+    ``terms`` used to count it (the name is tried too when the list is empty).
 
-
-class Category(BaseModel):
-    """An LLM-recognized discussion category — a complaint or a use case — with
-    the signature phrases used to count the posts/comments that express it (name
-    is tried too when the phrase list is empty)."""
+    One shape for every recognize-then-count section: a brand/competitor (terms
+    are spelling variants), a complaint, or a use case (terms are signature
+    phrases). The LLM — or a user via ``--brands`` — supplies the group; the page
+    counts the posts/comments matching its terms (see ``page._count_mentions``)."""
     name: str
     terms: list[str] = []
 

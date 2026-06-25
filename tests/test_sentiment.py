@@ -14,8 +14,8 @@ def test_day_start_is_the_calendar_day_utc():
 
 def test_sentiment_chart_renders_both_polarities():
     series = [
-        DaySentiment("2024-01-01", 0.5, 3, 3),
-        DaySentiment("2024-01-02", -0.4, 2, 2),
+        DaySentiment(day="2024-01-01", mean=0.5, posts=3, comments=3),
+        DaySentiment(day="2024-01-02", mean=-0.4, posts=2, comments=2),
     ]
     svg = _sentiment_chart(series)
     assert svg.startswith("<svg") and 'class="pos"' in svg and 'class="neg"' in svg
@@ -25,4 +25,4 @@ def test_sentiment_chart_renders_both_polarities():
 def test_sentiment_chart_empty_when_no_signal():
     assert _sentiment_chart([]) == ""
     # posts present but every day neutral -> nothing to show
-    assert _sentiment_chart([DaySentiment("2024-01-01", 0.0, 0, 5)]) == ""
+    assert _sentiment_chart([DaySentiment(day="2024-01-01", mean=0.0, posts=0, comments=5)]) == ""

@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
-from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Any, TypeVar
 
@@ -34,9 +33,8 @@ from redlens import cache, constants, llm, prompts
 from redlens.config import require_llm_key
 from redlens.errors import NotFound, RedlensError
 from redlens.models import (
-    Brand,
-    Category,
     Comment,
+    MentionGroup,
     Post,
     Profile,
     Topic,
@@ -162,7 +160,7 @@ def daily_topic_sentiment(session: Session, name: str,
     version = topic_data_version(session, topic.name)
     cached = cache.get(session, topic.id, "sentiment", variant, version)
     if cached is not None:
-        return [DaySentiment(**row) for row in json.loads(cached)]
+        return [DaySentiment.model_validate(row) for row in json.loads(cached)]
 
     key = require_llm_key()
 
@@ -235,12 +233,12 @@ def daily_topic_sentiment(session: Session, name: str,
     cur, end = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
     while cur <= end:
         dy = cur.isoformat()
-        out.append(DaySentiment(dy, scores.get(dy),
-                                len(posts_by_day.get(dy, [])),
-                                len(comments_by_day.get(dy, []))))
+        out.append(DaySentiment(day=dy, mean=scores.get(dy),
+                                posts=len(posts_by_day.get(dy, [])),
+                                comments=len(comments_by_day.get(dy, []))))
         cur += timedelta(days=1)
     cache.put(session, topic.id, "sentiment", variant, version,
-              json.dumps([asdict(d) for d in out]), llm.model_name())
+              json.dumps([d.model_dump() for d in out]), llm.model_name())
     return out
 
 
@@ -286,7 +284,7 @@ def label_themes(topic: str, themes: list[list[str]], *,
     return out
 
 
-def identify_brands(session: Session, name: str) -> list[Brand]:
+def identify_brands(session: Session, name: str) -> list[MentionGroup]:
     """One LLM call to surface the OTHER brands/products that come up in a
     tracked topic's discussion (competitors, alternatives) — with the spelling
     variants to count them by. The caller does the actual counting; the LLM only
@@ -294,28 +292,28 @@ def identify_brands(session: Session, name: str) -> list[Brand]:
     :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
     named = _extract_labeled_terms(
         session, name, prompt_name="brands", terms_key="aliases")
-    return [Brand(name=n, aliases=terms) for n, terms in named]
+    return [MentionGroup(name=n, terms=terms) for n, terms in named]
 
 
-def pin_brands(spec: str) -> list[Brand]:
+def pin_brands(spec: str) -> list[MentionGroup]:
     """Build a FIXED brand list from a comma-separated ``spec``, bypassing
     :func:`identify_brands` (no LLM call, no key) — a trustworthy competitor
     ranking needs a fixed entity list, not the recognizer's jittery output. Each
-    name is its own whole-word alias; blanks are dropped and case-insensitive
+    name is its own whole-word term; blanks are dropped and case-insensitive
     duplicates collapse to their first spelling, so the result is stable
     run-to-run. (Matching semantics are pinned by the test suite.)"""
-    out: list[Brand] = []
+    out: list[MentionGroup] = []
     seen: set[str] = set()
     for raw in spec.split(","):
         name = raw.strip()
         if not name or name.casefold() in seen:
             continue
         seen.add(name.casefold())
-        out.append(Brand(name=name, aliases=[name]))
+        out.append(MentionGroup(name=name, terms=[name]))
     return out
 
 
-def extract_categories(session: Session, name: str, kind: str) -> list[Category]:
+def extract_categories(session: Session, name: str, kind: str) -> list[MentionGroup]:
     """One LLM call to surface discussion categories — ``kind`` is
     ``"complaints"`` (recurring problems) or ``"use_cases"`` (what people use the
     topic for) — each with the signature phrases to count it by. Same
@@ -323,7 +321,7 @@ def extract_categories(session: Session, name: str, kind: str) -> list[Category]
     prompt_name = "complaints" if kind == "complaints" else "use_cases"
     named = _extract_labeled_terms(
         session, name, prompt_name=prompt_name, terms_key="phrases")
-    return [Category(name=n, terms=terms) for n, terms in named]
+    return [MentionGroup(name=n, terms=terms) for n, terms in named]
 
 
 def _extract_labeled_terms(

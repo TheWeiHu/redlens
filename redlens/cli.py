@@ -26,9 +26,15 @@ from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.models import Brand, Category, Profile, TopicAnalytics, TopicSummary
+from redlens.models import MentionGroup, Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
-from redlens.reporting.page import render_all, render_topic_page, slug
+from redlens.reporting.page import (
+    Renderers,
+    Sections,
+    render_all,
+    render_topic_page,
+    slug,
+)
 from redlens.sentiment import DaySentiment
 from redlens.summarize import (
     daily_topic_sentiment,
@@ -576,18 +582,18 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
     # call, and it renders the brands section even without --summary.
     _pinned_brands = pin_brands(args.brands) if args.brands else None
 
-    def _brands(t: str) -> list[Brand] | None:
+    def _brands(t: str) -> list[MentionGroup] | None:
         if _pinned_brands is not None:
             return _pinned_brands
         return _section(t, "brands", lambda s: identify_brands(s, t))
 
-    def _categories(t: str, kind: str) -> list[Category] | None:
+    def _categories(t: str, kind: str) -> list[MentionGroup] | None:
         return _section(t, kind, lambda s: extract_categories(s, t, kind))
 
-    def _complaints(t: str) -> list[Category] | None:
+    def _complaints(t: str) -> list[MentionGroup] | None:
         return _categories(t, "complaints")
 
-    def _use_cases(t: str) -> list[Category] | None:
+    def _use_cases(t: str) -> list[MentionGroup] | None:
         return _categories(t, "use_cases")
 
     # Theme labels are the one section with no DB and a non-None
@@ -602,23 +608,19 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
                   file=sys.stderr)
             return []
 
-    # Heads-up to stderr before the in-memory render load when a topic
-    # is big enough to OOM a small box (see page.render_ram_warning).
-    def _warn(msg: str) -> None:
-        print(f"  {msg}", file=sys.stderr)
-
     if args.all_topics:
         out_dir = Path(args.out) if args.out else default_report_dir()
         results = render_all(
             engine, out_dir,
-            summarize=_summary if args.summary else None,
-            sentiment=_sentiment if args.summary else None,
-            theme_labeler=_label_themes if args.summary else None,
-            brands=(_brands if args.summary or _pinned_brands is not None
-                    else None),
-            complaints=_complaints if args.summary else None,
-            use_cases=_use_cases if args.summary else None,
-            on_warn=_warn)
+            Renderers(
+                summarize=_summary if args.summary else None,
+                sentiment=_sentiment if args.summary else None,
+                theme_labeler=_label_themes if args.summary else None,
+                brands=(_brands if args.summary or _pinned_brands is not None
+                        else None),
+                complaints=_complaints if args.summary else None,
+                use_cases=_use_cases if args.summary else None,
+            ))
         written = [pg for pg in results if pg.written]
         skipped = [pg for pg in results if not pg.written]
         for pg in written:
@@ -634,14 +636,16 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
             webbrowser.open(index.resolve().as_uri())
     elif args.topic:
         html_doc = render_topic_page(
-            engine, args.topic, summary=_summary(args.topic),
-            sentiment_days=_sentiment(args.topic),
-            theme_labeler=_label_themes if args.summary else None,
-            brands=_brands(args.topic),
-            complaints=_categories(args.topic, "complaints"),
-            use_cases=_categories(args.topic, "use_cases"),
-            min_confidence=args.min_confidence,
-            on_warn=_warn)
+            engine, args.topic,
+            Sections(
+                summary=_summary(args.topic),
+                sentiment_days=_sentiment(args.topic),
+                theme_labeler=_label_themes if args.summary else None,
+                brands=_brands(args.topic),
+                complaints=_categories(args.topic, "complaints"),
+                use_cases=_categories(args.topic, "use_cases"),
+            ),
+            min_confidence=args.min_confidence)
         out = Path(args.out or f"{slug(args.topic)}.html")
         out.write_text(html_doc, encoding="utf-8")
         print(f"wrote {out} ({len(html_doc):,} bytes)")

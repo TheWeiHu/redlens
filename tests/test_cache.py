@@ -197,7 +197,7 @@ def test_brands_are_cached_after_first_render(db, monkeypatch):
 
     assert calls["n"] == 1                       # recognizer ran once; 2nd was cached
     assert [b.name for b in first] == [b.name for b in second] == ["Tesla", "BYD"]
-    assert [b.aliases for b in first] == [b.aliases for b in second]
+    assert [b.terms for b in first] == [b.terms for b in second]
 
 
 def test_cached_brands_need_no_llm_key(db, monkeypatch):
