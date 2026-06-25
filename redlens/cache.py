@@ -1,23 +1,10 @@
 """Read-through cache for a topic's expensive LLM renders.
 
-The topic narrative (``summarize_topic``) and the daily-sentiment series
-(``daily_topic_sentiment``) are LLM-scored and used to be recomputed from
-scratch on every ``page`` render — re-sending identical data to the model and
-re-paying even when nothing about the topic changed. This module persists each
-result in the :class:`~redlens.models.TopicCache` table, keyed by a
-*data-version* (see :func:`redlens.topics.topic_data_version`), and reads it
-back when the version still matches.
-
-The shape mirrors the relevance filter's verdict caching (see
-``topic-filter-precision``): a soft, additive record that a stale read simply
-ignores and a recompute overwrites. The version is computed without an LLM key,
-so a cached render never touches the model — exactly the "a deterministic render
-shouldn't call the LLM" goal.
-
-``get`` returns the raw JSON payload (the caller deserializes — a pydantic model
-or a list of dataclasses), or ``None`` on a miss; ``put`` upserts the single
-live row for ``(topic_id, kind, variant)``; ``invalidate`` drops every cached
-row for a topic (used by ``untrack``).
+Persists each render in the :class:`~redlens.models.TopicCache` table, keyed by
+a *data-version* (see :func:`redlens.topics.topic_data_version`) and read back
+while the version still matches. The version is keyless, so a cached render
+never touches the model. ``get`` returns the raw JSON payload or ``None`` on a
+miss; ``put`` upserts the single live row; ``invalidate`` drops a topic's rows.
 """
 from __future__ import annotations
 
@@ -45,12 +32,9 @@ def get(session: Session, topic_id: int, kind: str, variant: str,
 
 def put(session: Session, topic_id: int, kind: str, variant: str,
         version: str, payload: str, model: str) -> None:
-    """Store ``payload`` as the live cache row for ``(topic_id, kind, variant)``.
-
-    Replaces any existing row for that key (one live row per flavor — a stale
-    version is overwritten, never accumulated) and commits, since the page
-    sections each run in their own short-lived read session.
-    """
+    """Store ``payload`` as the live cache row for ``(topic_id, kind, variant)``,
+    replacing any existing row for that key. Commits, since the page sections
+    each run in their own short-lived read session."""
     row = session.exec(
         select(TopicCache).where(
             TopicCache.topic_id == topic_id,

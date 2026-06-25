@@ -551,16 +551,21 @@ def topic_match_counts(session: Session, name: str,
 
 
 def topic_data_version(session: Session, name: str) -> str:
-    """A short hash of the data a topic's LLM renders depend on.
+    """A short, keyless hash of the inputs a topic's LLM renders depend on.
 
-    The cache key for :class:`~redlens.models.TopicCache`: it changes whenever
-    the topic's *relevant* matched set changes — a ``track`` that fetched new
-    posts/comments, a re-filter that flipped some to ``False``, or a ``--reset``
-    re-pull — and is stable when nothing did, so a re-render reuses the cached
-    summary/sentiment. Hashes the kept post and comment ids (the same
-    ``relevant_clause`` every read surface honors), so it costs one id-only
-    query and needs no LLM key (a cached render stays fully keyless).
+    The cache key for :class:`~redlens.models.TopicCache`. It changes when the
+    topic's *relevant* matched set changes (a ``track`` that fetched posts, a
+    re-filter, a ``--reset``) or when its keywords change — both feed the render
+    prompts — so a stale render is recomputed; it is stable when nothing did, so
+    a re-render reuses the cached output. Hashes the kept post + comment ids and
+    the keyword list.
+
+    Note: it does NOT fingerprint per-doc scores, so a re-track that only
+    refreshes vote counts (same ids) keeps the cached render. That is an accepted,
+    bounded staleness — hashing scores would bust the cache on every routine
+    re-track and defeat its purpose.
     """
+    topic = require_topic(session, name)
     post_ids = sorted(session.exec(
         select(TopicPost.post_id)
         .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
@@ -573,7 +578,9 @@ def topic_data_version(session: Session, name: str) -> str:
         .where(func.lower(Topic.name) == name.lower(), relevant_clause())
     ).all())
     h = hashlib.sha256()
-    h.update(b"posts\n")
+    h.update(b"keywords\n")
+    h.update("\n".join(topic.keyword_list).encode())
+    h.update(b"\nposts\n")
     h.update("\n".join(post_ids).encode())
     h.update(b"\ncomments\n")
     h.update("\n".join(comment_ids).encode())
