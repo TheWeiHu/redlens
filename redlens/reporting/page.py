@@ -50,20 +50,13 @@ _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _STOPWORDS = frozenset(constants.data_lines("stopwords.txt"))
 _A = constants.ACCENT
 
-# --- peak-RAM preflight (the OOM guard) --------------------------------------
-# The render pass materializes a topic's FULL post + comment lists as ORM objects
-# and builds an LDA matrix over a strided sample; the dominant, unbounded cost is
-# that ORM load (LDA is capped at constants.LDA_MAX_DOCS, sentiment is sampled).
-# We can't know the true peak without loading, so we estimate from a COUNT-only
-# preflight and warn the operator before the heavy load — we never change what is
-# rendered. ~6 KB/doc is a deliberately conservative Python-object figure
-# calibrated against the one OOM on record: ~182k docs killed a 419 MB Lightsail
-# box but rendered fine on 16 GB (toronto-v2 06-21 07:05:33); 182k * 6 KB ≈ 1.1 GB,
-# which over-shoots 419 MB so the warning fires before the kill, not after.
+# --- peak-RAM preflight (the OOM guard) ---
+# The render pass loads a topic's full post + comment lists into memory, so peak
+# RAM scales with doc count. We estimate it from a COUNT-only preflight and warn
+# before the heavy load; this never changes what's rendered. ~6 KB/doc is a
+# conservative Python-object estimate, calibrated against a real OOM.
 _RENDER_BYTES_PER_DOC = 6_000
-# Warn once the estimate clears ~512 MB — well under typical small-VPS RAM, so the
-# heads-up lands before a box that size is actually at risk.
-_RENDER_RAM_WARN_BYTES = 512 * 1024 * 1024
+_RENDER_RAM_WARN_BYTES = 512 * 1024 * 1024  # warn above ~512 MB (small-VPS headroom)
 
 
 def estimate_render_ram(post_count: int, comment_count: int) -> int:
