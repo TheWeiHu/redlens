@@ -138,7 +138,8 @@ def summarize_topic(session: Session, name: str, *,
     return summary
 
 
-def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
+def daily_topic_sentiment(session: Session, name: str,
+                          days_cap: int | None = None) -> list[DaySentiment]:
     """LLM-scored daily sentiment trend for a tracked topic.
 
     Buckets the topic's matched posts into UTC calendar days, samples each day's
@@ -147,13 +148,22 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
     works" is negative; "another amazing feature" may be sarcastic). Returns one
     :class:`~redlens.sentiment.DaySentiment` per day (``mean`` in [-1, 1]),
     gaps zero-filled. Raises :class:`NotFound`/:class:`MissingKey` like
-    :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
+    :func:`summarize_topic`; returns ``[]`` for a topic with no posts.
+
+    ``days_cap`` (when > 0) limits the trend to the most recent N calendar days
+    of activity. Since the whole series is sent in ONE prompt, the cap is the
+    lever that bounds prompt/context size on long high-volume topics (the real
+    limit, not dollars) — it shrinks both the LLM prompt and the charted window.
+    """
     topic = require_topic(session, name)
     assert topic.id is not None
     # Read-through cache (see summarize_topic): reuse the stored series when the
-    # topic's data-version is unchanged, before the key is required.
+    # topic's data-version is unchanged, before the key is required. The cap is
+    # encoded into the cache variant so a capped and an uncapped render (or two
+    # different caps) keep distinct rows instead of clobbering each other.
+    variant = f"d{days_cap}" if days_cap and days_cap > 0 else ""
     version = topic_data_version(session, topic.name)
-    cached = cache.get(session, topic.id, "sentiment", "", version)
+    cached = cache.get(session, topic.id, "sentiment", variant, version)
     if cached is not None:
         return [DaySentiment(**row) for row in json.loads(cached)]
 
@@ -174,6 +184,14 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
     # prompt is told to weigh, so it must be shown to the model and charted.
     active_days = set(posts_by_day) | set(comments_by_day)
     days = sorted(active_days)
+    # Cap the charted window to the most recent N calendar days of activity.
+    # Trimming here (before blocks AND the zero-fill loop) bounds the prompt and
+    # the chart in one place; the dropped days never reach the LLM.
+    if days_cap and days_cap > 0 and days:
+        cutoff = (date.fromisoformat(days[-1])
+                  - timedelta(days=days_cap - 1)).isoformat()
+        days = [dy for dy in days if dy >= cutoff]
+        active_days = set(days)
 
     def _snip(text: str) -> str:
         # Untrusted post/comment text goes into the prompt; sentiment.txt tells
@@ -224,7 +242,7 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
                                 len(posts_by_day.get(dy, [])),
                                 len(comments_by_day.get(dy, []))))
         cur += timedelta(days=1)
-    cache.put(session, topic.id, "sentiment", "", version,
+    cache.put(session, topic.id, "sentiment", variant, version,
               json.dumps([asdict(d) for d in out]), llm.model_name())
     return out
 
