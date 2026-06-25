@@ -663,6 +663,11 @@ def main(argv: list[str] | None = None) -> int:
                           file=sys.stderr)
                     return []
 
+            # Heads-up to stderr before the in-memory render load when a topic
+            # is big enough to OOM a small box (see page.render_ram_warning).
+            def _warn(msg: str) -> None:
+                print(f"  {msg}", file=sys.stderr)
+
             if args.all_topics:
                 out_dir = Path(args.out) if args.out else default_report_dir()
                 results = render_all(
@@ -673,7 +678,8 @@ def main(argv: list[str] | None = None) -> int:
                     brands=(_brands if args.summary or _pinned_brands is not None
                             else None),
                     complaints=_complaints if args.summary else None,
-                    use_cases=_use_cases if args.summary else None)
+                    use_cases=_use_cases if args.summary else None,
+                    on_warn=_warn)
                 written = [pg for pg in results if pg.written]
                 skipped = [pg for pg in results if not pg.written]
                 for pg in written:
@@ -695,7 +701,8 @@ def main(argv: list[str] | None = None) -> int:
                     brands=_brands(args.topic),
                     complaints=_categories(args.topic, "complaints"),
                     use_cases=_categories(args.topic, "use_cases"),
-                    min_confidence=args.min_confidence)
+                    min_confidence=args.min_confidence,
+                    on_warn=_warn)
                 out = Path(args.out or f"{slug(args.topic)}.html")
                 out.write_text(html_doc, encoding="utf-8")
                 print(f"wrote {out} ({len(html_doc):,} bytes)")

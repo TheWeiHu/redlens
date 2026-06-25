@@ -40,6 +40,7 @@ from redlens.topics import (
     require_topic,
     topic_comments,
     topic_drop_confidences,
+    topic_match_counts,
     topic_posts,
 )
 
@@ -48,6 +49,44 @@ _Item = TypeVar("_Item", Post, Comment)
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _STOPWORDS = frozenset(constants.data_lines("stopwords.txt"))
 _A = constants.ACCENT
+
+# --- peak-RAM preflight (the OOM guard) --------------------------------------
+# The render pass materializes a topic's FULL post + comment lists as ORM objects
+# and builds an LDA matrix over a strided sample; the dominant, unbounded cost is
+# that ORM load (LDA is capped at constants.LDA_MAX_DOCS, sentiment is sampled).
+# We can't know the true peak without loading, so we estimate from a COUNT-only
+# preflight and warn the operator before the heavy load — we never change what is
+# rendered. ~6 KB/doc is a deliberately conservative Python-object figure
+# calibrated against the one OOM on record: ~182k docs killed a 419 MB Lightsail
+# box but rendered fine on 16 GB (toronto-v2 06-21 07:05:33); 182k * 6 KB ≈ 1.1 GB,
+# which over-shoots 419 MB so the warning fires before the kill, not after.
+_RENDER_BYTES_PER_DOC = 6_000
+# Warn once the estimate clears ~512 MB — well under typical small-VPS RAM, so the
+# heads-up lands before a box that size is actually at risk.
+_RENDER_RAM_WARN_BYTES = 512 * 1024 * 1024
+
+
+def estimate_render_ram(post_count: int, comment_count: int) -> int:
+    """Estimated peak resident bytes to render a topic of this size, from a
+    COUNT-only preflight (see :func:`redlens.topics.topic_match_counts`). A
+    deliberate over-estimate (see ``_RENDER_BYTES_PER_DOC``) so the warning fires
+    before the OOM. Pure: easy to unit-test, never touches the DB."""
+    return (post_count + comment_count) * _RENDER_BYTES_PER_DOC
+
+
+def render_ram_warning(name: str, post_count: int, comment_count: int) -> str | None:
+    """A one-line operator warning when a topic is big enough that the in-memory
+    render may OOM a small box — or ``None`` when it comfortably fits. Names the
+    size, the estimated peak, and the two levers (bigger box / raise
+    ``--min-confidence`` to drop low-relevance posts)."""
+    est = estimate_render_ram(post_count, comment_count)
+    if est < _RENDER_RAM_WARN_BYTES:
+        return None
+    return (f"{name!r}: large topic ({post_count:,} posts + {comment_count:,} "
+            f"comments) — est. peak ~{est / 1e9:.1f} GB RAM to render in memory. "
+            f"On a small box this may OOM; render on a machine with more RAM or "
+            f"raise --min-confidence to drop low-relevance posts.")
+
 
 _CSS = f"""
 body {{ font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto;
@@ -499,6 +538,7 @@ def render_all(engine: Engine, out_dir: Path,
                brands: Callable[[str], list[Brand] | None] | None = None,
                complaints: Callable[[str], list[Category] | None] | None = None,
                use_cases: Callable[[str], list[Category] | None] | None = None,
+               on_warn: Callable[[str], None] | None = None,
                ) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
@@ -533,7 +573,7 @@ def render_all(engine: Engine, out_dir: Path,
         doc = render_topic_page(engine, listing.name, summary=summary,
                                 sentiment_days=days, theme_labeler=theme_labeler,
                                 brands=found_brands, complaints=found_complaints,
-                                use_cases=found_uses)
+                                use_cases=found_uses, on_warn=on_warn)
         (out_dir / f"{s}.html").write_text(doc, encoding="utf-8")
         results.append(
             PageResult(listing.name, s, listing.matched_posts, written=True))
@@ -573,7 +613,8 @@ def render_topic_page(engine: Engine, name: str,
                       brands: list[Brand] | None = None,
                       complaints: list[Category] | None = None,
                       use_cases: list[Category] | None = None,
-                      min_confidence: float = 0.0) -> str:
+                      min_confidence: float = 0.0,
+                      on_warn: Callable[[str], None] | None = None) -> str:
     """Render one topic's page. ``summary`` (from ``summarize --topic``) is
     optional — when given, an AI-narrative section is added. ``sentiment_days``
     (from ``daily_topic_sentiment``) is the LLM-scored sentiment trend; when
@@ -583,6 +624,14 @@ def render_topic_page(engine: Engine, name: str,
     any of them."""
     with Session(engine) as session:
         topic = require_topic(session, name)
+
+        # COUNT-only preflight: warn before the full post+comment load if this
+        # topic is big enough to OOM a small box (see render_ram_warning).
+        if on_warn is not None:
+            warning = render_ram_warning(
+                topic.name, *topic_match_counts(session, topic.name, min_confidence))
+            if warning:
+                on_warn(warning)
 
         def build_view(min_conf: float, label_themes: bool) -> tuple[str, int]:
             # post_id tie-break keeps the rendered page byte-deterministic

@@ -119,6 +119,59 @@ def test_page_score_and_influence_include_comments(engine, monkeypatch):
     assert "great insight here" in doc
 
 
+def test_estimate_render_ram_and_warning_threshold():
+    from redlens.reporting.page import (
+        _RENDER_BYTES_PER_DOC,
+        estimate_render_ram,
+        render_ram_warning,
+    )
+    # linear in total docs, post + comment
+    assert estimate_render_ram(1000, 500) == 1500 * _RENDER_BYTES_PER_DOC
+    assert estimate_render_ram(0, 0) == 0
+    # small topics get no warning; the ~182k-doc OOM case does, and the message
+    # names the size, an estimate, and both levers
+    assert render_ram_warning("tiny", 10, 5) is None
+    warn = render_ram_warning("anthropic", 100_000, 82_000)
+    assert warn is not None
+    assert "182,000 posts" not in warn          # counts are reported separately
+    assert "100,000 posts" in warn and "82,000 comments" in warn
+    assert "GB" in warn
+    assert "--min-confidence" in warn
+
+
+def test_topic_match_counts_honors_relevant_clause(engine, monkeypatch):
+    from redlens.topics import topic_match_counts
+    data = {"vpn": [raw("p1", "vpn"), raw("p2", "vpn")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "vpn", subreddits=["vpn"])
+    with Session(engine) as s:
+        s.add_all([
+            Comment(comment_id=f"c{i}", author_username="x", subreddit_name="vpn",
+                    link_id="p1", parent_id=None, created_utc=NOW, score=1,
+                    body="hi") for i in range(3)])
+        s.commit()
+        posts, comments = topic_match_counts(s, "vpn")
+    assert (posts, comments) == (2, 3)
+
+
+def test_render_topic_page_emits_ram_warning_when_large(engine, monkeypatch):
+    import redlens.reporting.page as page_mod
+    data = {"vpn": [raw("p1", "vpn"), raw("p2", "vpn")]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "vpn", subreddits=["vpn"])
+
+    seen: list[str] = []
+    # default threshold: a 2-post topic is far below it -> no warning
+    render_topic_page(engine, "vpn", on_warn=seen.append)
+    assert seen == []
+    # drop the threshold so the tiny topic trips it -> on_warn fires once
+    monkeypatch.setattr(page_mod, "_RENDER_RAM_WARN_BYTES", 1)
+    render_topic_page(engine, "vpn", on_warn=seen.append)
+    assert len(seen) == 1 and "vpn" in seen[0]
+    # no callback -> render still succeeds, byte-identical (warning is side-only)
+    assert render_topic_page(engine, "vpn").startswith("<!doctype html>")
+
+
 def test_count_mentions_orders_and_word_boundary():
     from redlens.reporting.page import _count_mentions, _mentions_section
     posts = [
