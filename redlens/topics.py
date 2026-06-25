@@ -27,6 +27,7 @@ keyword set is incremental via ``Topic.newest_seen_utc``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -38,7 +39,7 @@ from sqlalchemy import ColumnElement, delete, func, or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
-from redlens import arctic
+from redlens import arctic, cache
 from redlens.config import llm_api_key
 from redlens.constants import (
     COMMIT_BATCH,
@@ -523,6 +524,36 @@ def topic_comments(session: Session, name: str, min_confidence: float = 0.0) -> 
     ))
 
 
+def topic_data_version(session: Session, name: str) -> str:
+    """A short hash of the data a topic's LLM renders depend on.
+
+    The cache key for :class:`~redlens.models.TopicCache`: it changes whenever
+    the topic's *relevant* matched set changes — a ``track`` that fetched new
+    posts/comments, a re-filter that flipped some to ``False``, or a ``--reset``
+    re-pull — and is stable when nothing did, so a re-render reuses the cached
+    summary/sentiment. Hashes the kept post and comment ids (the same
+    ``relevant_clause`` every read surface honors), so it costs one id-only
+    query and needs no LLM key (a cached render stays fully keyless).
+    """
+    post_ids = sorted(session.exec(
+        select(TopicPost.post_id)
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
+    ).all())
+    comment_ids = sorted(session.exec(
+        select(Comment.comment_id)
+        .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
+        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
+        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
+    ).all())
+    h = hashlib.sha256()
+    h.update(b"posts\n")
+    h.update("\n".join(post_ids).encode())
+    h.update(b"\ncomments\n")
+    h.update("\n".join(comment_ids).encode())
+    return h.hexdigest()[:16]
+
+
 def _chunked(items: list[str], size: int = 400) -> list[list[str]]:
     """Split an id list into SQLite-IN-safe chunks (the variadic limit is
     ~999; 400 leaves headroom for other bound params)."""
@@ -556,6 +587,7 @@ def untrack_topic(engine: Engine, name: str) -> UntrackResult:
         session.execute(
             delete(TopicPost).where(TopicPost.topic_id == topic_id)  # type: ignore[arg-type]
         )
+        cache.invalidate(session, topic_id)
         session.delete(topic)
         session.flush()
 

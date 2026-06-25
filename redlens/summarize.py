@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Any, TypeVar
 
@@ -28,7 +29,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 from sqlmodel.sql.expression import SelectOfScalar
 
-from redlens import constants, llm, prompts
+from redlens import cache, constants, llm, prompts
 from redlens.config import require_llm_key
 from redlens.errors import NotFound, RedlensError
 from redlens.models import (
@@ -47,6 +48,7 @@ from redlens.topics import (
     relevant_clause,
     require_topic,
     topic_comments,
+    topic_data_version,
     topic_posts,
 )
 
@@ -111,16 +113,29 @@ def summarize_topic(session: Session, name: str, *,
     resolved_depth = _resolve_depth(depth)
 
     topic = require_topic(session, name)
+    assert topic.id is not None
+    # Read-through cache: a re-render of an unchanged topic reuses the stored
+    # narrative instead of re-paying the model. Keyed by the sampling depth (it
+    # changes the output) and the topic's data-version. Checked BEFORE the key
+    # is required, so a cached render stays fully keyless.
+    version = topic_data_version(session, topic.name)
+    cached = cache.get(session, topic.id, "summary", resolved_depth, version)
+    if cached is not None:
+        return TopicSummary.model_validate_json(cached)
+
     key = require_llm_key()
     prompt = _build_topic_prompt(session, topic, resolved_depth)
     data = _complete_json(prompt, key)
     try:
-        return TopicSummary.model_validate(
+        summary = TopicSummary.model_validate(
             {"topic": topic.name, "model": llm.model_name(),
              "depth": resolved_depth, **data})
     except ValidationError as exc:
         raise RedlensError(
             f"LLM topic summary didn't match the expected shape: {exc}") from exc
+    cache.put(session, topic.id, "summary", resolved_depth, version,
+              summary.model_dump_json(), summary.model)
+    return summary
 
 
 def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
@@ -134,6 +149,14 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
     gaps zero-filled. Raises :class:`NotFound`/:class:`MissingKey` like
     :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
     topic = require_topic(session, name)
+    assert topic.id is not None
+    # Read-through cache (see summarize_topic): reuse the stored series when the
+    # topic's data-version is unchanged, before the key is required.
+    version = topic_data_version(session, topic.name)
+    cached = cache.get(session, topic.id, "sentiment", "", version)
+    if cached is not None:
+        return [DaySentiment(**row) for row in json.loads(cached)]
+
     key = require_llm_key()
 
     posts = topic_posts(session, topic.name)
@@ -201,6 +224,8 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
                                 len(posts_by_day.get(dy, [])),
                                 len(comments_by_day.get(dy, []))))
         cur += timedelta(days=1)
+    cache.put(session, topic.id, "sentiment", "", version,
+              json.dumps([asdict(d) for d in out]), llm.model_name())
     return out
 
 
