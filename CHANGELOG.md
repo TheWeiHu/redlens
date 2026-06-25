@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Cap the sentiment chart's window — `page --days N`.** The sentiment-over-time
+  trend is sent to the model as a single prompt, so on long high-volume topics the
+  binding limit is prompt/context size, not cost. `--days N` keeps only the most
+  recent N days of activity, shrinking both the LLM prompt and the charted window
+  (default: no cap). Distinct from `track --days`, which is the archive *pull*
+  window. Each cap is cached separately, so a capped and an uncapped render don't
+  clobber each other.
 - **Cross-topic compare / landscape.** `redlens landscape <topics…>` (alias
   `compare`) compares two or more tracked topics by discussion *volume* —
   posts, comments, posts/day, and share-of-voice — as a terminal table, `--json`,

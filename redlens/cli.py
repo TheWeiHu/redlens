@@ -469,6 +469,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--depth", choices=SUMMARY_DEPTHS, default=SUMMARY_DEFAULT_DEPTH,
                    help="how much of the archive the --summary samples "
                    f"(default: {SUMMARY_DEFAULT_DEPTH})")
+    g.add_argument("--days", type=int, default=None, metavar="N",
+                   help="cap the sentiment-over-time chart to the most recent N "
+                   "days of activity (default: no cap). The whole trend is one "
+                   "LLM prompt, so this bounds prompt size on long high-volume "
+                   "topics; distinct from track --days (the archive pull window)")
     g.add_argument("--min-confidence", type=float, default=0.0, metavar="0-1",
                    help="only hide off-topic posts the relevance filter was at least "
                    "this confident about; lower-confidence drops stay visible (default 0 "
@@ -630,7 +635,8 @@ def main(argv: list[str] | None = None) -> int:
 
             def _sentiment(t: str) -> list[DaySentiment] | None:
                 return _section(t, "sentiment trend",
-                                lambda s: daily_topic_sentiment(s, t))
+                                lambda s: daily_topic_sentiment(
+                                    s, t, days_cap=args.days))
 
             # --brands pins a fixed entity list: skip the LLM recognizer and
             # count the user-supplied names deterministically. No key, no LLM
