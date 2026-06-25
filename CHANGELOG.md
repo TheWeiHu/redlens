@@ -14,14 +14,6 @@ adheres to [Semantic Versioning](https://semver.org/).
   (default: no cap). Distinct from `track --days`, which is the archive *pull*
   window. Each cap is cached separately, so a capped and an uncapped render don't
   clobber each other.
-- **Cross-topic compare / landscape.** `redlens landscape <topics…>` (alias
-  `compare`) compares two or more tracked topics by discussion *volume* —
-  posts, comments, posts/day, and share-of-voice — as a terminal table, `--json`,
-  or a standalone HTML page (`-o`). Keyless and deterministic (no LLM). The
-  default window is the topics' **overlapping** date range so a long-running and
-  a brand-new topic compare fairly (`--days N` forces a common trailing window);
-  brand mentions are deliberately *not* compared because topic subreddit nets are
-  near-disjoint. `--all` compares every tracked topic.
 - **Top complaints & use cases.** With `page --summary`, two new sections
   surface the recurring problems people raise and what they use the topic for.
   Same recognize-then-count split as the brands section

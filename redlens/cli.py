@@ -25,10 +25,8 @@ from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
-from redlens.landscape import Landscape, compare_topics
 from redlens.models import Brand, Category, Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
-from redlens.reporting.landscape import render_landscape
 from redlens.reporting.page import render_all, render_topic_page, slug
 from redlens.sentiment import DaySentiment
 from redlens.summarize import (
@@ -129,27 +127,6 @@ def _format_topic_summary(s: TopicSummary) -> str:
                           ("Viewpoints", s.viewpoints)):
         if body:
             lines += ["", f"{heading}: {body}"]
-    return "\n".join(lines)
-
-
-def _format_landscape(land: Landscape) -> str:
-    """Render a cross-topic comparison as an aligned terminal table (the same
-    figures are in ``--json``)."""
-    win = (f"{_ts(land.window_start)} – {_ts(land.window_end)} "
-           f"({land.window_days} day{'' if land.window_days == 1 else 's'}, "
-           f"{'matched overlap' if land.matched else 'forced window'})")
-    rows = [("topic", "posts", "comments", "/day", "share", "top subreddit")]
-    rows += [
-        (t.name, f"{t.posts:,}", f"{t.comments:,}", f"{t.posts_per_day:g}",
-         f"{t.share_of_voice:.0%}", f"r/{t.top_subreddit}" if t.top_subreddit else "—")
-        for t in land.topics
-    ]
-    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
-    lines = [f"landscape · {len(land.topics)} topics · {win}", ""]
-    lines += ["  " + "  ".join(c.ljust(widths[i]) for i, c in enumerate(r))
-              for r in rows]
-    lines += ["", "note: volume is comparable across topics; brand mentions are "
-              "not (brand nets are near-disjoint)."]
     return "\n".join(lines)
 
 
@@ -478,21 +455,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only hide off-topic posts the relevance filter was at least "
                    "this confident about; lower-confidence drops stay visible (default 0 "
                    "= hide all). The model is overconfident, so treat this as a coarse dial.")
-    lp = sub.add_parser(
-        "landscape", aliases=["compare"],
-        help="compare two or more tracked topics by discussion volume")
-    lp.set_defaults(verb="landscape")          # normalize the `compare` alias
-    lp.add_argument("topics", nargs="*",
-                    help="topics to compare (omit with --all)")
-    lp.add_argument("--all", action="store_true", dest="all_topics",
-                    help="compare every tracked topic")
-    lp.add_argument("--days", type=int, default=None, metavar="N",
-                    help="force a common trailing window of N days (default: the "
-                    "topics' overlapping window, so a 30d vs 90d topic compare fairly)")
-    lp.add_argument("-o", "--out", help="write an HTML page here instead of "
-                    "printing a table")
-    lp.add_argument("--json", action="store_true",
-                    help="emit the comparison as JSON")
     ut = sub.add_parser(
         "untrack", help="stop tracking a topic and drop its orphaned matches")
     ut.add_argument("topic")
@@ -716,19 +678,6 @@ def main(argv: list[str] | None = None) -> int:
                     webbrowser.open(out.resolve().as_uri())
             else:
                 raise RedlensError("page: give a topic or pass --all")
-        elif args.verb == "landscape":
-            with session(engine) as s:
-                names = ([t.name for t in list_topics(s)]
-                         if args.all_topics else args.topics)
-                land = compare_topics(s, names, days=args.days)
-            if args.json:
-                _emit_json(land)
-            elif args.out:
-                out = Path(args.out)
-                out.write_text(render_landscape(land), encoding="utf-8")
-                print(f"wrote {out}")
-            else:
-                print(_format_landscape(land))
         elif args.verb == "untrack":
             with session(engine) as s:
                 if get_topic(s, args.topic) is None:
