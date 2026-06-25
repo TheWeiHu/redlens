@@ -494,7 +494,8 @@ def _html_shell(title: str, body: str) -> str:
 def render_all(engine: Engine, out_dir: Path,
                summarize: Callable[[str], TopicSummary | None] | None = None,
                sentiment: Callable[[str], list[DaySentiment] | None] | None = None,
-               theme_labeler: Callable[[str, list[list[str]]], list[str]] | None = None,
+               theme_labeler: Callable[[Session, str, list[list[str]]],
+                                       list[str]] | None = None,
                brands: Callable[[str], list[Brand] | None] | None = None,
                complaints: Callable[[str], list[Category] | None] | None = None,
                use_cases: Callable[[str], list[Category] | None] | None = None,
@@ -567,8 +568,8 @@ def render_index(results: list[PageResult]) -> str:
 def render_topic_page(engine: Engine, name: str,
                       summary: TopicSummary | None = None,
                       sentiment_days: list[DaySentiment] | None = None,
-                      theme_labeler: Callable[[str, list[list[str]]], list[str]]
-                      | None = None,
+                      theme_labeler: Callable[[Session, str, list[list[str]]],
+                                              list[str]] | None = None,
                       brands: list[Brand] | None = None,
                       complaints: list[Category] | None = None,
                       use_cases: list[Category] | None = None,
@@ -589,7 +590,8 @@ def render_topic_page(engine: Engine, name: str,
             comments = topic_comments(session, topic.name, min_conf)
             section = _sentiment_section(sentiment_days) if sentiment_days else ""
             themes = _lda_themes(posts, comments, ", ".join(topic.keyword_list))
-            labels = (theme_labeler(topic.name, [words for _, words in themes])
+            labels = (theme_labeler(session, topic.name,
+                                    [words for _, words in themes])
                       if theme_labeler and themes and label_themes else None)
             themes_html = _themes_html(themes, labels)
             brands_html = _mentions_section(
