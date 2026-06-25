@@ -36,6 +36,7 @@ from redlens.summarize import (
     extract_categories,
     identify_brands,
     label_themes,
+    pin_brands,
     summarize_topic,
     summarize_user,
 )
@@ -459,6 +460,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--summary", action="store_true",
                    help="embed an AI narrative of the discussion in the page "
                    "(one LLM call per topic; BYO key)")
+    g.add_argument("--brands", metavar="a,b,c",
+                   help="comma-separated competitor/product names to count "
+                   "deterministically (whole-word over posts + comments), "
+                   "skipping the LLM brand recognizer — reproducible run-to-run "
+                   "and needs no key; renders the brands section on its own, "
+                   "without --summary")
     g.add_argument("--depth", choices=SUMMARY_DEPTHS, default=SUMMARY_DEFAULT_DEPTH,
                    help="how much of the archive the --summary samples "
                    f"(default: {SUMMARY_DEFAULT_DEPTH})")
@@ -625,7 +632,14 @@ def main(argv: list[str] | None = None) -> int:
                 return _section(t, "sentiment trend",
                                 lambda s: daily_topic_sentiment(s, t))
 
+            # --brands pins a fixed entity list: skip the LLM recognizer and
+            # count the user-supplied names deterministically. No key, no LLM
+            # call, and it renders the brands section even without --summary.
+            _pinned_brands = pin_brands(args.brands) if args.brands else None
+
             def _brands(t: str) -> list[Brand] | None:
+                if _pinned_brands is not None:
+                    return _pinned_brands
                 return _section(t, "brands", lambda s: identify_brands(s, t))
 
             def _categories(t: str, kind: str) -> list[Category] | None:
@@ -656,7 +670,8 @@ def main(argv: list[str] | None = None) -> int:
                     summarize=_summary if args.summary else None,
                     sentiment=_sentiment if args.summary else None,
                     theme_labeler=_label_themes if args.summary else None,
-                    brands=_brands if args.summary else None,
+                    brands=(_brands if args.summary or _pinned_brands is not None
+                            else None),
                     complaints=_complaints if args.summary else None,
                     use_cases=_use_cases if args.summary else None)
                 written = [pg for pg in results if pg.written]

@@ -436,6 +436,18 @@ def test_identify_brands_parses_and_samples(topic_db, monkeypatch):
     assert "carbon tax debate heats up" in seen["prompt"]  # archive sampled
 
 
+def test_pin_brands_parses_dedupes_and_drops_blanks():
+    """`page --brands` builds a fixed, key-free list: split on commas, strip,
+    drop blanks, collapse case-insensitive dupes (first spelling wins). Each
+    name is its own whole-word alias so symbol-edged names ('C++') count."""
+    from redlens.summarize import pin_brands
+
+    brands = pin_brands(" C++ , .NET, Rust , c++ , ,Rust")
+    assert [b.name for b in brands] == ["C++", ".NET", "Rust"]   # deduped, ordered
+    assert all(b.aliases == [b.name] for b in brands)            # self as alias
+    assert pin_brands("") == [] and pin_brands("  , ,") == []    # nothing to pin
+
+
 def test_identify_brands_passes_about_to_exclude_own_products(db, monkeypatch):
     """A topic's `about` is threaded into the brands prompt as the authoritative
     sense, so the recognizer can tell the subject's own products from competitors;
