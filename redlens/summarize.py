@@ -115,10 +115,8 @@ def summarize_topic(session: Session, name: str, *,
 
     topic = require_topic(session, name)
     assert topic.id is not None
-    # Read-through cache: a re-render of an unchanged topic reuses the stored
-    # narrative instead of re-paying the model. Keyed by the sampling depth (it
-    # changes the output) and the topic's data-version. Checked BEFORE the key
-    # is required, so a cached render stays fully keyless.
+    # Read-through cache (see cache.py), keyed by depth + data-version and checked
+    # before the key, so an unchanged re-render stays keyless.
     version = topic_data_version(session, topic.name)
     cached = cache.get(session, topic.id, "summary", resolved_depth, version)
     if cached is not None:
@@ -158,10 +156,8 @@ def daily_topic_sentiment(session: Session, name: str,
     """
     topic = require_topic(session, name)
     assert topic.id is not None
-    # Read-through cache (see summarize_topic): reuse the stored series when the
-    # topic's data-version is unchanged, before the key is required. The cap is
-    # encoded into the cache variant so a capped and an uncapped render (or two
-    # different caps) keep distinct rows instead of clobbering each other.
+    # Read-through cache (see cache.py). The cap goes in the variant so capped and
+    # uncapped renders keep distinct rows instead of clobbering each other.
     variant = f"d{days_cap}" if days_cap and days_cap > 0 else ""
     version = topic_data_version(session, topic.name)
     cached = cache.get(session, topic.id, "sentiment", variant, version)
@@ -256,11 +252,9 @@ def label_themes(topic: str, themes: list[list[str]], *,
     always aligned and non-empty. Raises :class:`MissingKey` with no key.
 
     When ``session`` is given (the page render path), the labels are read-through
-    cached like :func:`summarize_topic`: keyed by the topic's data-version, the
-    cache is checked BEFORE the key is required, so an unchanged topic re-renders
-    its themes with no LLM call. LDA is deterministically seeded, so the cluster
-    keywords are stable for a data-version; the cached labels are aligned to them.
-    Called without a session (unit tests / keyless callers) it always recomputes.
+    cached (see cache.py). LDA is deterministically seeded and keywords are in the
+    data-version, so the cluster set is stable for a version and the cached labels
+    stay aligned to it. Called without a session it always recomputes.
     """
     if not themes:
         return []
@@ -274,10 +268,7 @@ def label_themes(topic: str, themes: list[list[str]], *,
         cached = cache.get(session, topic_id, "themes", "", version)
         if cached is not None:
             labels: list[str] = json.loads(cached)
-            # Version makes the LDA clusters stable, so this normally holds; the
-            # length guard just keeps a stale-shaped row from misaligning.
-            if len(labels) == len(themes):
-                return labels
+            return labels
     key = require_llm_key()
     listed = "\n".join(f"{i + 1}. {', '.join(words)}"
                        for i, words in enumerate(themes))
@@ -307,15 +298,12 @@ def identify_brands(session: Session, name: str) -> list[Brand]:
 
 
 def pin_brands(spec: str) -> list[Brand]:
-    """Build a FIXED brand list from a user-supplied comma-separated ``spec``,
-    bypassing :func:`identify_brands` entirely — no LLM call, no key. Each name
-    is counted by itself as a whole-word alias, so the page's ``(?<!\\w)…(?!\\w)``
-    regex matches symbol-edged names (``C++``, ``.NET``) while still rejecting
-    substrings (``Go`` won't hit ``Google``). Blank entries are dropped and
-    case-insensitive duplicates collapse to their first spelling, so the result
-    is stable run-to-run. A trustworthy competitor ranking needs a fixed entity
-    list, not the recognizer's non-deterministic output (see the brand-recognition
-    notes in the llm-enrichment architecture)."""
+    """Build a FIXED brand list from a comma-separated ``spec``, bypassing
+    :func:`identify_brands` (no LLM call, no key) — a trustworthy competitor
+    ranking needs a fixed entity list, not the recognizer's jittery output. Each
+    name is its own whole-word alias; blanks are dropped and case-insensitive
+    duplicates collapse to their first spelling, so the result is stable
+    run-to-run. (Matching semantics are pinned by the test suite.)"""
     out: list[Brand] = []
     seen: set[str] = set()
     for raw in spec.split(","):
@@ -347,20 +335,15 @@ def _extract_labeled_terms(
     ``(name, terms)`` pairs — blank names dropped, empty term lists falling back
     to ``[name]`` so every pair is countable.
 
-    Read-through cached like :func:`summarize_topic`: the recognized set for an
-    unchanged topic is reused instead of re-paying the (expensive) recognizer,
-    keyed by the topic's data-version under ``kind=prompt_name`` so brands /
-    complaints / use-cases don't clobber each other. Checked BEFORE the key is
-    required, so a cached render stays keyless — and persisting the recognizer
-    output pins the otherwise run-to-run-jittery entity SET across re-renders."""
+    Read-through cached (see cache.py) under ``kind=prompt_name``, so brands /
+    complaints / use-cases don't clobber each other; persisting the output also
+    pins the otherwise jittery entity SET across re-renders."""
     topic = require_topic(session, name)
     assert topic.id is not None
     version = topic_data_version(session, topic.name)
-    # brands.txt disambiguates the subject via topic.about (to exclude the
-    # subject's own products), so an `--about` edit must invalidate the cached
-    # brands even when the matched post/comment set is unchanged. Fold `about`
-    # into the version. complaints/use_cases ignore `about`, so their key is
-    # untouched (empty/unchanged about → identical version → still cached).
+    # The brands prompt disambiguates the subject via topic.about, so an `--about`
+    # edit must bust the brands cache even when the matched set is unchanged.
+    # complaints/use_cases ignore `about`, so their key is untouched.
     if prompt_name == "brands":
         about_hash = hashlib.sha256(topic.about.strip().encode()).hexdigest()[:12]
         version = f"{version}:{about_hash}"

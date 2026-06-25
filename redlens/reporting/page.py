@@ -50,28 +50,24 @@ _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _STOPWORDS = frozenset(constants.data_lines("stopwords.txt"))
 _A = constants.ACCENT
 
-# --- peak-RAM preflight (the OOM guard) ---
-# The render pass loads a topic's full post + comment lists into memory, so peak
-# RAM scales with doc count. We estimate it from a COUNT-only preflight and warn
-# before the heavy load; this never changes what's rendered. ~6 KB/doc is a
-# conservative Python-object estimate, calibrated against a real OOM.
+# Peak-RAM preflight (the OOM guard): the render loads a topic's full post +
+# comment lists into memory, so we estimate peak RAM from a COUNT and warn before
+# the heavy load. ~6 KB/doc is a deliberate over-estimate, calibrated against a
+# real OOM, so the warning fires early; it never changes what's rendered.
 _RENDER_BYTES_PER_DOC = 6_000
 _RENDER_RAM_WARN_BYTES = 512 * 1024 * 1024  # warn above ~512 MB (small-VPS headroom)
 
 
 def estimate_render_ram(post_count: int, comment_count: int) -> int:
-    """Estimated peak resident bytes to render a topic of this size, from a
-    COUNT-only preflight (see :func:`redlens.topics.topic_match_counts`). A
-    deliberate over-estimate (see ``_RENDER_BYTES_PER_DOC``) so the warning fires
-    before the OOM. Pure: easy to unit-test, never touches the DB."""
+    """Estimated peak resident bytes to render a topic of this size. Pure (no
+    DB), so it unit-tests easily."""
     return (post_count + comment_count) * _RENDER_BYTES_PER_DOC
 
 
 def render_ram_warning(name: str, post_count: int, comment_count: int) -> str | None:
-    """A one-line operator warning when a topic is big enough that the in-memory
-    render may OOM a small box — or ``None`` when it comfortably fits. Names the
-    size, the estimated peak, and the two levers (bigger box / raise
-    ``--min-confidence`` to drop low-relevance posts)."""
+    """A one-line operator warning when a topic may OOM a small box, or ``None``
+    when it comfortably fits. Names the size, the estimated peak, and the two
+    levers (bigger box / raise ``--min-confidence``)."""
     est = estimate_render_ram(post_count, comment_count)
     if est < _RENDER_RAM_WARN_BYTES:
         return None

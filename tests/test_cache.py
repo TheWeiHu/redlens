@@ -135,6 +135,30 @@ def test_new_matched_post_invalidates_the_cache(db, monkeypatch):
     assert calls["n"] == 2                       # data changed -> recomputed
 
 
+def test_keyword_change_invalidates_the_cache(db, monkeypatch):
+    """Re-tracking with different keywords recomputes even when the matched id
+    set is unchanged — keywords feed the summary prompt, so they're in the
+    data-version."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _seed(db)
+    calls = _counter(monkeypatch, _SUMMARY_JSON)
+
+    with Session(connect(str(db))) as s:
+        summarize_topic(s, "vpn")
+    assert calls["n"] == 1
+
+    # Same posts, different keywords (e.g. a re-track that broadened the query).
+    with Session(connect(str(db))) as s:
+        topic = s.exec(select(Topic).where(Topic.name == "vpn")).first()
+        topic.keywords = json.dumps(["vpn", "wireguard"])
+        s.add(topic)
+        s.commit()
+
+    with Session(connect(str(db))) as s:
+        summarize_topic(s, "vpn")
+    assert calls["n"] == 2                       # keywords changed -> recomputed
+
+
 def test_untrack_invalidates_cached_rows(db, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     _seed(db)
