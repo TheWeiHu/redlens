@@ -15,7 +15,12 @@ from sqlmodel import Session, select
 from redlens import llm
 from redlens.db import connect, init_schema, upsert
 from redlens.models import Post, Topic, TopicCache, TopicPost
-from redlens.summarize import daily_topic_sentiment, summarize_topic
+from redlens.summarize import (
+    daily_topic_sentiment,
+    identify_brands,
+    label_themes,
+    summarize_topic,
+)
 from redlens.topics import untrack_topic
 
 
@@ -143,3 +148,103 @@ def test_untrack_invalidates_cached_rows(db, monkeypatch):
 
     with Session(connect(str(db))) as s:
         assert s.exec(select(TopicCache)).all() == []
+
+
+# --- task 0033: the recognizer (brands) and theme labels are cached too, so an
+# unchanged --summary page re-renders with zero LLM calls. ---
+
+_BRANDS_JSON = json.dumps({"brands": [
+    {"name": "Tesla", "aliases": ["tesla", "tsla"]},
+    {"name": "BYD", "aliases": []},
+]})
+_THEMES_JSON = json.dumps({"labels": ["Connection Problems", "Pricing"]})
+_THEMES = [["server", "connection", "slow"], ["price", "deal", "refund"]]
+
+
+def test_brands_are_cached_after_first_render(db, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _seed(db)
+    calls = _counter(monkeypatch, _BRANDS_JSON)
+
+    with Session(connect(str(db))) as s:
+        first = identify_brands(s, "vpn")
+    with Session(connect(str(db))) as s:
+        second = identify_brands(s, "vpn")
+
+    assert calls["n"] == 1                       # recognizer ran once; 2nd was cached
+    assert [b.name for b in first] == [b.name for b in second] == ["Tesla", "BYD"]
+    assert [b.aliases for b in first] == [b.aliases for b in second]
+
+
+def test_cached_brands_need_no_llm_key(db, monkeypatch):
+    """Persisting the recognizer also pins the entity SET across renders (the
+    bonus): a keyless re-render serves the identical, stable set."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _seed(db)
+    _counter(monkeypatch, _BRANDS_JSON)
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "vpn")
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with Session(connect(str(db))) as s:
+        again = identify_brands(s, "vpn")
+    assert [b.name for b in again] == ["Tesla", "BYD"]
+
+
+def test_new_matched_post_invalidates_brands(db, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _seed(db)
+    calls = _counter(monkeypatch, _BRANDS_JSON)
+
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "vpn")
+    assert calls["n"] == 1
+
+    with Session(connect(str(db))) as s:
+        topic = s.exec(select(Topic).where(Topic.name == "vpn")).first()
+        upsert(s, [Post(post_id="c", author_username="x", subreddit_name="vpn",
+                        created_utc=1_700_000_001, title="about c", score=1)])
+        upsert(s, [TopicPost(topic_id=topic.id, post_id="c")])
+        s.commit()
+
+    with Session(connect(str(db))) as s:
+        identify_brands(s, "vpn")
+    assert calls["n"] == 2                       # data changed -> re-recognized
+
+
+def test_theme_labels_are_cached_when_given_a_session(db, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _seed(db)
+    calls = _counter(monkeypatch, _THEMES_JSON)
+
+    with Session(connect(str(db))) as s:
+        first = label_themes("vpn", _THEMES, session=s)
+    with Session(connect(str(db))) as s:
+        second = label_themes("vpn", _THEMES, session=s)
+
+    assert calls["n"] == 1                       # labeled once; 2nd hit the cache
+    assert first == second == ["Connection Problems", "Pricing"]
+
+
+def test_theme_labels_keyless_re_render(db, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _seed(db)
+    _counter(monkeypatch, _THEMES_JSON)
+    with Session(connect(str(db))) as s:
+        label_themes("vpn", _THEMES, session=s)
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with Session(connect(str(db))) as s:
+        again = label_themes("vpn", _THEMES, session=s)
+    assert again == ["Connection Problems", "Pricing"]
+
+
+def test_theme_labels_without_session_always_recompute(db, monkeypatch):
+    """The keyless callers (unit path) pass no session and never cache."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _seed(db)
+    calls = _counter(monkeypatch, _THEMES_JSON)
+
+    label_themes("vpn", _THEMES)
+    label_themes("vpn", _THEMES)
+    assert calls["n"] == 2                       # no session -> no caching

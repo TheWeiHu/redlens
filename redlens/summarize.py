@@ -229,13 +229,36 @@ def daily_topic_sentiment(session: Session, name: str) -> list[DaySentiment]:
     return out
 
 
-def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
+def label_themes(topic: str, themes: list[list[str]], *,
+                 session: Session | None = None) -> list[str]:
     """Short, human-readable labels for LDA keyword clusters — one LLM call for
     all of them. Returns one label per input theme, in order; any theme the
     model skips or mangles falls back to its joined keywords, so the result is
-    always aligned and non-empty. Raises :class:`MissingKey` with no key."""
+    always aligned and non-empty. Raises :class:`MissingKey` with no key.
+
+    When ``session`` is given (the page render path), the labels are read-through
+    cached like :func:`summarize_topic`: keyed by the topic's data-version, the
+    cache is checked BEFORE the key is required, so an unchanged topic re-renders
+    its themes with no LLM call. LDA is deterministically seeded, so the cluster
+    keywords are stable for a data-version; the cached labels are aligned to them.
+    Called without a session (unit tests / keyless callers) it always recomputes.
+    """
     if not themes:
         return []
+    topic_id: int | None = None
+    version = ""
+    if session is not None:
+        cached_topic = require_topic(session, topic)
+        assert cached_topic.id is not None
+        topic_id = cached_topic.id
+        version = topic_data_version(session, cached_topic.name)
+        cached = cache.get(session, topic_id, "themes", "", version)
+        if cached is not None:
+            labels: list[str] = json.loads(cached)
+            # Version makes the LDA clusters stable, so this normally holds; the
+            # length guard just keeps a stale-shaped row from misaligning.
+            if len(labels) == len(themes):
+                return labels
     key = require_llm_key()
     listed = "\n".join(f"{i + 1}. {', '.join(words)}"
                        for i, words in enumerate(themes))
@@ -247,6 +270,9 @@ def label_themes(topic: str, themes: list[list[str]]) -> list[str]:
     for i, words in enumerate(themes):
         label = given[i].strip() if i < len(given) and isinstance(given[i], str) else ""
         out.append(label or ", ".join(words[:4]))
+    if session is not None and topic_id is not None:
+        cache.put(session, topic_id, "themes", "", version,
+                  json.dumps(out), llm.model_name())
     return out
 
 
@@ -279,8 +305,21 @@ def _extract_labeled_terms(
     sample the most-engaged posts/comments, ask ``prompt_name`` for a
     ``{"categories": [{"name", <terms_key>}]}`` list, and return
     ``(name, terms)`` pairs — blank names dropped, empty term lists falling back
-    to ``[name]`` so every pair is countable."""
+    to ``[name]`` so every pair is countable.
+
+    Read-through cached like :func:`summarize_topic`: the recognized set for an
+    unchanged topic is reused instead of re-paying the (expensive) recognizer,
+    keyed by the topic's data-version under ``kind=prompt_name`` so brands /
+    complaints / use-cases don't clobber each other. Checked BEFORE the key is
+    required, so a cached render stays keyless — and persisting the recognizer
+    output pins the otherwise run-to-run-jittery entity SET across re-renders."""
     topic = require_topic(session, name)
+    assert topic.id is not None
+    version = topic_data_version(session, topic.name)
+    cached = cache.get(session, topic.id, prompt_name, "", version)
+    if cached is not None:
+        return [(n, list(terms)) for n, terms in json.loads(cached)]
+
     key = require_llm_key()
 
     posts = topic_posts(session, topic.name)
@@ -333,6 +372,8 @@ def _extract_labeled_terms(
             continue
         seen[norm] = len(out)
         out.append((label, terms or [label]))
+    cache.put(session, topic.id, prompt_name, "", version,
+              json.dumps(out), llm.model_name())
     return out
 
 

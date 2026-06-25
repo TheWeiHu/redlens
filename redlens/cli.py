@@ -640,10 +640,10 @@ def main(argv: list[str] | None = None) -> int:
             # Theme labels are the one section with no DB and a non-None
             # fallback: one LLM call mapping LDA keyword clusters to readable
             # labels, degrading to keyword-only labels on any failure.
-            def _label_themes(topic_name: str,
+            def _label_themes(s: Session, topic_name: str,
                               word_lists: list[list[str]]) -> list[str]:
                 try:
-                    return label_themes(topic_name, word_lists)
+                    return label_themes(topic_name, word_lists, session=s)
                 except RedlensError as exc:
                     print(f"  {topic_name}: theme labels skipped — {exc}",
                           file=sys.stderr)
