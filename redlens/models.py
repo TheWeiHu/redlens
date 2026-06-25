@@ -202,6 +202,45 @@ class TopicPost(SQLModel, table=True):
     relevance_at: int | None = None          # unix seconds the verdict was recorded
 
 
+class TopicCache(SQLModel, table=True):
+    """Persisted output of an expensive per-topic LLM render, keyed by a
+    data-version so a re-render reuses it instead of re-paying the model.
+
+    The topic narrative (``summarize_topic``) and the daily-sentiment series
+    (``daily_topic_sentiment``) are LLM-scored and were recomputed from scratch
+    on every ``page`` render — re-sending identical data to the model and
+    re-paying even when nothing changed. This row caches the result the same way
+    the relevance filter caches its verdicts on :class:`TopicPost`: a soft,
+    additive, reversible record that a stale read simply ignores.
+
+    Keyed on ``(topic_id, kind, variant)`` — one live row per output flavor:
+
+    - ``kind`` — which output (``"summary"`` | ``"sentiment"``).
+    - ``variant`` — parameters that change the output but not the data, so two
+      flavors don't clobber each other: the sampling ``depth`` for a summary,
+      ``""`` for sentiment.
+    - ``version`` — the data-version the payload was computed for: a hash of the
+      topic's relevant post + comment ids (see ``topics.topic_data_version``).
+      A read is a HIT only when this equals the topic's current version, so any
+      change to the matched/filtered set (a ``track`` that fetched new posts, a
+      re-filter that dropped some, a ``--reset``) misses and recomputes. The
+      version is computed without an LLM key, so a cached render never needs one.
+    - ``payload`` — the result as JSON (``TopicSummary.model_dump_json`` / a list
+      of ``DaySentiment`` dicts), deserialized on read.
+    - ``model`` — which LLM produced it (provenance; not part of the key).
+    """
+
+    __tablename__ = "topic_cache"
+
+    topic_id: int = Field(primary_key=True)
+    kind: str = Field(primary_key=True)          # "summary" | "sentiment"
+    variant: str = Field(primary_key=True, default="")
+    version: str = ""
+    payload: str = ""
+    model: str = ""
+    created_at: int = Field(default_factory=_now)
+
+
 class Guess(BaseModel):
     """One ranked inference: a label, a 0-100 confidence, and the evidence."""
     label: str

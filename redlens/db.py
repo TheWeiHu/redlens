@@ -16,6 +16,7 @@ from redlens.models import (  # noqa: F401
     Post,
     SyncState,
     Topic,
+    TopicCache,
     TopicPost,
     User,
 )
@@ -30,7 +31,7 @@ T = TypeVar("T", bound=SQLModel)
 # Fresh databases skip migrations and are built straight at the latest schema;
 # databases from before versioning (user_version 0 with tables present) are
 # treated as version 1, the v0.2 baseline.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 # Each migration step is a tuple of operations. An operation is either a raw SQL
 # string (run as-is) or an ("addcol", table, column, decl) tuple — an additive
 # column-add that is SKIPPED when the table is absent (a prior step dropped it
@@ -64,6 +65,10 @@ MIGRATIONS: dict[int, tuple[str | AddCol, ...]] = {
     # for the relevance filter (`track --about`), so the LLM pins the right
     # meaning of an ambiguous name. Empty default = infer, unchanged behavior.
     6: (("addcol", "topic", "about", "VARCHAR NOT NULL DEFAULT ''"),),
+    # v7 adds the topic_cache table (persisted summary + daily-sentiment output,
+    # keyed by a data-version). Purely additive, so create_all builds it on the
+    # spot — this empty step only advances user_version past 6.
+    7: (),
 }
 
 
