@@ -655,6 +655,161 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
         raise RedlensError("page: give a topic or pass --all")
 
 
+def _cmd_sync(args: argparse.Namespace, engine: Engine) -> None:
+    r = sync_user(args.username, engine, full=args.full)
+    print(f"u/{r.user.username}: "
+          f"{r.posts_written:,} posts, {r.comments_written:,} comments")
+
+
+def _cmd_untrack(args: argparse.Namespace, engine: Engine) -> int | None:
+    with session(engine) as s:
+        if get_topic(s, args.topic) is None:
+            raise NotFound(f"topic {args.topic!r} is not tracked")
+    if not _confirm(
+        f"delete topic {args.topic!r} and its orphaned posts/comments?",
+        assume_yes=args.yes,
+    ):
+        print("untrack: aborted (pass -y to confirm non-interactively)",
+              file=sys.stderr)
+        return 1
+    ur = untrack_topic(engine, args.topic)
+    print(f"untracked {ur.name!r}: removed {ur.links_removed:,} topic "
+          f"links, {ur.posts_deleted:,} orphaned posts, "
+          f"{ur.comments_deleted:,} orphaned comments")
+    return None
+
+
+def _cmd_summarize(args: argparse.Namespace, engine: Engine) -> None:
+    if args.topic:
+        with session(engine) as s:
+            tsumm = summarize_topic(s, args.topic, depth=args.depth)
+        if args.json:
+            _emit_json(tsumm)
+        else:
+            print(_format_topic_summary(tsumm))
+    else:
+        if not args.username:
+            raise RedlensError("summarize: give a username or --topic <topic>")
+        with session(engine) as s:
+            summ = summarize_user(s, args.username, depth=args.depth)
+        if args.json:
+            _emit_json(summ)
+        else:
+            print(_format_profile(summ))
+
+
+def _cmd_list(args: argparse.Namespace, engine: Engine) -> None:
+    with session(engine) as s:
+        rows = list_users(s)
+    if args.json:
+        _emit_json(rows)
+    elif not rows:
+        print("no users in DB — sync one with: redlens sync <user>",
+              file=sys.stderr)
+    else:
+        for row in rows:
+            print(f"u/{row.username}: {row.total_posts:,} posts, "
+                  f"{row.total_comments:,} comments · "
+                  f"last event {_ts(row.last_event_at)} · "
+                  f"synced {_ts(row.last_synced_at)}")
+
+
+def _cmd_topics(args: argparse.Namespace, engine: Engine) -> None:
+    with session(engine) as s:
+        topic_rows = list_topics(s)
+    if args.json:
+        _emit_json(topic_rows)
+    elif not topic_rows:
+        print("no topics tracked — start one with: redlens track <topic>",
+              file=sys.stderr)
+    else:
+        for trow in topic_rows:
+            print(f"{trow.name}: {trow.matched_posts:,} posts across "
+                  f"{trow.subreddit_count:,} subreddits · "
+                  f"keywords {', '.join(trow.keywords)!r} · "
+                  f"tracked {_ts(trow.last_tracked_at)}")
+
+
+def _cmd_export(args: argparse.Namespace, engine: Engine) -> None:
+    if (args.username is None) == (args.topic is None):
+        raise RedlensError(
+            "export needs exactly one of <username> or --topic")
+
+    def _do_export(out: TextIO) -> tuple[int, int]:
+        if args.topic:
+            return export.export_topic(s, args.topic, args.format, out)
+        return export.export_user(s, args.username, args.format, out)
+
+    scope = f"topic {args.topic!r}" if args.topic else f"u/{args.username}"
+    with session(engine) as s:
+        if args.out:
+            with open(args.out, "w", encoding="utf-8", newline="") as fh:
+                n_posts, n_comments = _do_export(fh)
+            print(f"wrote {n_posts:,} posts + {n_comments:,} comments "
+                  f"for {scope} to {args.out}", file=sys.stderr)
+        else:
+            if args.format == "csv":
+                # csv writers emit their own \r\n terminators; a text
+                # stream that also translates \n would double them into
+                # \r\r\n (blank rows) on Windows. Disable translation,
+                # matching the newline="" used for the file path. Guard
+                # with getattr so a wrapped stream (e.g. test capture)
+                # without reconfigure degrades instead of crashing.
+                reconfigure = getattr(sys.stdout, "reconfigure", None)
+                if reconfigure is not None:
+                    reconfigure(newline="")
+            _do_export(sys.stdout)
+
+
+def _cmd_show(args: argparse.Namespace, engine: Engine) -> None:
+    if getattr(args, "topic", None):  # show --topic <topic>
+        with session(engine) as s:
+            ta = compute_topic_analytics(s, args.topic)
+        if args.json:
+            _emit_json(ta)
+        else:
+            _print_topic_analytics(ta)
+        return
+    # "show <user>" or its hidden alias "analytics"
+    if args.verb == "analytics":
+        print("note: 'analytics' is deprecated; use 'show' "
+              "(this alias is kept for one release)", file=sys.stderr)
+    if not args.username:
+        raise RedlensError("show: give a username or --topic <topic>")
+    with session(engine) as s:
+        an = compute_user_analytics(s, args.username)
+    if args.json:
+        _emit_json(an)
+    else:
+        print(f"u/{an.username}: {an.total_posts:,} posts, "
+              f"{an.total_comments:,} comments, "
+              f"karma {an.total_karma:+,} "
+              f"(posts {an.post_karma:+,}, comments {an.comment_karma:+,})")
+        print(f"  active {an.active_days:,} days · "
+              f"{an.distinct_subreddits:,} subs · "
+              f"top r/{an.top_subreddit} "
+              f"({an.top_subreddit_event_count:,} events)")
+        print(f"  first {_ts(an.first_event_at)} · last {_ts(an.last_event_at)}")
+
+
+# Verbs that operate on the database, by name. Each runs after main() has
+# connected and migrated the schema; `analytics` is the hidden alias for `show`.
+# A handler returns an exit code only when it needs a non-zero one (untrack's
+# aborted confirmation); otherwise None, which main() maps to 0.
+_DB_COMMANDS: dict[str, Callable[[argparse.Namespace, Engine], int | None]] = {
+    "sync": _cmd_sync,
+    "track": _cmd_track,
+    "page": _cmd_page,
+    "untrack": _cmd_untrack,
+    "summarize": _cmd_summarize,
+    "list": _cmd_list,
+    "topics": _cmd_topics,
+    "export": _cmd_export,
+    "show": _cmd_show,
+    "analytics": _cmd_show,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     p = build_parser()
     args = p.parse_args(argv)
@@ -683,132 +838,8 @@ def main(argv: list[str] | None = None) -> int:
         init_schema(engine)
         if args.verb == "init":
             print(f"schema applied to {db}")
-        elif args.verb == "sync":
-            r = sync_user(args.username, engine, full=args.full)
-            print(f"u/{r.user.username}: "
-                  f"{r.posts_written:,} posts, {r.comments_written:,} comments")
-        elif args.verb == "track":
-            _cmd_track(args, engine)
-        elif args.verb == "page":
-            _cmd_page(args, engine)
-        elif args.verb == "untrack":
-            with session(engine) as s:
-                if get_topic(s, args.topic) is None:
-                    raise NotFound(f"topic {args.topic!r} is not tracked")
-            if not _confirm(
-                f"delete topic {args.topic!r} and its orphaned posts/comments?",
-                assume_yes=args.yes,
-            ):
-                print("untrack: aborted (pass -y to confirm non-interactively)",
-                      file=sys.stderr)
-                return 1
-            ur = untrack_topic(engine, args.topic)
-            print(f"untracked {ur.name!r}: removed {ur.links_removed:,} topic "
-                  f"links, {ur.posts_deleted:,} orphaned posts, "
-                  f"{ur.comments_deleted:,} orphaned comments")
-        elif args.verb == "summarize":
-            if args.topic:
-                with session(engine) as s:
-                    tsumm = summarize_topic(s, args.topic, depth=args.depth)
-                if args.json:
-                    _emit_json(tsumm)
-                else:
-                    print(_format_topic_summary(tsumm))
-            else:
-                if not args.username:
-                    raise RedlensError(
-                        "summarize: give a username or --topic <topic>")
-                with session(engine) as s:
-                    summ = summarize_user(s, args.username, depth=args.depth)
-                if args.json:
-                    _emit_json(summ)
-                else:
-                    print(_format_profile(summ))
-        elif args.verb == "list":
-            with session(engine) as s:
-                rows = list_users(s)
-            if args.json:
-                _emit_json(rows)
-            elif not rows:
-                print("no users in DB — sync one with: redlens sync <user>",
-                      file=sys.stderr)
-            else:
-                for row in rows:
-                    print(f"u/{row.username}: {row.total_posts:,} posts, "
-                          f"{row.total_comments:,} comments · "
-                          f"last event {_ts(row.last_event_at)} · "
-                          f"synced {_ts(row.last_synced_at)}")
-        elif args.verb == "topics":
-            with session(engine) as s:
-                topic_rows = list_topics(s)
-            if args.json:
-                _emit_json(topic_rows)
-            elif not topic_rows:
-                print("no topics tracked — start one with: redlens track <topic>",
-                      file=sys.stderr)
-            else:
-                for trow in topic_rows:
-                    print(f"{trow.name}: {trow.matched_posts:,} posts across "
-                          f"{trow.subreddit_count:,} subreddits · "
-                          f"keywords {', '.join(trow.keywords)!r} · "
-                          f"tracked {_ts(trow.last_tracked_at)}")
-        elif args.verb == "export":
-            if (args.username is None) == (args.topic is None):
-                raise RedlensError(
-                    "export needs exactly one of <username> or --topic")
-
-            def _do_export(out: TextIO) -> tuple[int, int]:
-                if args.topic:
-                    return export.export_topic(s, args.topic, args.format, out)
-                return export.export_user(s, args.username, args.format, out)
-
-            scope = f"topic {args.topic!r}" if args.topic else f"u/{args.username}"
-            with session(engine) as s:
-                if args.out:
-                    with open(args.out, "w", encoding="utf-8", newline="") as fh:
-                        n_posts, n_comments = _do_export(fh)
-                    print(f"wrote {n_posts:,} posts + {n_comments:,} comments "
-                          f"for {scope} to {args.out}", file=sys.stderr)
-                else:
-                    if args.format == "csv":
-                        # csv writers emit their own \r\n terminators; a text
-                        # stream that also translates \n would double them into
-                        # \r\r\n (blank rows) on Windows. Disable translation,
-                        # matching the newline="" used for the file path. Guard
-                        # with getattr so a wrapped stream (e.g. test capture)
-                        # without reconfigure degrades instead of crashing.
-                        reconfigure = getattr(sys.stdout, "reconfigure", None)
-                        if reconfigure is not None:
-                            reconfigure(newline="")
-                    _do_export(sys.stdout)
-        elif getattr(args, "topic", None):  # show --topic <topic>
-            with session(engine) as s:
-                ta = compute_topic_analytics(s, args.topic)
-            if args.json:
-                _emit_json(ta)
-            else:
-                _print_topic_analytics(ta)
-        else:  # "show <user>" or its hidden alias "analytics"
-            if args.verb == "analytics":
-                print("note: 'analytics' is deprecated; use 'show' "
-                      "(this alias is kept for one release)", file=sys.stderr)
-            if not args.username:
-                raise RedlensError("show: give a username or --topic <topic>")
-            with session(engine) as s:
-                an = compute_user_analytics(s, args.username)
-            if args.json:
-                _emit_json(an)
-            else:
-                print(f"u/{an.username}: {an.total_posts:,} posts, "
-                      f"{an.total_comments:,} comments, "
-                      f"karma {an.total_karma:+,} "
-                      f"(posts {an.post_karma:+,}, comments {an.comment_karma:+,})")
-                print(f"  active {an.active_days:,} days · "
-                      f"{an.distinct_subreddits:,} subs · "
-                      f"top r/{an.top_subreddit} "
-                      f"({an.top_subreddit_event_count:,} events)")
-                print(f"  first {_ts(an.first_event_at)} · last {_ts(an.last_event_at)}")
-        return 0
+            return 0
+        return _DB_COMMANDS[args.verb](args, engine) or 0
     except BrokenPipeError:
         # A downstream reader (head, less, a closed pager) shut the pipe early.
         # Point stdout at devnull so the interpreter's final flush can't re-raise
