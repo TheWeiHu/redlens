@@ -20,7 +20,16 @@ from redlens.db import connect, init_schema
 from redlens.errors import NotFound, RedlensError
 from redlens.models import Comment, Post, TopicPost, User
 from redlens.reporting.page import Sections, render_topic_page
-from redlens.topics import get_topic, list_topics, track_topic, untrack_topic
+from redlens.topics import (
+    get_topic,
+    list_topics,
+    topic_comments,
+    topic_data_version,
+    topic_drop_confidences,
+    topic_posts,
+    track_topic,
+    untrack_topic,
+)
 
 NOW = int(time.time())
 
@@ -117,6 +126,53 @@ def test_page_score_and_influence_include_comments(engine, monkeypatch):
     # and their comment is drillable
     assert "u/commenter (3 comments)" in doc
     assert "great insight here" in doc
+
+
+def test_topic_read_helpers_filter_by_topic_id_and_confidence(engine, monkeypatch):
+    data = {"vpn": [
+        raw("p1", "vpn", score=100, title="kept"),
+        raw("p2", "vpn", score=200, title="low-confidence drop"),
+        raw("p3", "vpn", score=300, title="confident drop"),
+    ]}
+    monkeypatch.setattr(arctic, "iter_subreddit_query", fake_query(data))
+    track_topic(engine, "VPN", subreddits=["vpn"])
+    with Session(engine) as s:
+        topic = get_topic(s, "vpn")
+        assert topic is not None and topic.id is not None
+        for post_id, relevant, confidence in [
+            ("p1", True, 1.0),
+            ("p2", False, 0.4),
+            ("p3", False, 0.8),
+        ]:
+            row = s.get(TopicPost, (topic.id, post_id))
+            assert row is not None
+            row.relevant = relevant
+            row.relevance_confidence = confidence
+            s.add(row)
+        s.add_all([
+            Comment(comment_id="c1", author_username="reader", subreddit_name="vpn",
+                    link_id="p1", parent_id=None, created_utc=NOW, score=10),
+            Comment(comment_id="c2", author_username="reader", subreddit_name="vpn",
+                    link_id="p2", parent_id=None, created_utc=NOW, score=20),
+            Comment(comment_id="c3", author_username="reader", subreddit_name="vpn",
+                    link_id="p3", parent_id=None, created_utc=NOW, score=30),
+        ])
+        s.commit()
+
+        assert [p.post_id for p in topic_posts(s, "vpn")] == ["p1"]
+        assert [c.comment_id for c in topic_comments(s, "vpn")] == ["c1"]
+        assert [p.post_id for p in topic_posts(s, "vpn", min_confidence=0.5)] == ["p2", "p1"]
+        assert [c.comment_id for c in topic_comments(s, "vpn", min_confidence=0.5)] == [
+            "c2", "c1"]
+        assert topic_drop_confidences(s, "vpn") == [0.4, 0.8]
+        assert topic_data_version(s, "vpn") == topic_data_version(s, "VPN")
+
+
+def test_unknown_topic_read_helpers_return_empty(engine):
+    with Session(engine) as s:
+        assert topic_posts(s, "missing") == []
+        assert topic_comments(s, "missing") == []
+        assert topic_drop_confidences(s, "missing") == []
 
 
 def test_count_mentions_orders_and_word_boundary():

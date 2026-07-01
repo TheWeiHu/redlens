@@ -17,6 +17,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from importlib.resources import files
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
@@ -46,49 +47,8 @@ _WORD_RE = re.compile(r"[a-z0-9']+")
 _Item = TypeVar("_Item", Post, Comment)
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _STOPWORDS = frozenset(constants.data_lines("stopwords.txt"))
-_A = constants.ACCENT
-
-_CSS = f"""
-body {{ font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto;
-       padding: 0 1rem; line-height: 1.4; color: #222; }}
-h1, h2 {{ font-weight: 600; }}
-h1 {{ text-align: center; }}
-h2 {{ margin-top: 2rem; font-size: 1rem; text-transform: uppercase;
-     letter-spacing: .05em; color: {_A}; border-bottom: 2px solid {_A};
-     padding-bottom: .2rem; }}
-a {{ color: {_A}; text-decoration: none; }}
-a:hover {{ text-decoration: underline; }}
-.bar {{ display: grid; grid-template-columns: 15rem 1fr 4rem; gap: .5rem;
-       align-items: center; margin: .15rem 0; }}
-.bar .t {{ background: #f0e7e3; }} .bar .f {{ background: {_A}; height: .9rem; }}
-.bar .v {{ text-align: right; color: #666; }}
-details > summary {{ list-style: none; cursor: pointer; }}
-details > summary::-webkit-details-marker {{ display: none; }}
-details[open] > summary .bar {{ background: #faf3f0; }}
-details ul {{ margin: .2rem 0 .6rem 1rem; padding: 0; }}
-details li {{ list-style: none; font-size: .9rem; margin: .1rem 0; }}
-.muted {{ color: #888; font-size: .85rem; }}
-.cfslide {{ margin: .2rem 0 1.4rem; padding: .7rem .9rem; border: 1px solid #eee;
-  border-radius: 10px; background: #fafafa; }}
-.cfslide-top {{ text-align: center; margin-bottom: .55rem; }}
-.cfslide-top output {{ color: {_A}; font-weight: 600; font-size: .95rem; }}
-.cfslide-track {{ display: flex; align-items: center; gap: .7rem; }}
-.cfslide-track input[type=range] {{ flex: 1; accent-color: {_A}; }}
-.cfend {{ font-size: .72rem; color: #999; white-space: nowrap; }}
-svg {{ width: 100%; height: auto; }}
-svg rect, svg circle {{ fill: {_A}; }}
-svg rect.pos {{ fill: #2e8b57; }} svg rect.neg {{ fill: {_A}; }}
-svg text {{ fill: #888; font-size: 9px; }}
-table {{ border-collapse: collapse; width: 100%; }}
-td {{ border-bottom: 1px solid #eee; padding: .3rem .5rem; vertical-align: top; }}
-td.n {{ text-align: right; white-space: nowrap; color: #666; }}
-.summary {{ background: #faf3f0; border-left: 3px solid {_A}; padding: .6rem .9rem;
-           border-radius: 0 4px 4px 0; }}
-.summary ul.themes {{ margin: .4rem 0 .4rem 1.1rem; padding: 0; }}
-.summary ul.themes li {{ list-style: disc; font-size: .95rem; margin: .2rem 0; }}
-.summary .lbl {{ color: {_A}; font-weight: 600; }}
-.summary p {{ margin: .4rem 0; }}
-"""
+_CSS = files("redlens.reporting").joinpath("style.css").read_text(
+    encoding="utf-8").replace("$ACCENT", constants.ACCENT)
 
 
 def _date(ts: int) -> str:
@@ -131,6 +91,13 @@ def _post_links(posts: list[Post]) -> str:
     the real Reddit threads behind it."""
     return "<ul>" + "".join(
         _post_li(p) for p in posts[:constants.DRILL_POSTS]) + "</ul>"
+
+
+def _activity_links(posts: list[Post], comments: list[Comment]) -> str:
+    aposts = sorted(posts, key=lambda p: (-p.score, p.post_id))[:constants.DRILL_POSTS]
+    acomments = sorted(comments, key=lambda c: (-c.score, c.comment_id))[
+        :constants.DRILL_POSTS]
+    return "".join(_post_li(p) for p in aposts) + "".join(_comment_li(c) for c in acomments)
 
 
 def _drill(rows: list[tuple[str, int]], groups: dict[str, list[Post]],
@@ -332,13 +299,8 @@ def _mentions_section(
     peak = max(n for _, n, _, _ in rows)
     out = []
     for name, n, mp, mc in rows:
-        aposts = sorted(mp, key=lambda p: (-p.score, p.post_id))[:constants.DRILL_POSTS]
-        acomments = sorted(mc, key=lambda c: (-c.score, c.comment_id)
-                           )[:constants.DRILL_POSTS]
-        items = ("".join(_post_li(p) for p in aposts)
-                 + "".join(_comment_li(c) for c in acomments))
         out.append(f"<details><summary>{_bar(name, n, peak)}</summary>"
-                   f"<ul>{items}</ul></details>")
+                   f"<ul>{_activity_links(mp, mc)}</ul></details>")
     return (f"<h2>{html.escape(heading)}</h2>\n"
             f'<p class="muted">{html.escape(caption)}</p>\n' + "\n".join(out))
 
@@ -392,12 +354,8 @@ def _influence_drill(infl: list[tuple[str, int, str]],
     peak = max((pts for _, pts, _ in infl), default=1)
     out = []
     for label, pts, author in infl:
-        aposts = sorted(posts_by_author.get(author, []),
-                        key=lambda p: (-p.score, p.post_id))[:constants.DRILL_POSTS]
-        acomments = sorted(comments_by_author.get(author, []),
-                           key=lambda c: (-c.score, c.comment_id))[:constants.DRILL_POSTS]
-        items = ("".join(_post_li(p) for p in aposts)
-                 + "".join(_comment_li(c) for c in acomments))
+        items = _activity_links(
+            posts_by_author.get(author, []), comments_by_author.get(author, []))
         out.append(
             f'<details><summary>{_bar(label, pts, peak, "u/")}</summary>'
             f"<ul>{items}</ul></details>")
@@ -608,24 +566,27 @@ def render_topic_page(engine: Engine, name: str,
                                         [words for _, words in themes])
                       if sec.theme_labeler and themes and label_themes else None)
             themes_html = _themes_html(themes, labels)
-            brands_html = _mentions_section(
-                "Other brands mentioned",
+
+            def mentions_html(
+                groups: list[MentionGroup] | None, heading: str, caption: str,
+            ) -> str:
+                return _mentions_section(
+                    heading, caption,
+                    _count_mentions([(g.name, g.terms) for g in groups], posts, comments),
+                ) if groups else ""
+
+            brands_html = mentions_html(
+                sec.brands, "Other brands mentioned",
                 "competitors and alternatives named in the discussion, by posts + "
-                "comments mentioning them · click to read",
-                _count_mentions([(g.name, g.terms) for g in sec.brands], posts, comments),
-            ) if sec.brands else ""
-            complaints_html = _mentions_section(
-                "Top complaints",
+                "comments mentioning them · click to read")
+            complaints_html = mentions_html(
+                sec.complaints, "Top complaints",
                 "recurring problems people raise, by posts + comments mentioning "
-                "them · click to read",
-                _count_mentions([(g.name, g.terms) for g in sec.complaints], posts, comments),
-            ) if sec.complaints else ""
-            use_cases_html = _mentions_section(
-                "Use cases",
+                "them · click to read")
+            use_cases_html = mentions_html(
+                sec.use_cases, "Use cases",
                 "what people use it for, by posts + comments mentioning it · "
-                "click to read",
-                _count_mentions([(g.name, g.terms) for g in sec.use_cases], posts, comments),
-            ) if sec.use_cases else ""
+                "click to read")
             return (_view(topic, posts, comments, sec.summary, section, themes_html,
                           brands_html, complaints_html, use_cases_html), len(posts))
 

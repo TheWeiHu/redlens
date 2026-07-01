@@ -69,6 +69,13 @@ def test_csv_has_kind_column_and_one_row_per_record(db_session):
     assert rows[1]["comment_id"] == "c1"
 
 
+def test_empty_csv_still_has_kind_header(db_session):
+    upsert(db_session, [User(username="alice")])
+    out = io.StringIO()
+    assert export_user(db_session, "alice", "csv", out) == (0, 0)
+    assert out.getvalue().splitlines() == ["kind"]
+
+
 def test_csv_defuses_formula_injection(db_session):
     """A Reddit-controlled field starting with a spreadsheet formula trigger is
     neutralized with a leading quote so it can't execute on open."""
