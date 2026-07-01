@@ -490,11 +490,11 @@ def topic_drop_confidences(session: Session, name: str) -> list[float]:
     """Distinct confidences (rounded to 0.1) at which the relevance filter dropped
     a post — the breakpoints a confidence slider snaps to, where the visible set
     actually changes. Empty when nothing was dropped (no slider needed)."""
+    if (topic := get_topic(session, name)) is None:
+        return []
     vals = session.exec(
         select(TopicPost.relevance_confidence)
-        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(),
-               col(TopicPost.relevant).is_(False),
+        .where(TopicPost.topic_id == topic.id, col(TopicPost.relevant).is_(False),
                col(TopicPost.relevance_confidence).isnot(None))
     ).all()
     return sorted({round(v, 1) for v in vals if v is not None})
@@ -504,22 +504,24 @@ def topic_posts(session: Session, name: str, min_confidence: float = 0.0) -> lis
     """Posts matched to a topic, highest-scoring first (post_id tie-break
     keeps the order deterministic, matching the rendered page). ``min_confidence``
     keeps low-confidence drops visible (see :func:`relevant_clause`)."""
+    if (topic := get_topic(session, name)) is None:
+        return []
     return list(session.exec(
         select(Post)
         .join(TopicPost, TopicPost.post_id == Post.post_id)  # type: ignore[arg-type]
-        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
+        .where(TopicPost.topic_id == topic.id, relevant_clause(min_confidence))
         .order_by(Post.score.desc(), Post.post_id)  # type: ignore[attr-defined]
     ))
 
 
 def topic_comments(session: Session, name: str, min_confidence: float = 0.0) -> list[Comment]:
     """Comments under a topic's matched posts (the link_id bridge)."""
+    if (topic := get_topic(session, name)) is None:
+        return []
     return list(session.exec(
         select(Comment)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
-        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause(min_confidence))
+        .where(TopicPost.topic_id == topic.id, relevant_clause(min_confidence))
         .order_by(Comment.score.desc(), Comment.comment_id)  # type: ignore[attr-defined]
     ))
 
@@ -542,14 +544,12 @@ def topic_data_version(session: Session, name: str) -> str:
     topic = require_topic(session, name)
     post_ids = sorted(session.exec(
         select(TopicPost.post_id)
-        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
+        .where(TopicPost.topic_id == topic.id, relevant_clause())
     ).all())
     comment_ids = sorted(session.exec(
         select(Comment.comment_id)
         .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
-        .join(Topic, Topic.id == TopicPost.topic_id)  # type: ignore[arg-type]
-        .where(func.lower(Topic.name) == name.lower(), relevant_clause())
+        .where(TopicPost.topic_id == topic.id, relevant_clause())
     ).all())
     h = hashlib.sha256()
     h.update(b"keywords\n")

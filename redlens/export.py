@@ -30,6 +30,13 @@ FORMATS = ("json", "csv", "jsonl")
 _CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
 
 
+def _records(posts: list[Post], comments: list[Comment]) -> list[dict[str, object]]:
+    return (
+        [{"kind": "post", **p.model_dump()} for p in posts]
+        + [{"kind": "comment", **c.model_dump()} for c in comments]
+    )
+
+
 def _csv_safe(value: object) -> object:
     """Neutralize CSV formula injection: prefix a leading formula trigger with a
     single quote so spreadsheets render it as text. Non-strings pass through."""
@@ -63,18 +70,11 @@ def _dump(
         )
         out.write("\n")
     elif fmt == "jsonl":
-        for p in posts:
-            out.write(json.dumps({"kind": "post", **p.model_dump()}) + "\n")
-        for c in comments:
-            out.write(json.dumps({"kind": "comment", **c.model_dump()}) + "\n")
+        for row in _records(posts, comments):
+            out.write(json.dumps(row) + "\n")
     else:  # csv
-        rows = [{"kind": "post", **p.model_dump()} for p in posts]
-        rows += [{"kind": "comment", **c.model_dump()} for c in comments]
-        fields = ["kind"]
-        for row in rows:
-            for key in row:
-                if key not in fields:
-                    fields.append(key)
+        rows = _records(posts, comments)
+        fields = list(dict.fromkeys(["kind", *(key for row in rows for key in row)]))
         writer = csv.DictWriter(out, fieldnames=fields)
         writer.writeheader()
         writer.writerows({k: _csv_safe(v) for k, v in row.items()} for row in rows)
