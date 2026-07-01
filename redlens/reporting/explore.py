@@ -17,6 +17,7 @@ import json
 import sqlite3
 import threading
 import webbrowser
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -42,8 +43,7 @@ class DB:
         return con
 
     def tables(self) -> list[dict[str, Any]]:
-        con = self._conn()
-        try:
+        with closing(self._conn()) as con:
             names = [
                 r[0] for r in con.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
@@ -60,16 +60,13 @@ class DB:
                 rows = con.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
                 out.append({"name": name, "rows": rows, "columns": cols})
             return out
-        finally:
-            con.close()
 
     def _columns(self, con: sqlite3.Connection, table: str) -> list[str]:
         return [c["name"] for c in con.execute(f'PRAGMA table_info("{table}")')]
 
     def rows(self, table: str, *, limit: int, offset: int,
              order: str | None, direction: str, col: str, q: str) -> dict[str, Any]:
-        con = self._conn()
-        try:
+        with closing(self._conn()) as con:
             cols = self._columns(con, table)
             if not cols:
                 raise ValueError(f"unknown table: {table}")
@@ -97,8 +94,6 @@ class DB:
             data = [list(r) for r in cur.fetchall()]
             return {"columns": cols, "rows": data, "total": total,
                     "limit": limit, "offset": max(0, offset)}
-        finally:
-            con.close()
 
     def query(self, sql: str) -> dict[str, Any]:
         stmt = sql.strip().rstrip(";").strip()
@@ -109,15 +104,12 @@ class DB:
         head = stmt.split(None, 1)[0].lower()
         if head not in {"select", "with", "pragma", "explain"}:
             raise ValueError("read-only console: SELECT / WITH / PRAGMA / EXPLAIN only")
-        con = self._conn()
-        try:
+        with closing(self._conn()) as con:
             cur = con.execute(stmt)
             cols = [d[0] for d in cur.description] if cur.description else []
             rows = [list(r) for r in cur.fetchmany(MAX_QUERY_ROWS)]
             truncated = cur.fetchone() is not None
             return {"columns": cols, "rows": rows, "truncated": truncated}
-        finally:
-            con.close()
 
 
 # --------------------------------------------------------------------------- #

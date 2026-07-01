@@ -16,7 +16,7 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
 from typing import TypeVar
@@ -127,8 +127,8 @@ def _daily(posts: list[Post]) -> list[tuple[str, int]]:
         return []
     totals: Counter[str] = Counter(_date(p.created_utc) for p in posts)
     days = sorted(totals)
-    out, cur = [], datetime.fromisoformat(days[0]).date()
-    end = datetime.fromisoformat(days[-1]).date()
+    out, cur = [], date.fromisoformat(days[0])
+    end = date.fromisoformat(days[-1])
     while cur <= end:
         out.append((cur.isoformat(), totals.get(cur.isoformat(), 0)))
         cur += timedelta(days=1)
