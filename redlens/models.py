@@ -12,6 +12,13 @@ def _now() -> int:
     return int(time.time())
 
 
+_USER_META_FIELDS = (
+    "num_posts", "num_comments", "post_karma", "comment_karma",
+    "earliest_post_at", "last_post_at", "earliest_comment_at", "last_comment_at",
+    "post_stats_updated_at", "comment_stats_updated_at",
+)
+
+
 class User(SQLModel, table=True):
     """A Reddit account plus its arctic activity stats.
 
@@ -43,16 +50,7 @@ class User(SQLModel, table=True):
         return cls(
             username=raw["author"],
             author_fullname=raw.get("id"),
-            num_posts=meta.get("num_posts"),
-            num_comments=meta.get("num_comments"),
-            post_karma=meta.get("post_karma"),
-            comment_karma=meta.get("comment_karma"),
-            earliest_post_at=meta.get("earliest_post_at"),
-            last_post_at=meta.get("last_post_at"),
-            earliest_comment_at=meta.get("earliest_comment_at"),
-            last_comment_at=meta.get("last_comment_at"),
-            post_stats_updated_at=meta.get("post_stats_updated_at"),
-            comment_stats_updated_at=meta.get("comment_stats_updated_at"),
+            **{field: meta.get(field) for field in _USER_META_FIELDS},
         )
 
 
