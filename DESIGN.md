@@ -84,6 +84,9 @@ in **collapsed sections**. **Every matrix cell is clickable** (a drawer opens
 with the exact posts/comments behind it), and every account name opens a
 hash-routed **profile view** (`#/user/<name>`): identity stats, subreddit
 breakdown, top co-actors, brand mentions, and the raw paginated activity.
+**Cohort labels** (`cohorts.csv` next to the DB, or `--cohorts PATH`) group
+the matrices by cohort with separators and tag every account with its chip —
+the coordinated block reads as a block, organics stand apart.
 
 It reuses `explore.py`'s pattern: a stdlib `http.server` opening the DB
 **read-only**, a JSON API, and one self-contained vanilla-JS page (no build

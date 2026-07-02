@@ -20,9 +20,14 @@ Every matrix cell is **clickable**: the drawer opens with the exact
 posts/comments (or shared subs + threads, for a heatmap pair) behind that
 cell, and any account drills into its raw history.
 
+With **cohort labels** (``cohorts.csv`` next to the DB, or ``--cohorts PATH``:
+``account, cohort`` per line) the matrices group accounts by cohort with
+separators — the coordinated block reads as a block — and every account
+carries its cohort chip.
+
     redlens serve                          # over the default DB
     redlens --db redrover.db serve         # dogfood on the redrover network
-    redlens serve --brands brands.csv --port 9000 --no-browser
+    redlens serve --brands brands.csv --cohorts cohorts.csv --no-browser
 
 The page follows the redlens report style (light, one ``constants.ACCENT``
 red). The database is opened **read-only**; nothing here can mutate data and no
@@ -67,6 +72,19 @@ _SKIP_TERMS = frozenset(constants.data_lines("stopwords.txt")) | frozenset({
     "reddit", "redditor", "redditors"})
 
 BrandRoster = list[tuple[str, list[str]]]  # (display name, match terms)
+CohortLabels = dict[str, str]              # account -> cohort name
+
+
+def _csv_rows(path: Path) -> list[list[str]]:
+    """Non-empty CSV rows, cells stripped; blank lines and ``#`` comments
+    skipped. The shared reader behind the roster and cohort files."""
+    out = []
+    with path.open(newline="", encoding="utf-8") as fh:
+        for row in csv.reader(fh):
+            cells = [c.strip() for c in row if c.strip()]
+            if cells and not cells[0].startswith("#"):
+                out.append(cells)
+    return out
 
 
 def load_brands(path: Path) -> BrandRoster:
@@ -74,16 +92,19 @@ def load_brands(path: Path) -> BrandRoster:
 
     One brand per line: the display name, then the terms that count as a
     mention (``NordVPN, nordvpn, nord vpn``). A name with no terms matches
-    itself. Blank lines and ``#`` comments are skipped.
+    itself.
     """
-    roster: BrandRoster = []
-    with path.open(newline="", encoding="utf-8") as fh:
-        for row in csv.reader(fh):
-            cells = [c.strip() for c in row if c.strip()]
-            if not cells or cells[0].startswith("#"):
-                continue
-            roster.append((cells[0], cells[1:] or cells[:1]))
-    return roster
+    return [(cells[0], cells[1:] or cells[:1]) for cells in _csv_rows(path)]
+
+
+def load_cohorts(path: Path) -> CohortLabels:
+    """Parse a cohort-labels CSV: ``account, cohort`` per line.
+
+    Cohort names are free-form (``coordinated``, ``organic``, …); accounts
+    absent from the file count as unlabeled. File order matters: matrices
+    group cohorts in the order they first appear, unlabeled last.
+    """
+    return {cells[0]: cells[1] for cells in _csv_rows(path) if len(cells) >= 2}
 
 
 def _term_pattern(terms: list[str]) -> re.Pattern[str]:
@@ -105,9 +126,15 @@ def _term_pattern(terms: list[str]) -> re.Pattern[str]:
 class Network:
     """Read-only queries that describe the account network in one DB."""
 
-    def __init__(self, path: str, roster: BrandRoster | None = None) -> None:
+    def __init__(self, path: str, roster: BrandRoster | None = None,
+                 cohorts: CohortLabels | None = None) -> None:
         self.path = str(Path(path).resolve())
         self.roster = roster or []
+        self.cohorts = cohorts or {}
+        # cohort display order = first appearance in the labels file
+        self._cohort_rank: dict[str, int] = {}
+        for c in self.cohorts.values():
+            self._cohort_rank.setdefault(c, len(self._cohort_rank))
 
     def _conn(self) -> sqlite3.Connection:
         con = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
@@ -133,7 +160,17 @@ class Network:
                 """
             ).fetchone()
             out = dict(row)
-            out["accounts"] = len(self._authors(con))
+            authors = self._authors(con)
+            out["accounts"] = len(authors)
+            if self.cohorts:
+                tally = Counter(
+                    self.cohorts.get(u, "unlabeled") for u in authors)
+                unlabeled = len(self._cohort_rank)
+                out["cohorts"] = [
+                    {"cohort": c, "accounts": n} for c, n in sorted(
+                        tally.items(),
+                        key=lambda kv: self._cohort_rank.get(kv[0], unlabeled))
+                ]
             return out
 
     def _authors(self, con: sqlite3.Connection) -> list[str]:
@@ -145,14 +182,20 @@ class Network:
         ]
 
     def _matrix_accounts(self, con: sqlite3.Connection) -> list[str]:
-        """The matrix column order: top accounts by total activity."""
-        return [
+        """The matrix column order: top accounts by total activity, grouped
+        by cohort (labels-file order, unlabeled last) when labels exist."""
+        rows = [
             r["u"] for r in con.execute(
                 f"SELECT u, count(*) n FROM ({_ACTIVITY}) "
                 "GROUP BY u ORDER BY n DESC, u LIMIT ?",
                 (MAX_ACCOUNTS,),
             )
         ]
+        if self.cohorts:
+            unlabeled = len(self._cohort_rank)
+            rows.sort(key=lambda u: self._cohort_rank.get(
+                self.cohorts.get(u, ""), unlabeled))  # stable: activity kept
+        return rows
 
     def accounts(self) -> list[dict[str, Any]]:
         """Per-account volume, karma, active window, and busiest subreddit."""
@@ -186,6 +229,7 @@ class Network:
                 d = dict(r)
                 d["total"] = d["posts"] + d["comments"]
                 d["top_subreddit"] = top.get(d["username"], "")
+                d["cohort"] = self.cohorts.get(d["username"], "")
                 out.append(d)
             out.sort(key=lambda d: (-d["total"], d["username"]))
             return out
@@ -243,6 +287,8 @@ class Network:
                 """, "threads")
             return {
                 "accounts": accounts,
+                "cohorts": {u: c for u in accounts
+                            if (c := self.cohorts.get(u))},
                 "total_accounts": len(self._authors(con)),
                 "pairs": [{"a": a, "b": b, **v}
                           for (a, b), v in sorted(cells.items())],
@@ -487,6 +533,7 @@ class Network:
                                          str(c["account"])))
             return {
                 "username": username,
+                "cohort": self.cohorts.get(username, ""),
                 **dict(row),
                 "post_karma": karma["post_karma"] if karma else None,
                 "comment_karma": karma["comment_karma"] if karma else None,
@@ -693,22 +740,38 @@ class Handler(BaseHTTPRequestHandler):
 # Entry point                                                                  #
 # --------------------------------------------------------------------------- #
 
-def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
-          open_browser: bool = True, brands: str | Path | None = None) -> int:
-    # Brand roster: an explicit --brands path must exist; otherwise a
-    # brands.csv sitting next to the DB is picked up automatically.
-    brands_path = Path(brands) if brands else Path(db).resolve().parent / "brands.csv"
-    roster: BrandRoster = []
-    if brands and not brands_path.is_file():
-        print(f"brands file not found: {brands_path}", file=sys.stderr)
-        return 2
-    if brands_path.is_file():
-        roster = load_brands(brands_path)
+def _sidecar(db: str | Path, explicit: str | Path | None,
+             default_name: str) -> Path | None:
+    """Resolve an optional sidecar file (brand roster, cohort labels): an
+    explicit path must exist; otherwise the default next to the DB is picked
+    up automatically when present. Returns None for "no file"."""
+    if explicit:
+        p = Path(explicit)
+        if not p.is_file():
+            raise FileNotFoundError(p)
+        return p
+    p = Path(db).resolve().parent / default_name
+    return p if p.is_file() else None
 
-    net = Network(str(db), roster=roster)
+
+def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
+          open_browser: bool = True, brands: str | Path | None = None,
+          cohorts: str | Path | None = None) -> int:
+    try:
+        brands_path = _sidecar(db, brands, "brands.csv")
+        cohorts_path = _sidecar(db, cohorts, "cohorts.csv")
+    except FileNotFoundError as e:
+        print(f"file not found: {e}", file=sys.stderr)
+        return 2
+    roster = load_brands(brands_path) if brands_path else []
+    labels = load_cohorts(cohorts_path) if cohorts_path else {}
+
+    net = Network(str(db), roster=roster, cohorts=labels)
     net.overview()  # fail fast if the DB is missing or unreadable
     if roster:
         print(f"brand roster: {len(roster)} brands from {brands_path}")
+    if labels:
+        print(f"cohort labels: {len(labels)} accounts from {cohorts_path}")
 
     handler = type("BoundHandler", (Handler,), {"net": net})
     httpd = ThreadingHTTPServer((host, port), handler)
@@ -785,6 +848,13 @@ _PAGE = r"""<!doctype html>
          vertical-align: middle; }
   .heat td.cell { height: 1.35rem; }
   .heat td.diag { background: #eee; }
+  /* cohort grouping */
+  .pill { display: inline-block; border: 1px solid #ddd; border-radius: 10px;
+          padding: 0 8px; font-size: .75rem; color: #666;
+          vertical-align: middle; white-space: nowrap; }
+  .pill.hot { border-color: $ACCENT; color: $ACCENT; }
+  .matrix th.cs, .matrix td.cs { border-left: 2px solid #d0d0d0; }
+  .heat tr.rs td { border-top: 2px solid #d0d0d0; }
   /* collapsed sections — click a heading to expand */
   details > summary { list-style: none; cursor: pointer; }
   details > summary::-webkit-details-marker { display: none; }
@@ -932,6 +1002,8 @@ async function loadOverview(){
     ['accounts', o.accounts], ['posts', o.posts], ['comments', o.comments],
     ['subreddits', o.subreddits],
   ].map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
+    + (o.cohorts || []).map(c =>
+      `<div class="stat"><b>${fmt(c.accounts)}</b><span>${esc(c.cohort)}</span></div>`).join('')
     + `<div class="stat"><b>${day(o.first_utc)}</b><span>first seen</span></div>`
     + `<div class="stat"><b>${day(o.last_utc)}</b><span>last seen</span></div>`;
 }
@@ -939,14 +1011,23 @@ async function loadOverview(){
 // ---- shared matrix helpers ----
 const userCell = u =>
   `<a class="u" href="#/user/${encodeURIComponent(u)}">${esc(u)}</a>`;
+let cohortOf = {};  // account -> cohort label (from /api/pairs)
+const pill = c => c ?
+  `<span class="pill${c === 'coordinated' ? ' hot' : ''}">${esc(c)}</span>` : '';
+// A cohort boundary between column i-1 and i gets a separator line.
+const boundary = (accounts, i) => i > 0 &&
+  (cohortOf[accounts[i]] || '~') !== (cohortOf[accounts[i-1]] || '~');
 // One vertical account-label header row, shared by every matrix so the same
 // column always means the same account.
 const acctHead = accounts =>
-  accounts.map(u => `<th class="acct">${userCell(u)}</th>`).join('');
-function dotCell(n, peak, tip, ri, ci){
-  if(!n) return '<td class="cell"></td>';
+  accounts.map((u, i) =>
+    `<th class="acct${boundary(accounts, i) ? ' cs' : ''}"` +
+    (cohortOf[u] ? ` title="${esc(cohortOf[u])}"` : '') +
+    `>${userCell(u)}</th>`).join('');
+function dotCell(n, peak, tip, ri, ci, cs){
+  if(!n) return `<td class="cell${cs}"></td>`;
   const d = (4 + 14 * Math.sqrt(n / peak)).toFixed(1);
-  return `<td class="cell click" data-r="${ri}" data-c="${ci}" title="${tip}">` +
+  return `<td class="cell click${cs}" data-r="${ri}" data-c="${ci}" title="${tip}">` +
          `<span class="dot" style="width:${d}px;height:${d}px"></span></td>`;
 }
 function topOf(total, shown){
@@ -957,9 +1038,12 @@ function topOf(total, shown){
 async function loadPairs(){
   const p = await getJSON('/api/pairs');
   const A = p.accounts;
+  cohortOf = p.cohorts || {};
+  const notes = [];
+  if(Object.keys(cohortOf).length) notes.push('Grouped by cohort.');
   if(p.total_accounts > A.length)
-    $('#pairs-note').textContent =
-      `Columns: the ${fmt(A.length)} most active of ${fmt(p.total_accounts)} accounts.`;
+    notes.push(`Columns: the ${fmt(A.length)} most active of ${fmt(p.total_accounts)} accounts.`);
+  $('#pairs-note').textContent = notes.join(' ');
   if(A.length < 2){
     $('#heat').innerHTML = '<p class="muted">Need ≥2 accounts to relate.</p>';
     return A;
@@ -969,18 +1053,20 @@ async function loadPairs(){
   const get = (a,b) => val[a+'|'+b] || val[b+'|'+a] || {subs:0, threads:0};
   const peak = Math.max(1, ...p.pairs.map(x => x.subs + x.threads));
   const cell = (a,b,ri,ci) => {
-    if(a === b) return '<td class="cell diag"></td>';
+    const cs = boundary(A, ci) ? ' cs' : '';
+    if(a === b) return `<td class="cell diag${cs}"></td>`;
     const v = get(a,b), t = v.subs + v.threads;
-    if(!t) return '<td class="cell"></td>';
+    if(!t) return `<td class="cell${cs}"></td>`;
     const alpha = (.12 + .78 * t / peak).toFixed(2);
-    return `<td class="cell click" data-r="${ri}" data-c="${ci}" ` +
+    return `<td class="cell click${cs}" data-r="${ri}" data-c="${ci}" ` +
            `style="background:rgba($ACCENT_RGB,${alpha})" ` +
            `title="${esc(a)} × ${esc(b)} — ${plural(v.subs,'shared subreddit')}` +
            ` · ${plural(v.threads,'co-commented thread')}"></td>`;
   };
   $('#heat').innerHTML =
     `<table class="matrix heat"><thead><tr><th></th>${acctHead(A)}</tr></thead><tbody>` +
-    A.map((a,ri) => `<tr><td class="lbl">${userCell(a)}</td>` +
+    A.map((a,ri) => `<tr${boundary(A, ri) ? ' class="rs"' : ''}>` +
+               `<td class="lbl">${userCell(a)}${cohortOf[a] ? ' ' + pill(cohortOf[a]) : ''}</td>` +
                A.map((b,ci) => cell(a,b,ri,ci)).join('') + '</tr>').join('') +
     '</tbody></table>';
   $('#heat').querySelectorAll('td.click').forEach(td => td.onclick =
@@ -1013,8 +1099,10 @@ function sortable(table, rows, cols, render){
 async function loadAccounts(){
   const { accounts } = await getJSON('/api/accounts');
   const max = Math.max(1, ...accounts.map(a => a.total));
+  const hasCohorts = accounts.some(a => a.cohort);
   sortable($('#accounts'), accounts, [
     {key:'username', label:'account'},
+    ...(hasCohorts ? [{key:'cohort', label:'cohort'}] : []),
     {key:'total', label:'total', num:true, def:true},
     {key:'posts', label:'posts', num:true},
     {key:'comments', label:'comments', num:true},
@@ -1026,6 +1114,7 @@ async function loadAccounts(){
     {key:'top_subreddit', label:'top sub'},
   ], a => `<tr>
     <td>${userCell(a.username)}</td>
+    ${hasCohorts ? `<td>${pill(a.cohort)}</td>` : ''}
     <td class="num">${fmt(a.total)}<div class="bar" style="width:${100*a.total/max}%"></div></td>
     <td class="num">${fmt(a.posts)}</td>
     <td class="num">${fmt(a.comments)}</td>
@@ -1051,7 +1140,8 @@ function dotMatrix(el, rows, accounts, cols, tipFn, onCell){
     rows.map((r, ri) =>
       '<tr>' + cols.map(c => c.cell(r)).join('') +
       accounts.map((u, ci) =>
-        dotCell(r.cells[u] || 0, peak, tipFn(r, u), ri, ci)).join('') +
+        dotCell(r.cells[u] || 0, peak, tipFn(r, u), ri, ci,
+                boundary(accounts, ci) ? ' cs' : '')).join('') +
       '</tr>').join('') +
     '</tbody></table>';
   el.querySelectorAll('td.click').forEach(td => td.onclick =
@@ -1251,6 +1341,7 @@ async function showProfile(u){
   $('#p-co').innerHTML = '';
   try {
     const p = await getJSON('/api/profile?u=' + encodeURIComponent(u));
+    if(p.cohort) $('#p-link').innerHTML += ' · ' + pill(p.cohort);
     $('#p-stats').innerHTML = statsHtml([
       ['posts', fmt(p.posts)], ['comments', fmt(p.comments)],
       ['subreddits', fmt(p.subreddits)],
