@@ -14,7 +14,7 @@ from typing import Any, TextIO, TypeVar
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
-from redlens import __version__, completions, discovery, export, onboarding
+from redlens import __version__, completions, discovery, export, onboarding, serve
 from redlens.analytics import (
     compute_topic_analytics,
     compute_user_analytics,
@@ -378,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--host", default="127.0.0.1")
     e.add_argument("--port", type=int, default=8000)
     e.add_argument("--no-browser", action="store_true")
+    sv = sub.add_parser(
+        "serve", help="open the local listening report (coordinated-network view)")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--no-browser", action="store_true")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -835,6 +840,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "explore":
             return explore.serve(db, host=args.host, port=args.port,
                                  open_browser=not args.no_browser)
+        if args.verb == "serve":
+            return serve.serve(db, host=args.host, port=args.port,
+                               open_browser=not args.no_browser)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
