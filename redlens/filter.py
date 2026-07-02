@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from sqlmodel import Session
 
@@ -104,14 +105,12 @@ def _item_block(posts: list[Post], keywords: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _parse_verdicts(raw: str) -> dict[str, tuple[bool, float, str]]:
-    """Map post id -> (relevant, confidence, reason) from one LLM reply.
+def _parse_verdicts(data: dict[str, Any]) -> dict[str, tuple[bool, float, str]]:
+    """Map post id -> (relevant, confidence, reason) from one parsed LLM reply.
 
     Tolerant by design (keep-when-unsure): a missing/garbled field falls back to
     relevant=True, and unparseable rows are simply dropped (the caller then leaves
     those posts unscored rather than guessing them junk)."""
-    from redlens.summarize import _parse_json  # shared fence-tolerant JSON reader
-    data = _parse_json(raw)
     rows = data.get("verdicts")
     out: dict[str, tuple[bool, float, str]] = {}
     for row in rows if isinstance(rows, list) else []:
@@ -181,10 +180,7 @@ def filter_topic(
             "filter", brand=topic.name, keywords=keywords,
             about=about_line, items=_item_block(posts, topic.keyword_list))
         try:
-            raw = llm.complete(prompt, key,
-                               max_tokens=constants.SUMMARY_MAX_TOKENS,
-                               json_object=True)
-            verdicts = _parse_verdicts(raw)
+            verdicts = _parse_verdicts(llm.complete_json(prompt, key))
         except RedlensError:
             # One bad batch (request failed, truncated, unparseable) must not sink
             # the rest or mark anything junk — leave these posts unscored (kept).

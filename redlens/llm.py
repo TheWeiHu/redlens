@@ -61,3 +61,26 @@ def complete(prompt: str, api_key: str, *,
         raise RedlensError(
             f"LLM reply truncated at max_tokens={max_tokens}; raise the limit")
     return str(choice["message"]["content"])
+
+
+def parse_json(raw: str) -> dict[str, Any]:
+    """The JSON object from a completion, tolerant of markdown fences/prose
+    around it (we take the outermost ``{...}``)."""
+    i, j = raw.find("{"), raw.rfind("}")
+    if i == -1 or j <= i:
+        raise RedlensError("LLM did not return a JSON object")
+    try:
+        obj = json.loads(raw[i:j + 1])
+    except json.JSONDecodeError as exc:
+        raise RedlensError(f"LLM returned invalid JSON: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise RedlensError("LLM JSON was not an object")
+    return obj
+
+
+def complete_json(prompt: str, api_key: str, *,
+                  max_tokens: int = constants.SUMMARY_MAX_TOKENS) -> dict[str, Any]:
+    """One JSON-mode completion, parsed to a dict — the call every structured
+    extractor shares (same token budget and defensive parse)."""
+    raw = complete(prompt, api_key, max_tokens=max_tokens, json_object=True)
+    return parse_json(raw)

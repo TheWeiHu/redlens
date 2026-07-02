@@ -14,17 +14,23 @@ from sqlmodel import Session, col, select
 from redlens.models import TopicCache
 
 
-def get(session: Session, topic_id: int, kind: str, variant: str,
-        version: str) -> str | None:
-    """The cached payload for ``(topic_id, kind, variant)`` if it was computed
-    for ``version``; ``None`` on a miss (no row, or the data has changed since)."""
-    row = session.exec(
+def _row(session: Session, topic_id: int, kind: str,
+         variant: str) -> TopicCache | None:
+    """The single live row for ``(topic_id, kind, variant)``, if any."""
+    return session.exec(
         select(TopicCache).where(
             TopicCache.topic_id == topic_id,
             TopicCache.kind == kind,
             TopicCache.variant == variant,
         )
     ).first()
+
+
+def get(session: Session, topic_id: int, kind: str, variant: str,
+        version: str) -> str | None:
+    """The cached payload for ``(topic_id, kind, variant)`` if it was computed
+    for ``version``; ``None`` on a miss (no row, or the data has changed since)."""
+    row = _row(session, topic_id, kind, variant)
     if row is None or row.version != version:
         return None
     return row.payload
@@ -35,13 +41,7 @@ def put(session: Session, topic_id: int, kind: str, variant: str,
     """Store ``payload`` as the live cache row for ``(topic_id, kind, variant)``,
     replacing any existing row for that key. Commits, since the page sections
     each run in their own short-lived read session."""
-    row = session.exec(
-        select(TopicCache).where(
-            TopicCache.topic_id == topic_id,
-            TopicCache.kind == kind,
-            TopicCache.variant == variant,
-        )
-    ).first()
+    row = _row(session, topic_id, kind, variant)
     if row is None:
         row = TopicCache(topic_id=topic_id, kind=kind, variant=variant)
     row.version = version
