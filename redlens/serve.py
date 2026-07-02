@@ -140,9 +140,25 @@ class Network:
         self._cohort_rank: dict[str, int] = {}
         for c in self.cohorts.values():
             self._cohort_rank.setdefault(c, len(self._cohort_rank))
+        # The curated network scope: with cohort labels the DB also holds the
+        # organic authors that brand-tracking pulled in (thousands), but the
+        # coordinated-network matrices describe only the *labeled* accounts —
+        # otherwise they'd balloon. Empty scope (no labels) = every author.
+        self._scope: list[str] = sorted(self.cohorts)
+        self._coordinated: frozenset[str] = frozenset(
+            u for u, c in self.cohorts.items() if c == "coordinated")
         # AI profiles cached per server run (the DB is read-only, so no
         # persistence); one LLM call per account per run.
         self._ai_cache: dict[str, dict[str, Any]] = {}
+
+    def _scope_clause(self, col: str) -> tuple[str, list[str]]:
+        """``(" AND <col> IN (?, …)", params)`` restricting to the curated
+        cohort, or ``("", [])`` when unscoped (no labels file). Applied to the
+        network matrices so ingested organic authors don't swamp them."""
+        if not self._scope:
+            return "", []
+        return f" AND {col} IN ({','.join('?' * len(self._scope))})", list(
+            self._scope)
 
     def _conn(self) -> sqlite3.Connection:
         con = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
@@ -169,16 +185,20 @@ class Network:
             ).fetchone()
             out = dict(row)
             authors = self._authors(con)
-            out["accounts"] = len(authors)
             if self.cohorts:
-                tally = Counter(
-                    self.cohorts.get(u, "unlabeled") for u in authors)
-                unlabeled = len(self._cohort_rank)
+                # scoped: the headline is the curated cohort; the rest of the
+                # DB is the organic pool that brand-tracking pulled in.
+                labeled = [u for u in authors if u in self.cohorts]
+                out["accounts"] = len(labeled)
+                out["organic_authors"] = len(authors) - len(labeled)
+                tally = Counter(self.cohorts[u] for u in labeled)
                 out["cohorts"] = [
                     {"cohort": c, "accounts": n} for c, n in sorted(
                         tally.items(),
-                        key=lambda kv: self._cohort_rank.get(kv[0], unlabeled))
+                        key=lambda kv: self._cohort_rank.get(kv[0], 0))
                 ]
+            else:
+                out["accounts"] = len(authors)
             return out
 
     def _authors(self, con: sqlite3.Connection) -> list[str]:
@@ -192,11 +212,12 @@ class Network:
     def _matrix_accounts(self, con: sqlite3.Connection) -> list[str]:
         """The matrix column order: top accounts by total activity, grouped
         by cohort (labels-file order, unlabeled last) when labels exist."""
+        scope, params = self._scope_clause("u")
         rows = [
             r["u"] for r in con.execute(
                 f"SELECT u, count(*) n FROM ({_ACTIVITY}) "
-                "GROUP BY u ORDER BY n DESC, u LIMIT ?",
-                (MAX_ACCOUNTS,),
+                f"WHERE 1=1{scope} GROUP BY u ORDER BY n DESC, u LIMIT ?",
+                (*params, MAX_ACCOUNTS),
             )
         ]
         if self.cohorts:
@@ -206,10 +227,12 @@ class Network:
         return rows
 
     def accounts(self) -> list[dict[str, Any]]:
-        """Per-account volume, karma, active window, and busiest subreddit."""
+        """Per-account volume, karma, active window, and busiest subreddit —
+        restricted to the curated cohort when labels exist."""
+        scope, params = self._scope_clause("a.u")
         with closing(self._conn()) as con:
             rows = con.execute(
-                """
+                f"""
                 WITH activity AS (
                   SELECT author_username AS u, subreddit_name AS sub,
                          created_utc AS t, 'post' AS kind FROM post
@@ -228,8 +251,9 @@ class Network:
                   u.comment_karma                                  AS comment_karma
                 FROM activity a
                 LEFT JOIN user u ON u.username = a.u
+                WHERE 1=1{scope}
                 GROUP BY a.u
-                """
+                """, params
             ).fetchall()
             top = self._top_subreddit(con)
             out = []
@@ -336,6 +360,49 @@ class Network:
                                  str(r["term"]).lower()))
         return {"source": "roster", "total": len(rows), "rows": rows[:MAX_ROWS]}
 
+    def share_of_voice(self) -> dict[str, Any]:
+        """Per roster brand, the coordinated cohort's share of its Reddit
+        conversation: mentions by ``coordinated``-labeled accounts ÷ all
+        mentions. Meaningful only once brand-tracking has pulled organic
+        discussion into the DB (before that every brand is 100% coordinated,
+        since the DB holds only the seeders). Ranked most-coordinated first —
+        the brands the network most dominates float to the top.
+
+        Needs both a roster (which brands) and cohort labels (who is
+        coordinated); returns an empty set if either is missing.
+        """
+        if not self.roster or not self._coordinated:
+            return {"available": False, "rows": []}
+        texts = self._texts()
+        rows: list[dict[str, Any]] = []
+        for name, terms in self.roster:
+            pat = _term_pattern(terms)
+            coord: Counter[str] = Counter()
+            org: Counter[str] = Counter()
+            for r in texts:
+                if pat.search(r["t"]):
+                    bucket = coord if r["u"] in self._coordinated else org
+                    bucket[r["u"]] += 1
+            total = sum(coord.values()) + sum(org.values())
+            if not total:
+                continue
+            rows.append({
+                "term": name,
+                "total": total,
+                "coordinated": sum(coord.values()),
+                "organic": sum(org.values()),
+                "coord_pct": round(100 * sum(coord.values()) / total),
+                "coord_authors": len(coord),
+                "organic_authors": len(org),
+                "top_coordinated": [u for u, _ in coord.most_common(10)],
+                "top_organic": [u for u, _ in org.most_common(10)],
+            })
+        rows.sort(key=lambda r: (-r["coord_pct"], -int(r["coordinated"]),
+                                 str(r["term"]).lower()))
+        return {"available": True,
+                "coordinated_accounts": len(self._coordinated),
+                "total": len(rows), "rows": rows[:MAX_ROWS]}
+
     def _mined_mentions(self) -> dict[str, Any]:
         """Co-mentioned proper names, mined keylessly — the no-roster fallback.
 
@@ -382,17 +449,18 @@ class Network:
                                  str(r["term"]).lower()))
         return {"source": "mined", "total": len(rows), "rows": rows[:MAX_ROWS]}
 
-    def _cells(self, con: sqlite3.Connection, sql: str,
-               keys: list[str]) -> dict[str, dict[str, int]]:
+    def _cells(self, con: sqlite3.Connection, sql: str, keys: list[str],
+               extra: list[str] | None = None) -> dict[str, dict[str, int]]:
         """Per-(row, account) matrix cells for the rows a section shows.
 
         ``sql`` must select ``k`` (the row key), ``u`` and ``n``, with an
-        ``IN ({ph})`` placeholder for ``keys``.
+        ``IN ({ph})`` placeholder for ``keys``; ``extra`` are any trailing
+        params (e.g. a cohort scope) bound after ``keys``.
         """
         cells: dict[str, dict[str, int]] = {k: {} for k in keys}
         if keys:
             ph = ",".join("?" * len(keys))
-            for r in con.execute(sql.format(ph=ph), keys):
+            for r in con.execute(sql.format(ph=ph), [*keys, *(extra or [])]):
                 cells[r["k"]][r["u"]] = r["n"]
         return cells
 
@@ -403,17 +471,19 @@ class Network:
         returns the ``MAX_ROWS`` widest-shared plus ``total`` for a "top N of M"
         caption. Each row carries per-account activity ``cells`` for the matrix.
         """
+        scope, params = self._scope_clause("u")
         with closing(self._conn()) as con:
             total = con.execute(
                 f"""
                 SELECT count(*) FROM (
                   SELECT sub FROM ({_ACTIVITY})
+                  WHERE 1=1{scope}
                   GROUP BY sub
                   HAVING count(DISTINCT u) >= 2)
-                """
+                """, params
             ).fetchone()[0]
             rows = con.execute(
-                """
+                f"""
                 SELECT sub                              AS subreddit,
                        count(DISTINCT u)                AS accounts,
                        sum(kind = 'post')               AS posts,
@@ -423,55 +493,61 @@ class Network:
                   FROM post
                   UNION ALL
                   SELECT author_username, subreddit_name, 'comment' FROM comment)
+                WHERE 1=1{scope}
                 GROUP BY sub
                 HAVING accounts >= 2
                 ORDER BY accounts DESC, (posts + comments) DESC, subreddit
                 LIMIT ?
                 """,
-                (MAX_ROWS,),
+                (*params, MAX_ROWS),
             ).fetchall()
             out = [dict(r) for r in rows]
+            cscope, cparams = self._scope_clause("u")
             cells = self._cells(
                 con,
                 f"SELECT sub AS k, u, count(*) n FROM ({_ACTIVITY}) "
-                "WHERE sub IN ({ph}) GROUP BY sub, u",
-                [d["subreddit"] for d in out])
+                "WHERE sub IN ({ph})" + cscope + " GROUP BY sub, u",
+                [d["subreddit"] for d in out], cparams)
             for d in out:
                 d["cells"] = cells[d["subreddit"]]
             return {"total": total, "rows": out}
 
     def threads(self) -> dict[str, Any]:
         """Threads (``link_id``) commented in by ≥2 accounts — co-activity."""
+        scope, params = self._scope_clause("author_username")
         with closing(self._conn()) as con:
             total = con.execute(
-                """
+                f"""
                 SELECT count(*) FROM (
                   SELECT link_id FROM comment
+                  WHERE 1=1{scope}
                   GROUP BY link_id
                   HAVING count(DISTINCT author_username) >= 2)
-                """
+                """, params
             ).fetchone()[0]
             rows = con.execute(
-                """
+                f"""
                 SELECT link_id                          AS link_id,
                        subreddit_name                   AS subreddit,
                        count(DISTINCT author_username)  AS accounts,
                        count(*)                         AS comments
                 FROM comment
+                WHERE 1=1{scope}
                 GROUP BY link_id
                 HAVING accounts >= 2
                 ORDER BY accounts DESC, comments DESC
                 LIMIT ?
                 """,
-                (MAX_ROWS,),
+                (*params, MAX_ROWS),
             ).fetchall()
             out = [dict(r) for r in rows]
+            cscope, cparams = self._scope_clause("author_username")
             cells = self._cells(
                 con,
                 "SELECT link_id AS k, author_username u, count(*) n "
-                "FROM comment WHERE link_id IN ({ph}) "
+                "FROM comment WHERE link_id IN ({ph})" + cscope + " "
                 "GROUP BY link_id, author_username",
-                [d["link_id"] for d in out])
+                [d["link_id"] for d in out], cparams)
             for d in out:
                 d["cells"] = cells[d["link_id"]]
                 title = con.execute(
@@ -800,6 +876,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.pairs())
             elif u.path == "/api/mentions":
                 self._json(self.net.mentions())
+            elif u.path == "/api/share-of-voice":
+                self._json(self.net.share_of_voice())
             elif u.path == "/api/profile":
                 self._json(self.net.profile(one("u")))
             elif u.path == "/api/ai-profile":
@@ -970,6 +1048,17 @@ _PAGE = r"""<!doctype html>
   .brow .f { background: $ACCENT; height: 100%; }
   .brow .v { text-align: right; color: #666; font-size: .8rem;
              white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* share-of-voice: coordinated (accent) vs organic (muted grey) split bar */
+  .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
+            align-items: center; margin: .15rem 0; cursor: pointer; }
+  .sovrow:hover { background: #faf3f0; }
+  .sovrow .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                 font-size: .85rem; }
+  .sovbar { display: flex; height: 1rem; background: #eee; overflow: hidden; }
+  .sovbar .c { background: $ACCENT; height: 100%; }
+  .sovbar .o { background: #c9ccd1; height: 100%; }
+  .sovrow .v { text-align: right; color: #666; font-size: .8rem;
+               white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tabs { display: flex; gap: 4px; margin: .4rem 0 .6rem; }
   .tab { padding: 3px 10px; border: 1px solid #eee; border-radius: 4px;
          cursor: pointer; color: #888; font-size: .85rem; }
@@ -1014,10 +1103,20 @@ _PAGE = r"""<!doctype html>
     subreddits and threads behind it. <span id="pairs-note"></span></p>
   <div class="wrap" id="heat"></div>
 
-  <h2>Accounts</h2>
-  <p class="sub">Every account in this database, treated as one cohort. Click a
-    name for its profile — breakdown, co-actors, brand mentions, raw
-    activity.</p>
+  <section id="sov-section" hidden>
+    <h2>Share of voice <span class="count" id="sov-count"></span></h2>
+    <p class="sub">For each brand, the coordinated cohort's share of its Reddit
+      conversation — mentions by the network ÷ all mentions. The bar fills
+      <b style="color:$ACCENT">coordinated</b> vs <span class="muted">organic</span>;
+      brands the network most dominates sort first. Click a row for the
+      accounts on each side.</p>
+    <div id="sov"></div>
+  </section>
+
+  <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
+  <p class="sub" id="accounts-sub">Every account in this database, treated as one
+    cohort. Click a name for its profile — breakdown, co-actors, brand
+    mentions, raw activity.</p>
   <div class="wrap"><table id="accounts" class="plain"></table></div>
 
   <details>
@@ -1104,14 +1203,26 @@ async function getJSON(url){ const r = await fetch(url); const j = await r.json(
 async function loadOverview(){
   const o = await getJSON('/api/overview');
   $('#db').textContent = o.db;
-  $('#stats').innerHTML = [
+  const stats = [
     ['accounts', o.accounts], ['posts', o.posts], ['comments', o.comments],
     ['subreddits', o.subreddits],
-  ].map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
+  ];
+  if(o.organic_authors) stats.push(['organic authors', o.organic_authors]);
+  $('#stats').innerHTML = stats
+    .map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
     + (o.cohorts || []).map(c =>
       `<div class="stat"><b>${fmt(c.accounts)}</b><span>${esc(c.cohort)}</span></div>`).join('')
     + `<div class="stat"><b>${day(o.first_utc)}</b><span>first seen</span></div>`
     + `<div class="stat"><b>${day(o.last_utc)}</b><span>last seen</span></div>`;
+  // once organic discussion is in the DB the network view is scoped to the
+  // labeled cohort; say so on the Accounts heading.
+  if(o.organic_authors){
+    $('#accounts-note').textContent = `${fmt(o.accounts)} labeled`;
+    $('#accounts-sub').innerHTML = `The curated cohort (${fmt(o.accounts)} `
+      + `labeled accounts). ${fmt(o.organic_authors)} organic authors pulled `
+      + `in by brand-tracking are reachable by drilling a share-of-voice row `
+      + `or a brand mention. Click a name for its profile.`;
+  }
 }
 
 // ---- shared matrix helpers ----
@@ -1252,6 +1363,36 @@ function dotMatrix(el, rows, accounts, cols, tipFn, onCell){
     '</tbody></table>';
   el.querySelectorAll('td.click').forEach(td => td.onclick =
     () => onCell(rows[+td.dataset.r], accounts[+td.dataset.c]));
+}
+
+// ---- share of voice (coordinated cohort's share of each brand) ----
+async function loadShareOfVoice(){
+  const r = await getJSON('/api/share-of-voice');
+  if(!r.available || !r.rows.length) return;   // no roster/labels, or no data
+  $('#sov-section').hidden = false;
+  $('#sov-count').textContent = topOf(r.total, r.rows.length);
+  const authorList = (label, us) => us.length
+    ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
+      us.map(userCell).join(', ') + '</p>' : '';
+  $('#sov').innerHTML = r.rows.map((b, i) =>
+    `<div class="sovrow" data-i="${i}">
+       <div class="lbl">${esc(b.term)}</div>
+       <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
+         <div class="c" style="width:${b.coord_pct}%"></div>
+         <div class="o" style="width:${100-b.coord_pct}%"></div></div>
+       <div class="v"><b>${b.coord_pct}%</b> of ${fmt(b.total)}</div>
+     </div>`).join('');
+  $('#sov').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
+    const b = r.rows[+el.dataset.i];
+    openDrawer(`${b.term} · share of voice`);
+    $('#d-body').innerHTML =
+      `<p><b>${b.coord_pct}%</b> of ${plural(b.total, 'mention')} are the `
+      + `coordinated cohort — ${plural(b.coordinated, 'mention')} from `
+      + `${plural(b.coord_authors, 'account')} vs ${plural(b.organic, 'mention')} `
+      + `from ${plural(b.organic_authors, 'organic author')}.</p>`
+      + authorList('Coordinated accounts', b.top_coordinated)
+      + authorList('Top organic authors', b.top_organic);
+  });
 }
 
 let mentionsCache = { source: 'mined', rows: [] };  // reused by profiles
@@ -1532,7 +1673,7 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
     // The heatmap's account order is every matrix's column order.
     const accounts = await loadPairs();
     await Promise.all([
-      loadAccounts(), loadMentions(accounts),
+      loadAccounts(), loadShareOfVoice(), loadMentions(accounts),
       loadSubreddits(accounts), loadThreads(accounts)]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
     `<p class="warn">${esc(e.message)}</p>`); }
