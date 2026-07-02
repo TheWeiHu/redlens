@@ -86,7 +86,14 @@ hash-routed **profile view** (`#/user/<name>`): identity stats, subreddit
 breakdown, top co-actors, brand mentions, and the raw paginated activity.
 **Cohort labels** (`cohorts.csv` next to the DB, or `--cohorts PATH`) group
 the matrices by cohort with separators and tag every account with its chip —
-the coordinated block reads as a block, organics stand apart.
+the coordinated block reads as a block, organics stand apart. When those
+labels exist the DB usually also holds **organic authors** pulled in by
+`track`ing each brand as a topic; the network matrices then **scope to the
+labeled cohort** so they stay legible, and a **Share of voice** section shows,
+per roster brand, the coordinated cohort's share of its Reddit conversation
+(mentions by `coordinated` accounts ÷ all mentions) — the brands the network
+most dominates float to the top, each row drilling to the accounts on both
+sides.
 
 It reuses `explore.py`'s pattern: a stdlib `http.server` opening the DB
 **read-only**, a JSON API, and one self-contained vanilla-JS page (no build
@@ -95,8 +102,8 @@ one `constants.ACCENT` red). With a key configured, a profile view can run an
 on-demand **AI profile** (`prompts/coordination.txt`): a cheap-model persona +
 promotional-behavior read + `coordinated?` verdict, grounded in sampled
 content and the deterministic signals, cached per server run. This is the
-first slice of the paid listening report; brand share-of-voice and view-time
-NL-plots are later slices, and the stdlib server is a cheap swap for a hosted
+first slice of the paid listening report; view-time NL-plots and cross-topic
+crossings are later slices, and the stdlib server is a cheap swap for a hosted
 front door when that era arrives.
 
 ## Configuration
