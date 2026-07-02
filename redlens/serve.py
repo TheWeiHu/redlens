@@ -152,6 +152,11 @@ class Network:
         # AI profiles cached per server run (the DB is read-only, so no
         # persistence); one LLM call per account per run.
         self._ai_cache: dict[str, dict[str, Any]] = {}
+        # Per-(brand, author) mention counts — the shared primitive behind the
+        # mentions matrix, share-of-voice, and the suspected-seeder scan. The
+        # roster scan is O(texts × brands); computed once here (the DB is
+        # read-only) so those three don't each re-scan the whole DB per request.
+        self._brand_counts: dict[str, Counter[str]] | None = None
 
     def _scope_clause(self, col: str) -> tuple[str, list[str]]:
         """``(" AND <col> IN (?, …)", params)`` restricting to the curated
@@ -338,6 +343,23 @@ class Network:
                 "FROM comment"
             ).fetchall()
 
+    def _roster_counts(self) -> dict[str, Counter[str]]:
+        """``{brand -> Counter(author -> # posts/comments mentioning it)}``,
+        scanned once and memoized. One pass over the DB text testing every
+        roster pattern, so ``mentions``/``share_of_voice``/
+        ``suggested_coordinated`` share the scan instead of each re-running it.
+        """
+        if self._brand_counts is None:
+            pats = [(name, _term_pattern(terms)) for name, terms in self.roster]
+            counts: dict[str, Counter[str]] = {name: Counter() for name, _ in pats}
+            for r in self._texts():
+                u, text = r["u"], r["t"]
+                for name, pat in pats:
+                    if pat.search(text):
+                        counts[name][u] += 1
+            self._brand_counts = counts
+        return self._brand_counts
+
     def mentions(self) -> dict[str, Any]:
         """Brand/name mentions per account, for the mention matrix.
 
@@ -349,11 +371,8 @@ class Network:
         return self._roster_mentions() if self.roster else self._mined_mentions()
 
     def _roster_mentions(self) -> dict[str, Any]:
-        texts = self._texts()
         rows: list[dict[str, Any]] = []
-        for name, terms in self.roster:
-            pat = _term_pattern(terms)
-            cells = Counter(r["u"] for r in texts if pat.search(r["t"]))
+        for name, cells in self._roster_counts().items():
             if not cells:
                 continue
             rows.append({"term": name, "accounts": len(cells),
@@ -375,7 +394,6 @@ class Network:
         """
         if not self.roster or not self._coordinated:
             return {"available": False, "rows": []}
-        texts = self._texts()
         # A share is only meaningful once the brand's ORGANIC conversation is
         # in the DB (the brand was tracked as a topic, or organic authors
         # mention it). Without that baseline, "100% coordinated" would just
@@ -384,14 +402,11 @@ class Network:
             tracked = {r[0].lower() for r in con.execute(
                 "SELECT name FROM topic")}
         rows: list[dict[str, Any]] = []
-        for name, terms in self.roster:
-            pat = _term_pattern(terms)
-            coord: Counter[str] = Counter()
-            org: Counter[str] = Counter()
-            for r in texts:
-                if pat.search(r["t"]):
-                    bucket = coord if r["u"] in self._coordinated else org
-                    bucket[r["u"]] += 1
+        for name, cells in self._roster_counts().items():
+            coord = Counter({u: n for u, n in cells.items()
+                             if u in self._coordinated})
+            org = Counter({u: n for u, n in cells.items()
+                           if u not in self._coordinated})
             total = sum(coord.values()) + sum(org.values())
             if not total:
                 continue
@@ -428,17 +443,14 @@ class Network:
         """
         if not self.roster or not self.cohorts:
             return {"available": False, "rows": []}
-        pats = [(name, _term_pattern(terms)) for name, terms in self.roster]
         brands_by: dict[str, set[str]] = {}
         mentions_by: Counter[str] = Counter()
-        for r in self._texts():
-            u = r["u"]
-            if u in self.cohorts:        # already labeled — not a suggestion
-                continue
-            for name, pat in pats:
-                if pat.search(r["t"]):
-                    brands_by.setdefault(u, set()).add(name)
-                    mentions_by[u] += 1
+        for name, cells in self._roster_counts().items():
+            for u, n in cells.items():
+                if u in self.cohorts:    # already labeled — not a suggestion
+                    continue
+                brands_by.setdefault(u, set()).add(name)
+                mentions_by[u] += n
         flagged = sorted(
             (u for u, bs in brands_by.items() if len(bs) >= SUGGEST_MIN_BRANDS),
             key=lambda u: (-len(brands_by[u]), -mentions_by[u], u))
