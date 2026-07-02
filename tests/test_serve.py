@@ -7,7 +7,9 @@ these tests seed a real file (not ``:memory:``) via SQLModel, then point
 import pytest
 from sqlmodel import Session
 
+from redlens import serve as serve_mod
 from redlens.db import connect, init_schema, upsert
+from redlens.errors import MissingKey
 from redlens.models import Comment, Post, User
 from redlens.serve import Network, load_brands, load_cohorts
 
@@ -256,6 +258,37 @@ def test_account_term_items_use_roster_terms(net):
     ev = Network(net.path, roster=roster).account_term_items("alice", "NordVPN")
     assert ev["total"] == 1
     assert ev["items"][0]["title"] == "try nord"
+
+
+def test_ai_profile_grounds_the_prompt_and_caches(net, monkeypatch):
+    prompts_seen = []
+
+    def fake_complete(prompt, key, **kw):
+        prompts_seen.append(prompt)
+        return {"persona": "a helpful techie", "promotion": "none observed",
+                "coordinated": {"verdict": "organic", "confidence": 40,
+                                "reason": "casual mentions only"}}
+
+    monkeypatch.setattr(serve_mod.config, "require_llm_key", lambda: "k")
+    monkeypatch.setattr(serve_mod.llm, "complete_json", fake_complete)
+    n = Network(net.path, roster=[("NordVPN", ["nord"])])
+    out = n.ai_profile("alice")
+    assert out["coordinated"]["verdict"] == "organic"
+    assert out["model"]
+    prompt = prompts_seen[0]
+    assert "u/alice" in prompt
+    assert "try nord" in prompt                  # sampled post title
+    assert "co-activity with u/bob" in prompt    # deterministic signal
+    assert 'mentions "NordVPN"' in prompt        # roster signal
+    # second call is served from the per-run cache — one LLM call total
+    assert n.ai_profile("alice") is out
+    assert len(prompts_seen) == 1
+
+
+def test_ai_profile_stays_keyless_without_a_key(net, monkeypatch):
+    monkeypatch.setattr(serve_mod.config, "llm_api_key", lambda: None)
+    with pytest.raises(MissingKey):
+        net.ai_profile("alice")
 
 
 def test_pairs_handles_a_single_account(tmp_path):

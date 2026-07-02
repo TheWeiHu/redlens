@@ -1,0 +1,35 @@
+Reddit user u/$username.
+Communities they participate in most (most active first): $communities.
+
+Representative post titles (top-voted and recent):
+$post_titles
+
+Representative comment snippets (top-voted and recent):
+$comment_snippets
+
+Deterministic network signals computed from the archive (facts, not guesses):
+$signals
+
+You are auditing this account for coordinated inauthentic behavior
+(astroturfing / paid seeding). Return ONLY a JSON object (no markdown, no
+commentary) with exactly this shape — REPLACE every angle-bracket placeholder
+with your own inference:
+
+{
+  "persona": "<one short paragraph: who this account presents as>",
+  "promotion": "<one short paragraph: promotional or seeding behavior, naming the specific brands/products pushed, or 'none observed'>",
+  "coordinated": {
+    "verdict": "<coordinated | organic | uncertain>",
+    "confidence": <integer 0-100>,
+    "reason": "<1-2 sentences of the strongest evidence for the verdict>"
+  }
+}
+
+Rules:
+- Ground every claim in the titles, snippets, and signals above; cite concrete
+  patterns (repeated brand pushes, native-advertising story shapes, heavy
+  co-activity with the same accounts, subreddit-hopping to commercial subs).
+- Organic accounts mention products too: casual mentions are weak evidence;
+  unprompted first-person recommendations with purchase-nudging framing are
+  strong.
+- "uncertain" is a valid verdict — do not force a side when evidence is thin.

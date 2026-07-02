@@ -30,9 +30,12 @@ carries its cohort chip.
     redlens serve --brands brands.csv --cohorts cohorts.csv --no-browser
 
 The page follows the redlens report style (light, one ``constants.ACCENT``
-red). The database is opened **read-only**; nothing here can mutate data and no
-LLM key is required. Per-account ``gpt-4o-mini`` profiles with a
-``coordinated?`` flag, brand share-of-voice, and view-time NL-plots are later
+red). The database is opened **read-only**; nothing here can mutate data and
+no LLM key is required for any of the above. With a key configured
+(``redlens setup``), each profile view can additionally run an on-demand
+**AI profile** — a cheap-model persona + promotional-behavior read + a
+``coordinated?`` verdict, grounded in the sampled content and the
+deterministic signals. Brand share-of-voice and view-time NL-plots are later
 slices.
 """
 from __future__ import annotations
@@ -51,11 +54,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from redlens import constants
+from redlens import config, constants, llm, prompts
 
 MAX_ROWS = 60        # shared-subreddit / co-commented-thread / mention rows shown
 MAX_CONTENT = 100    # account drill-down page cap
 MAX_ACCOUNTS = 40    # matrix columns — top accounts by activity
+AI_SAMPLE = 20       # posts / comments sampled into the AI-profile prompt
+AI_SNIPPET = 240     # chars of a comment fed to the prompt
 
 # All accounts' activity, one row per post/comment (the network's event log).
 _ACTIVITY = ("SELECT author_username u, subreddit_name sub FROM post "
@@ -135,6 +140,9 @@ class Network:
         self._cohort_rank: dict[str, int] = {}
         for c in self.cohorts.values():
             self._cohort_rank.setdefault(c, len(self._cohort_rank))
+        # AI profiles cached per server run (the DB is read-only, so no
+        # persistence); one LLM call per account per run.
+        self._ai_cache: dict[str, dict[str, Any]] = {}
 
     def _conn(self) -> sqlite3.Connection:
         con = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
@@ -541,6 +549,84 @@ class Network:
                 "coactors": coactors[:MAX_ROWS],
             }
 
+    # ---- AI profile: gpt-4o-mini persona + coordinated? verdict ---- #
+
+    def _ai_prompt(self, username: str) -> str:
+        """Fill ``prompts/coordination.txt``: the account's sampled content
+        plus the deterministic network signals serve already computes — the
+        LLM judges, it doesn't recount."""
+        p = self.profile(username)  # raises ValueError for unknown accounts
+        with closing(self._conn()) as con:
+            titles = [r[0] for r in con.execute(
+                "SELECT DISTINCT title FROM ("
+                "  SELECT title, score, created_utc FROM post"
+                "  WHERE author_username = ? AND coalesce(title,'') != ''"
+                "  ORDER BY score DESC LIMIT ?)"
+                "UNION SELECT title FROM ("
+                "  SELECT title, score, created_utc FROM post"
+                "  WHERE author_username = ? AND coalesce(title,'') != ''"
+                "  ORDER BY created_utc DESC LIMIT ?)",
+                (username, AI_SAMPLE, username, AI_SAMPLE))]
+            snippets = [r[0] for r in con.execute(
+                "SELECT DISTINCT body FROM ("
+                "  SELECT body, score, created_utc FROM comment"
+                "  WHERE author_username = ? AND coalesce(body,'') != ''"
+                "  ORDER BY score DESC LIMIT ?)"
+                "UNION SELECT body FROM ("
+                "  SELECT body, score, created_utc FROM comment"
+                "  WHERE author_username = ? AND coalesce(body,'') != ''"
+                "  ORDER BY created_utc DESC LIMIT ?)",
+                (username, AI_SAMPLE, username, AI_SAMPLE))]
+        signals = [
+            f"- volume: {p['posts']} posts, {p['comments']} comments across "
+            f"{p['subreddits']} subreddits",
+        ]
+        for c in p["coactors"][:5]:
+            signals.append(
+                f"- co-activity with u/{c['account']}: active in "
+                f"{c['subs']} of the same subreddits, commented in "
+                f"{c['threads']} of the same threads")
+        for row in self.mentions()["rows"]:
+            if (n := row["cells"].get(username)):
+                signals.append(
+                    f"- mentions \"{row['term']}\" in {n} posts/comments "
+                    f"(a brand {row['accounts']} tracked accounts mention)")
+        communities = ", ".join(
+            f"r/{s['subreddit']}" for s in p["top_subreddits"][:10]) or "—"
+        return prompts.render(
+            "coordination",
+            username=username,
+            communities=communities,
+            post_titles="\n".join(f"- {t}" for t in titles) or "(none)",
+            comment_snippets="\n".join(
+                "- " + s.strip().replace("\n", " ")[:AI_SNIPPET]
+                for s in snippets) or "(none)",
+            signals="\n".join(signals),
+        )
+
+    def ai_profile(self, username: str) -> dict[str, Any]:
+        """LLM persona + promotional-behavior read + ``coordinated?`` verdict
+        for one account, cached per server run. Raises ``MissingKey`` when no
+        LLM key is configured (the report stays fully keyless without it)."""
+        if username in self._ai_cache:
+            return self._ai_cache[username]
+        key = config.require_llm_key()
+        data = llm.complete_json(self._ai_prompt(username), key)
+        verdict = data.get("coordinated") or {}
+        out = {
+            "username": username,
+            "model": llm.model_name(),
+            "persona": str(data.get("persona", "")),
+            "promotion": str(data.get("promotion", "")),
+            "coordinated": {
+                "verdict": str(verdict.get("verdict", "uncertain")),
+                "confidence": int(verdict.get("confidence") or 0),
+                "reason": str(verdict.get("reason", "")),
+            },
+        }
+        self._ai_cache[username] = out
+        return out
+
     # ---- cell evidence: the posts/comments behind any matrix cell ---- #
 
     def pair_evidence(self, a: str, b: str) -> dict[str, Any]:
@@ -705,6 +791,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.mentions())
             elif u.path == "/api/profile":
                 self._json(self.net.profile(one("u")))
+            elif u.path == "/api/ai-profile":
+                self._json(self.net.ai_profile(one("u")))
             elif u.path == "/api/evidence":
                 kind = one("type")
                 if kind == "pair":
@@ -966,6 +1054,13 @@ _PAGE = r"""<!doctype html>
   <p class="sub">brands &amp; names this account mentions — click a row to read
     the mentions</p>
   <div id="p-brands"></div>
+
+  <h2>AI profile</h2>
+  <p class="sub">The LLM reads a sample of this account's posts/comments plus
+    the deterministic network signals above and returns a persona, a
+    promotional-behavior read, and a <b>coordinated?</b> verdict. One call per
+    account per server run; needs an LLM key (<code>redlens setup</code>).</p>
+  <div id="p-ai"></div>
 
   <h2>Activity</h2>
   <div class="tabs">
@@ -1380,9 +1475,32 @@ async function showProfile(u){
     it => openEvidence(`${u} · ${it.term}`,
       `/api/evidence?type=mention&u=${encodeURIComponent(u)}&term=${encodeURIComponent(it.term)}`,
       itemsHtml));
+  renderAiSection(u);
   cur = { user: u, kind: 'posts', offset: 0, limit: 25 };
   setTab('posts');
   loadContent();
+}
+
+// ---- AI profile (explicit click = explicit LLM cost) ----
+function renderAiSection(u){
+  $('#p-ai').innerHTML =
+    '<div class="pager"><button id="ai-go">analyze this account</button></div>';
+  $('#ai-go').onclick = async () => {
+    $('#p-ai').innerHTML = '<p class="muted">analyzing…</p>';
+    try {
+      const r = await getJSON('/api/ai-profile?u=' + encodeURIComponent(u));
+      const v = r.coordinated;
+      const hot = v.verdict === 'coordinated';
+      $('#p-ai').innerHTML = `
+        <p><span class="pill${hot ? ' hot' : ''}">${esc(v.verdict)}</span>
+           <b>${fmt(v.confidence)}%</b> — ${esc(v.reason)}</p>
+        <p><b>Persona</b> — ${esc(r.persona)}</p>
+        <p><b>Promotion</b> — ${esc(r.promotion)}</p>
+        <p class="muted">${esc(r.model)} · cached for this server run</p>`;
+    } catch (e) {
+      $('#p-ai').innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+    }
+  };
 }
 
 // ---- routing (overview <-> profile) ----
