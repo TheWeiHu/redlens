@@ -293,6 +293,61 @@ def test_ai_profile_stays_keyless_without_a_key(net, monkeypatch):
         net.ai_profile("alice")
 
 
+def test_network_view_scopes_to_labeled_cohort(net):
+    # alice + bob are the curated cohort; carol is an unlabeled "organic"
+    # author (as if pulled in by brand-tracking) and must drop out of the
+    # network matrices and the headline count.
+    labels = {"alice": "coordinated", "bob": "coordinated"}
+    n = Network(net.path, cohorts=labels)
+    assert {a["username"] for a in n.accounts()} == {"alice", "bob"}
+    o = n.overview()
+    assert o["accounts"] == 2 and o["organic_authors"] == 1
+    assert all(a in labels for a in n.pairs()["accounts"])
+    # unscoped (no labels) still sees every author
+    assert len(Network(net.path).accounts()) == 3
+
+
+def _sov_db(tmp_path):
+    path = str(tmp_path / "sov.db")
+    engine = connect(path)
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [
+            Post(post_id="s1", author_username="seed", subreddit_name="saas",
+                 created_utc=1, title="love Widget", selftext="Widget rocks"),
+            Post(post_id="o1", author_username="org1", subreddit_name="saas",
+                 created_utc=2, title="is Widget any good"),
+        ])
+        upsert(s, [
+            Comment(comment_id="oc1", author_username="org2",
+                    subreddit_name="saas", link_id="o1", created_utc=3,
+                    body="Widget worked for me", score=1),
+        ])
+        s.commit()
+    return path
+
+
+def test_share_of_voice_splits_coordinated_vs_organic(tmp_path):
+    n = Network(_sov_db(tmp_path), roster=[("Widget", ["widget"])],
+                cohorts={"seed": "coordinated"})
+    sov = n.share_of_voice()
+    assert sov["available"] and sov["coordinated_accounts"] == 1
+    w = sov["rows"][0]
+    assert w["term"] == "Widget"
+    assert w["total"] == 3           # s1 title+selftext = 1 post match, o1, oc1
+    assert w["coordinated"] == 1 and w["organic"] == 2
+    assert w["coord_pct"] == 33
+    assert w["coord_authors"] == 1 and w["organic_authors"] == 2
+    assert set(w["top_organic"]) == {"org1", "org2"}
+
+
+def test_share_of_voice_needs_roster_and_labels(net):
+    # no roster → unavailable; roster but no coordinated label → unavailable
+    assert net.share_of_voice()["available"] is False
+    assert Network(net.path, roster=[("X", ["x"])]).share_of_voice()[
+        "available"] is False
+
+
 def test_pairs_handles_a_single_account(tmp_path):
     path = str(tmp_path / "solo.db")
     engine = connect(path)
