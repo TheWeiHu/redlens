@@ -9,7 +9,7 @@ from sqlmodel import Session
 
 from redlens.db import connect, init_schema, upsert
 from redlens.models import Comment, Post, User
-from redlens.serve import Network
+from redlens.serve import Network, load_brands
 
 
 @pytest.fixture
@@ -140,6 +140,69 @@ def test_mentions_surface_shared_names_not_prose(tmp_path):
     assert nord["accounts"] == 2
     assert nord["cells"] == {"alice": 2, "bob": 2}   # matrix cells per account
     assert "Great" not in terms                       # prose word filtered
+
+
+def test_load_brands_parses_names_aliases_and_comments(tmp_path):
+    p = tmp_path / "brands.csv"
+    p.write_text(
+        "# roster\n"
+        "\n"
+        "NordVPN, nordvpn, nord vpn\n"
+        "Shef\n",
+        encoding="utf-8")
+    assert load_brands(p) == [
+        ("NordVPN", ["nordvpn", "nord vpn"]),  # aliases are the match terms
+        ("Shef", ["Shef"]),                    # a bare name matches itself
+    ]
+
+
+def test_roster_mentions_match_case_insensitively(net):
+    # the fixture's texts never capitalize "nord" — the roster still finds it
+    roster = [("NordVPN", ["nord"]), ("Ghost", ["ghost"])]
+    res = Network(net.path, roster=roster).mentions()
+    assert res["source"] == "roster"
+    assert res["total"] == 1                    # unmentioned brands drop out
+    row = res["rows"][0]
+    assert row["term"] == "NordVPN"
+    assert row["cells"] == {"alice": 1}         # p1's title "try nord"
+    assert row["accounts"] == 1                 # roster shows even 1-account brands
+
+
+def test_mentions_fall_back_to_mining_without_roster(net):
+    assert net.mentions()["source"] == "mined"
+
+
+def test_pair_evidence_lists_the_shared_units(net):
+    res = net.pairs()  # sanity: alice+bob are entangled
+    assert any(p["a"] == "alice" and p["b"] == "bob" for p in res["pairs"])
+    ev = net.pair_evidence("alice", "bob")
+    assert [s["subreddit"] for s in ev["subs"]] == ["vpn"]
+    # alice in r/vpn: post p1 + comment c1; bob: post p2 + comment c2
+    assert (ev["subs"][0]["a_n"], ev["subs"][0]["b_n"]) == (2, 2)
+    assert ev["threads"][0]["link_id"] == "p1"
+    assert ev["threads"][0]["title"] == "try nord"
+    assert (ev["threads"][0]["a_n"], ev["threads"][0]["b_n"]) == (1, 1)
+
+
+def test_account_sub_items_merge_posts_and_comments(net):
+    ev = net.account_sub_items("alice", "vpn")
+    assert ev["total"] == 2                     # post p1 + comment c1
+    kinds = {i["kind"] for i in ev["items"]}
+    assert kinds == {"post", "comment"}
+
+
+def test_account_thread_items_carry_the_thread_title(net):
+    ev = net.account_thread_items("carol", "p1")
+    assert ev["title"] == "try nord"
+    assert ev["total"] == 1
+    assert ev["items"][0]["selftext"] == "c"    # the comment body
+
+
+def test_account_term_items_use_roster_terms(net):
+    roster = [("NordVPN", ["nord"])]
+    ev = Network(net.path, roster=roster).account_term_items("alice", "NordVPN")
+    assert ev["total"] == 1
+    assert ev["items"][0]["title"] == "try nord"
 
 
 def test_pairs_handles_a_single_account(tmp_path):

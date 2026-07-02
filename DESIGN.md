@@ -75,11 +75,13 @@ one round by following authors of matching posts.
 deterministic, keyless coordination signals between them as **matrices** that
 share one account-column order — the account × account **network matrix**
 (pairwise shared subs + co-commented threads, drawn as a heatmap), per-account
-volume, the **brands & names they co-mention** (mid-sentence-capitalization
-mining; a brand always written lowercase needs the LLM slice), the
-**shared-subreddit footprint** (subs ≥2 accounts touch), and the **threads they
-co-comment in** (`link_id` seen by ≥2 accounts) — then drills from any account
-into its raw posts and comments.
+volume, **brand mentions** (a curated roster — `brands.csv` next to the DB or
+`--brands PATH` — counted exactly; mined proper names as the keyless fallback),
+the **shared-subreddit footprint** (subs ≥2 accounts touch), and the **threads
+they co-comment in** (`link_id` seen by ≥2 accounts). **Every matrix cell is
+clickable** — a drawer opens with the exact posts/comments (or shared units,
+for a heatmap pair) behind that cell — and any account drills into its raw
+history.
 
 It reuses `explore.py`'s pattern: a stdlib `http.server` opening the DB
 **read-only**, a JSON API, and one self-contained vanilla-JS page (no build

@@ -383,6 +383,10 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
     sv.add_argument("--no-browser", action="store_true")
+    sv.add_argument(
+        "--brands", metavar="PATH",
+        help="brand-roster CSV (name, match terms…) for the mentions matrix; "
+             "default: brands.csv next to the DB, if present")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -842,7 +846,8 @@ def main(argv: list[str] | None = None) -> int:
                                  open_browser=not args.no_browser)
         if args.verb == "serve":
             return serve.serve(db, host=args.host, port=args.port,
-                               open_browser=not args.no_browser)
+                               open_browser=not args.no_browser,
+                               brands=args.brands)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
