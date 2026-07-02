@@ -426,6 +426,74 @@ class Network:
                 d["title"] = title[0] if title and title[0] else ""
             return {"total": total, "rows": out}
 
+    def profile(self, username: str) -> dict[str, Any]:
+        """One account's profile view: identity stats, where it is active,
+        and its top co-actors (the accounts it shares subs/threads with)."""
+        with closing(self._conn()) as con:
+            row = con.execute(
+                """
+                SELECT sum(kind = 'post')    AS posts,
+                       sum(kind = 'comment') AS comments,
+                       min(t)                AS first_utc,
+                       max(t)                AS last_utc,
+                       count(DISTINCT sub)   AS subreddits
+                FROM (SELECT author_username u, subreddit_name sub,
+                             created_utc t, 'post' kind FROM post
+                      UNION ALL
+                      SELECT author_username, subreddit_name, created_utc,
+                             'comment' FROM comment)
+                WHERE u = ?
+                """, (username,)).fetchone()
+            if row["posts"] is None:
+                raise ValueError(f"unknown account: {username}")
+            karma = con.execute(
+                "SELECT post_karma, comment_karma FROM user "
+                "WHERE username = ?", (username,)).fetchone()
+            subs = con.execute(
+                """
+                SELECT sub                  AS subreddit,
+                       sum(kind = 'post')   AS posts,
+                       sum(kind = 'comment') AS comments
+                FROM (SELECT author_username u, subreddit_name sub,
+                             'post' kind FROM post
+                      UNION ALL
+                      SELECT author_username, subreddit_name, 'comment'
+                      FROM comment)
+                WHERE u = ?
+                GROUP BY sub
+                ORDER BY (posts + comments) DESC, sub LIMIT ?
+                """, (username, MAX_ROWS)).fetchall()
+            co: dict[str, dict[str, int]] = {}
+            for u, n in con.execute(
+                f"""
+                SELECT u, count(DISTINCT sub) FROM ({_ACTIVITY})
+                WHERE u != ? AND sub IN
+                  (SELECT DISTINCT sub FROM ({_ACTIVITY}) WHERE u = ?)
+                GROUP BY u
+                """, (username, username)):
+                co.setdefault(u, {"subs": 0, "threads": 0})["subs"] = n
+            for u, n in con.execute(
+                """
+                SELECT author_username, count(DISTINCT link_id) FROM comment
+                WHERE author_username != ? AND link_id IN
+                  (SELECT DISTINCT link_id FROM comment
+                   WHERE author_username = ?)
+                GROUP BY author_username
+                """, (username, username)):
+                co.setdefault(u, {"subs": 0, "threads": 0})["threads"] = n
+            coactors: list[dict[str, Any]] = [
+                {"account": u, **v} for u, v in co.items()]
+            coactors.sort(key=lambda c: (-(int(c["subs"]) + int(c["threads"])),
+                                         str(c["account"])))
+            return {
+                "username": username,
+                **dict(row),
+                "post_karma": karma["post_karma"] if karma else None,
+                "comment_karma": karma["comment_karma"] if karma else None,
+                "top_subreddits": [dict(r) for r in subs],
+                "coactors": coactors[:MAX_ROWS],
+            }
+
     # ---- cell evidence: the posts/comments behind any matrix cell ---- #
 
     def pair_evidence(self, a: str, b: str) -> dict[str, Any]:
@@ -588,6 +656,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.pairs())
             elif u.path == "/api/mentions":
                 self._json(self.net.mentions())
+            elif u.path == "/api/profile":
+                self._json(self.net.profile(one("u")))
             elif u.path == "/api/evidence":
                 kind = one("type")
                 if kind == "pair":
@@ -715,6 +785,26 @@ _PAGE = r"""<!doctype html>
          vertical-align: middle; }
   .heat td.cell { height: 1.35rem; }
   .heat td.diag { background: #eee; }
+  /* collapsed sections — click a heading to expand */
+  details > summary { list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker { display: none; }
+  summary h2::before { content: '▸ '; }
+  details[open] summary h2::before { content: '▾ '; }
+  /* profile view */
+  .back { font-size: .85rem; }
+  .brow { display: grid; grid-template-columns: 15rem 1fr 8rem; gap: .5rem;
+          align-items: center; margin: .15rem 0; cursor: pointer; }
+  .brow:hover { background: #faf3f0; }
+  .brow .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+               font-size: .85rem; }
+  .brow .t { background: #f0e7e3; height: .9rem; }
+  .brow .f { background: $ACCENT; height: 100%; }
+  .brow .v { text-align: right; color: #666; font-size: .8rem;
+             white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tabs { display: flex; gap: 4px; margin: .4rem 0 .6rem; }
+  .tab { padding: 3px 10px; border: 1px solid #eee; border-radius: 4px;
+         cursor: pointer; color: #888; font-size: .85rem; }
+  .tab.active { color: $ACCENT; border-color: $ACCENT; }
   /* account drill-down drawer */
   .drawer { position: fixed; top: 0; right: 0; width: min(680px, 92vw);
             height: 100vh; background: #fff; border-left: 1px solid #eee;
@@ -727,10 +817,6 @@ _PAGE = r"""<!doctype html>
   .drawer .dh h3 { margin: 0; font-size: 1rem; }
   .drawer h4 { margin: 1.1rem 0 .3rem; font-size: .8rem; color: $ACCENT;
                text-transform: uppercase; letter-spacing: .05em; }
-  .drawer .tabs { display: flex; gap: 4px; }
-  .drawer .tab { padding: 3px 10px; border: 1px solid #eee; border-radius: 4px;
-                 cursor: pointer; color: #888; font-size: .85rem; }
-  .drawer .tab.active { color: $ACCENT; border-color: $ACCENT; }
   .drawer .close { cursor: pointer; color: #888; font-size: 18px; border: none;
                    background: none; }
   .drawer .body { padding: 12px 20px 40px; }
@@ -748,45 +834,80 @@ _PAGE = r"""<!doctype html>
 </style>
 </head>
 <body>
-<h1>coordinated network</h1>
-<div class="db" id="db">…</div>
-<div class="stats" id="stats"></div>
+<div id="view-overview">
+  <h1>coordinated network</h1>
+  <div class="db" id="db">…</div>
+  <div class="stats" id="stats"></div>
 
-<h2>Network matrix</h2>
-<p class="sub">How entangled each pair of accounts is — shared subreddits plus
-  co-commented threads. Darker = more co-activity; click any cell for the
-  subreddits and threads behind it. <span id="pairs-note"></span></p>
-<div class="wrap" id="heat"></div>
+  <h2>Network matrix</h2>
+  <p class="sub">How entangled each pair of accounts is — shared subreddits plus
+    co-commented threads. Darker = more co-activity; click any cell for the
+    subreddits and threads behind it. <span id="pairs-note"></span></p>
+  <div class="wrap" id="heat"></div>
 
-<h2>Accounts</h2>
-<p class="sub">Every account in this database, treated as one cohort. Click a
-  name to drill into its raw posts and comments.</p>
-<div class="wrap"><table id="accounts" class="plain"></table></div>
+  <h2>Accounts</h2>
+  <p class="sub">Every account in this database, treated as one cohort. Click a
+    name for its profile — breakdown, co-actors, brand mentions, raw
+    activity.</p>
+  <div class="wrap"><table id="accounts" class="plain"></table></div>
 
-<h2>Brand mentions <span class="count" id="mention-count"></span></h2>
-<p class="sub" id="mention-sub"></p>
-<div class="wrap" id="mentions"></div>
+  <details>
+    <summary><h2>Brand mentions <span class="count" id="mention-count"></span></h2></summary>
+    <p class="sub" id="mention-sub"></p>
+    <div class="wrap" id="mentions"></div>
+  </details>
 
-<h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2>
-<p class="sub">Subreddits where ≥2 accounts are active — where the network
-  overlaps. Dot area ~ that account's posts + comments there; click a dot to
-  read them. A column of dots down the same subreddits is a coordination
-  signal.</p>
-<div class="wrap" id="subreddits"></div>
+  <details>
+    <summary><h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2></summary>
+    <p class="sub">Subreddits where ≥2 accounts are active — where the network
+      overlaps. Dot area ~ that account's posts + comments there; click a dot to
+      read them. A column of dots down the same subreddits is a coordination
+      signal.</p>
+    <div class="wrap" id="subreddits"></div>
+  </details>
 
-<h2>Co-commented threads <span class="count" id="thread-count"></span></h2>
-<p class="sub">Threads touched by ≥2 accounts — the strongest cheap co-activity
-  signal (they show up in the same conversations). Dot area ~ comments in the
-  thread; click a dot to read them.</p>
-<div class="wrap" id="threads"></div>
+  <details>
+    <summary><h2>Co-commented threads <span class="count" id="thread-count"></span></h2></summary>
+    <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
+      co-activity signal (they show up in the same conversations). Dot area ~
+      comments in the thread; click a dot to read them.</p>
+    <div class="wrap" id="threads"></div>
+  </details>
+</div>
+
+<div id="view-profile" hidden>
+  <p><a href="#/" class="back">← network</a></p>
+  <h1 id="p-name"></h1>
+  <div class="db" id="p-link"></div>
+  <div class="stats" id="p-stats"></div>
+  <div id="p-warn"></div>
+
+  <h2>Top subreddits <span class="count" id="p-subs-count"></span></h2>
+  <p class="sub">where this account is active — click a row to read the
+    activity behind it</p>
+  <div id="p-subs"></div>
+
+  <h2>Top co-actors</h2>
+  <p class="sub">the accounts this one shares subreddits and threads with —
+    click a name for its profile, or the shared counts for the evidence</p>
+  <div class="wrap"><table id="p-co" class="plain"></table></div>
+
+  <h2>Brand mentions</h2>
+  <p class="sub">brands &amp; names this account mentions — click a row to read
+    the mentions</p>
+  <div id="p-brands"></div>
+
+  <h2>Activity</h2>
+  <div class="tabs">
+    <div class="tab active" id="ptab-posts">posts</div>
+    <div class="tab" id="ptab-comments">comments</div>
+  </div>
+  <div id="p-content"></div>
+</div>
 
 <div class="drawer" id="drawer">
   <div class="dh">
     <h3 id="d-user"></h3>
-    <div class="tabs" id="d-tabs">
-      <div class="tab active" data-kind="posts" id="tab-posts">posts</div>
-      <div class="tab" data-kind="comments" id="tab-comments">comments</div>
-    </div>
     <button class="close" id="d-close">✕</button>
   </div>
   <div class="body" id="d-body"></div>
@@ -817,7 +938,7 @@ async function loadOverview(){
 
 // ---- shared matrix helpers ----
 const userCell = u =>
-  `<span class="u" onclick="openUser('${esc(u)}')">${esc(u)}</span>`;
+  `<a class="u" href="#/user/${encodeURIComponent(u)}">${esc(u)}</a>`;
 // One vertical account-label header row, shared by every matrix so the same
 // column always means the same account.
 const acctHead = accounts =>
@@ -937,8 +1058,10 @@ function dotMatrix(el, rows, accounts, cols, tipFn, onCell){
     () => onCell(rows[+td.dataset.r], accounts[+td.dataset.c]));
 }
 
+let mentionsCache = { source: 'mined', rows: [] };  // reused by profiles
 async function loadMentions(accounts){
-  const { source, total, rows } = await getJSON('/api/mentions');
+  mentionsCache = await getJSON('/api/mentions');
+  const { source, total, rows } = mentionsCache;
   $('#mention-sub').textContent = source === 'roster'
     ? 'Roster brands (brands.csv next to the DB, or --brands), matched ' +
       'case-insensitively as whole words. Dot area ~ that account’s ' +
@@ -1007,17 +1130,11 @@ async function loadThreads(accounts){
     r => (r.title ? `<p class="muted">${esc(r.title)}</p>` : '') + itemsHtml(r)));
 }
 
-// ---- drawer ----
-// Two modes share it: an account's paginated posts/comments (tabs shown), and
-// one-shot cell evidence (tabs hidden).
-let cur = { user:null, kind:'posts', offset:0, limit:50 };
-function openDrawer(title, tabs){
+// ---- drawer (cell evidence only; accounts open a full profile view) ----
+function openDrawer(title){
   $('#d-user').textContent = title;
-  $('#d-tabs').style.display = tabs ? 'flex' : 'none';
   $('#drawer').classList.add('open');
 }
-function openUser(u){ cur = { user:u, kind:'posts', offset:0, limit:50 };
-  openDrawer(u, true); setTab('posts'); loadContent(); }
 $('#d-close').onclick = () => $('#drawer').classList.remove('open');
 
 // ---- cell evidence ----
@@ -1035,7 +1152,7 @@ const itemsHtml = r =>
     ? `<p class="muted">first ${fmt(r.items.length)} of ${fmt(r.total)}</p>` : '');
 
 async function openEvidence(title, url, render){
-  openDrawer(title, false);
+  openDrawer(title);
   $('#d-body').innerHTML = '<p class="muted">loading…</p>';
   try { const r = await getJSON(url); $('#d-body').innerHTML = render(r); }
   catch(e){ $('#d-body').innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
@@ -1063,13 +1180,41 @@ function openPair(a, b){
           '<tr><td class="muted">none</td></tr>'}</tbody></table>`;
     });
 }
+// ---- profile view (#/user/<name>) ----
+const statsHtml = pairs => pairs.map(([k, v]) =>
+  `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+
+// Clickable label/bar/value rows (the report's bar idiom), folded past
+// `cap` rows — tucked away until asked for.
+function barRows(el, items, onRow, cap = 12){
+  if(!items.length){
+    el.innerHTML = '<p class="muted">nothing here</p>'; return;
+  }
+  const peak = Math.max(1, ...items.map(i => i.n));
+  const draw = all => {
+    const shown = all ? items : items.slice(0, cap);
+    el.innerHTML = shown.map((it, i) =>
+      `<div class="brow" data-i="${i}"><div class="lbl">${it.label}</div>
+       <div class="t"><div class="f" style="width:${(100*it.n/peak).toFixed(0)}%"></div></div>
+       <div class="v">${it.value}</div></div>`).join('') +
+      (all || items.length <= cap ? '' :
+        `<p><span class="u brow-more">show all ${fmt(items.length)} …</span></p>`);
+    el.querySelectorAll('.brow').forEach(d =>
+      d.onclick = () => onRow(items[+d.dataset.i]));
+    const more = el.querySelector('.brow-more');
+    if(more) more.onclick = () => draw(true);
+  };
+  draw(false);
+}
+
+let cur = { user:null, kind:'posts', offset:0, limit:25 };
 function setTab(kind){
   cur.kind = kind; cur.offset = 0;
-  $('#tab-posts').classList.toggle('active', kind==='posts');
-  $('#tab-comments').classList.toggle('active', kind==='comments');
+  $('#ptab-posts').classList.toggle('active', kind==='posts');
+  $('#ptab-comments').classList.toggle('active', kind==='comments');
 }
-$('#tab-posts').onclick = () => { setTab('posts'); loadContent(); };
-$('#tab-comments').onclick = () => { setTab('comments'); loadContent(); };
+$('#ptab-posts').onclick = () => { setTab('posts'); loadContent(); };
+$('#ptab-comments').onclick = () => { setTab('comments'); loadContent(); };
 
 function renderItem(kind, it){
   const head = `<div class="meta">r/${esc(it.subreddit)} · <b>${fmt(it.score)}</b> pts · ${day(it.created_utc)}</div>`;
@@ -1082,21 +1227,82 @@ function renderItem(kind, it){
 }
 
 async function loadContent(){
-  $('#d-user').textContent = cur.user;
   const q = `/api/content?u=${encodeURIComponent(cur.user)}&kind=${cur.kind}&limit=${cur.limit}&offset=${cur.offset}`;
   const r = await getJSON(q);
   const from = r.total ? r.offset+1 : 0, to = Math.min(r.offset+r.limit, r.total);
-  $('#d-body').innerHTML =
+  $('#p-content').innerHTML =
     (r.items.map(it => renderItem(r.kind, it)).join('') ||
       '<p class="muted">Nothing here.</p>') +
     `<div class="pager">
-       <button id="p-prev" ${r.offset<=0?'disabled':''}>‹ prev</button>
-       <button id="p-next" ${to>=r.total?'disabled':''}>next ›</button>
+       <button id="pg-prev" ${r.offset<=0?'disabled':''}>‹ prev</button>
+       <button id="pg-next" ${to>=r.total?'disabled':''}>next ›</button>
        <span class="muted">${from}–${to} of ${fmt(r.total)}</span></div>`;
-  $('#p-prev').onclick = () => { cur.offset=Math.max(0,cur.offset-cur.limit); loadContent(); };
-  $('#p-next').onclick = () => { cur.offset+=cur.limit; loadContent(); };
-  $('#d-body').scrollTo(0,0);
+  $('#pg-prev').onclick = () => { cur.offset=Math.max(0,cur.offset-cur.limit); loadContent(); };
+  $('#pg-next').onclick = () => { cur.offset+=cur.limit; loadContent(); };
 }
+
+async function showProfile(u){
+  window.scrollTo(0, 0);
+  $('#p-name').textContent = u;
+  $('#p-link').innerHTML =
+    `<a href="https://reddit.com/user/${esc(u)}" target="_blank">reddit.com/user/${esc(u)}</a>`;
+  $('#p-warn').innerHTML = '';
+  ['#p-stats', '#p-subs', '#p-brands'].forEach(s => $(s).innerHTML = '');
+  $('#p-co').innerHTML = '';
+  try {
+    const p = await getJSON('/api/profile?u=' + encodeURIComponent(u));
+    $('#p-stats').innerHTML = statsHtml([
+      ['posts', fmt(p.posts)], ['comments', fmt(p.comments)],
+      ['subreddits', fmt(p.subreddits)],
+      ['post karma', p.post_karma == null ? '—' : fmt(p.post_karma)],
+      ['cmt karma', p.comment_karma == null ? '—' : fmt(p.comment_karma)],
+      ['first seen', day(p.first_utc)], ['last seen', day(p.last_utc)],
+    ]);
+    $('#p-subs-count').textContent =
+      p.subreddits > p.top_subreddits.length
+        ? `top ${fmt(p.top_subreddits.length)} of ${fmt(p.subreddits)}` : '';
+    barRows($('#p-subs'), p.top_subreddits.map(s => ({
+      label: `r/${esc(s.subreddit)}`, n: s.posts + s.comments,
+      value: `${fmt(s.posts)} posts · ${fmt(s.comments)} cmts`,
+      sub: s.subreddit,
+    })), it => openEvidence(`${u} · r/${it.sub}`,
+      `/api/evidence?type=sub&u=${encodeURIComponent(u)}&sub=${encodeURIComponent(it.sub)}`,
+      itemsHtml));
+    const co = p.coactors;
+    $('#p-co').innerHTML = co.length
+      ? '<thead><tr><th>account</th><th class="num">shared subs</th>' +
+        '<th class="num">co-threads</th><th></th></tr></thead><tbody>' +
+        co.map((c, i) => `<tr><td>${userCell(c.account)}</td>
+          <td class="num">${fmt(c.subs)}</td><td class="num">${fmt(c.threads)}</td>
+          <td><span class="u" data-i="${i}">evidence</span></td></tr>`).join('') +
+        '</tbody>'
+      : '<tbody><tr><td class="muted">no co-activity with any other account</td></tr></tbody>';
+    $('#p-co').querySelectorAll('[data-i]').forEach(el =>
+      el.onclick = () => openPair(u, co[+el.dataset.i].account));
+  } catch (e) {
+    $('#p-warn').innerHTML = `<p class="warn">${esc(e.message)}</p>`;
+  }
+  barRows($('#p-brands'), mentionsCache.rows
+    .filter(r => r.cells[u])
+    .map(r => ({label: esc(r.term), n: r.cells[u],
+                value: plural(r.cells[u], 'mention'), term: r.term})),
+    it => openEvidence(`${u} · ${it.term}`,
+      `/api/evidence?type=mention&u=${encodeURIComponent(u)}&term=${encodeURIComponent(it.term)}`,
+      itemsHtml));
+  cur = { user: u, kind: 'posts', offset: 0, limit: 25 };
+  setTab('posts');
+  loadContent();
+}
+
+// ---- routing (overview <-> profile) ----
+function route(){
+  const m = location.hash.match(/^#\/user\/(.+)$/);
+  $('#view-profile').hidden = !m;
+  $('#view-overview').hidden = !!m;
+  $('#drawer').classList.remove('open');
+  if(m) showProfile(decodeURIComponent(m[1]));
+}
+window.addEventListener('hashchange', route);
 document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('open'); };
 
 // ---- boot ----
@@ -1110,6 +1316,7 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
       loadSubreddits(accounts), loadThreads(accounts)]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
     `<p class="warn">${esc(e.message)}</p>`); }
+  route();
 })();
 </script>
 </body>

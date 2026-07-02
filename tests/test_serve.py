@@ -142,6 +142,26 @@ def test_mentions_surface_shared_names_not_prose(tmp_path):
     assert "Great" not in terms                       # prose word filtered
 
 
+def test_profile_rolls_up_one_account(net):
+    p = net.profile("alice")
+    assert (p["posts"], p["comments"], p["subreddits"]) == (2, 1, 2)
+    assert p["post_karma"] == 100
+    assert p["first_utc"] == 1_700_000_000
+    # vpn (post p1 + comment c1) outranks solo (post p3)
+    assert [s["subreddit"] for s in p["top_subreddits"]] == ["vpn", "solo"]
+    assert p["top_subreddits"][0]["posts"] == 1
+    assert p["top_subreddits"][0]["comments"] == 1
+    # bob and carol each share r/vpn and thread p1 with alice
+    co = {c["account"]: c for c in p["coactors"]}
+    assert set(co) == {"bob", "carol"}
+    assert co["bob"] == {"account": "bob", "subs": 1, "threads": 1}
+
+
+def test_profile_rejects_unknown_accounts(net):
+    with pytest.raises(ValueError, match="unknown account"):
+        net.profile("nobody")
+
+
 def test_load_brands_parses_names_aliases_and_comments(tmp_path):
     p = tmp_path / "brands.csv"
     p.write_text(
