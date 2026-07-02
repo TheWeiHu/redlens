@@ -90,11 +90,14 @@ the coordinated block reads as a block, organics stand apart.
 
 It reuses `explore.py`'s pattern: a stdlib `http.server` opening the DB
 **read-only**, a JSON API, and one self-contained vanilla-JS page (no build
-step, no framework, no LLM key) in the redlens report style (light, one
-`constants.ACCENT` red). This is the first slice of the paid listening report;
-per-account `gpt-4o-mini` profiles with a `coordinated?` flag, brand
-share-of-voice, and view-time NL-plots are later slices, and the stdlib server
-is a cheap swap for a hosted front door when that era arrives.
+step, no framework, no LLM key required) in the redlens report style (light,
+one `constants.ACCENT` red). With a key configured, a profile view can run an
+on-demand **AI profile** (`prompts/coordination.txt`): a cheap-model persona +
+promotional-behavior read + `coordinated?` verdict, grounded in sampled
+content and the deterministic signals, cached per server run. This is the
+first slice of the paid listening report; brand share-of-voice and view-time
+NL-plots are later slices, and the stdlib server is a cheap swap for a hosted
+front door when that era arrives.
 
 ## Configuration
 
