@@ -5,8 +5,13 @@ localhost dashboard over an existing redlens SQLite file, framed as a
 *coordinated network*: every account in the DB is treated as one cohort and the
 report surfaces the deterministic, keyless coordination signals between them —
 
+- the **network matrix**: an account × account heatmap of pairwise co-activity
+  (shared subreddits + co-commented threads), darker = more entangled,
 - who the accounts are and how much each posts/comments,
+- the **brands & names they co-mention** (capitalized-term mining — a keyless
+  brand proxy), drawn as a term × account dot matrix,
 - the **subreddit footprint** they share (subs ≥2 accounts are active in),
+  drawn the same way,
 - the **threads they co-occur in** (``link_id`` touched by ≥2 accounts) — the
   strongest cheap co-activity signal,
 
@@ -16,24 +21,44 @@ and lets you drill from any account into its raw posts and comments.
     redlens --db redrover.db serve         # dogfood on the redrover network
     redlens serve --port 9000 --no-browser
 
-The database is opened **read-only**; nothing here can mutate data and no LLM
-key is required. Per-account ``gpt-4o-mini`` profiles with a ``coordinated?``
-flag, brand share-of-voice, and view-time NL-plots are later slices.
+The page follows the redlens report style (light, one ``constants.ACCENT``
+red). The database is opened **read-only**; nothing here can mutate data and no
+LLM key is required. Per-account ``gpt-4o-mini`` profiles with a
+``coordinated?`` flag, brand share-of-voice, and view-time NL-plots are later
+slices.
 """
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import webbrowser
+from collections import Counter
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-MAX_ROWS = 60        # shared-subreddit / co-commented-thread rows shown
+from redlens import constants
+
+MAX_ROWS = 60        # shared-subreddit / co-commented-thread / mention rows shown
 MAX_CONTENT = 100    # account drill-down page cap
+MAX_ACCOUNTS = 40    # matrix columns — top accounts by activity
+
+# All accounts' activity, one row per post/comment (the network's event log).
+_ACTIVITY = ("SELECT author_username u, subreddit_name sub FROM post "
+             "UNION ALL SELECT author_username, subreddit_name FROM comment")
+
+# Brand-ish term mining (the keyless brand proxy behind /api/mentions).
+_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]{2,}\b")
+_CAP_MIN_RATIO = 0.75  # a name is capitalized nearly every time it appears
+_SKIP_TERMS = frozenset(constants.data_lines("stopwords.txt")) | frozenset({
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday", "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "reddit", "redditor", "redditors"})
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +106,16 @@ class Network:
             )
         ]
 
+    def _matrix_accounts(self, con: sqlite3.Connection) -> list[str]:
+        """The matrix column order: top accounts by total activity."""
+        return [
+            r["u"] for r in con.execute(
+                f"SELECT u, count(*) n FROM ({_ACTIVITY}) "
+                "GROUP BY u ORDER BY n DESC, u LIMIT ?",
+                (MAX_ACCOUNTS,),
+            )
+        ]
+
     def accounts(self) -> list[dict[str, Any]]:
         """Per-account volume, karma, active window, and busiest subreddit."""
         with closing(self._conn()) as con:
@@ -114,42 +149,148 @@ class Network:
                 d["total"] = d["posts"] + d["comments"]
                 d["top_subreddit"] = top.get(d["username"], "")
                 out.append(d)
-            out.sort(key=lambda d: d["total"], reverse=True)
+            out.sort(key=lambda d: (-d["total"], d["username"]))
             return out
 
     def _top_subreddit(self, con: sqlite3.Connection) -> dict[str, str]:
         """Busiest subreddit per author, across posts and comments."""
         rows = con.execute(
-            """
+            f"""
             SELECT u, sub FROM (
               SELECT u, sub, row_number() OVER (
                        PARTITION BY u ORDER BY n DESC, sub) AS rn
               FROM (
-                SELECT author_username u, subreddit_name sub, count(*) n
-                FROM (SELECT author_username, subreddit_name FROM post
-                      UNION ALL
-                      SELECT author_username, subreddit_name FROM comment)
-                GROUP BY u, sub))
+                SELECT u, sub, count(*) n FROM ({_ACTIVITY}) GROUP BY u, sub))
             WHERE rn = 1
             """
         ).fetchall()
         return {r["u"]: r["sub"] for r in rows}
+
+    def pairs(self) -> dict[str, Any]:
+        """Account × account co-activity — the network-matrix heatmap.
+
+        For each pair among the top ``MAX_ACCOUNTS`` accounts: how many
+        subreddits both are active in and how many threads both commented in.
+        Also carries the matrix column order every matrix on the page shares.
+        """
+        with closing(self._conn()) as con:
+            accounts = self._matrix_accounts(con)
+            if len(accounts) < 2:
+                return {"accounts": accounts,
+                        "total_accounts": len(accounts), "pairs": []}
+            ph = ",".join("?" * len(accounts))
+            cells: dict[tuple[str, str], dict[str, int]] = {}
+
+            def tally(sql: str, key: str) -> None:
+                for r in con.execute(sql, accounts):
+                    pair = cells.setdefault(
+                        (r["ua"], r["ub"]), {"subs": 0, "threads": 0})
+                    pair[key] = r["n"]
+
+            tally(
+                f"""
+                WITH us AS (SELECT DISTINCT u, sub FROM ({_ACTIVITY})
+                            WHERE u IN ({ph}))
+                SELECT a.u AS ua, b.u AS ub, count(*) AS n
+                FROM us a JOIN us b ON a.sub = b.sub AND a.u < b.u
+                GROUP BY ua, ub
+                """, "subs")
+            tally(
+                f"""
+                WITH ut AS (SELECT DISTINCT author_username u, link_id t
+                            FROM comment WHERE author_username IN ({ph}))
+                SELECT a.u AS ua, b.u AS ub, count(*) AS n
+                FROM ut a JOIN ut b ON a.t = b.t AND a.u < b.u
+                GROUP BY ua, ub
+                """, "threads")
+            return {
+                "accounts": accounts,
+                "total_accounts": len(self._authors(con)),
+                "pairs": [{"a": a, "b": b, **v}
+                          for (a, b), v in sorted(cells.items())],
+            }
+
+    def mentions(self) -> dict[str, Any]:
+        """Co-mentioned brand-ish terms: proper names ≥2 accounts use.
+
+        The keyless brand proxy: a token counts as a *name* when, looking only
+        at **mid-sentence** occurrences (sentence starts prove nothing — every
+        word is capitalized there), it is capitalized at least
+        ``_CAP_MIN_RATIO`` of the time. Products and proper names are; prose
+        words show up lowercase mid-sentence and drop out. Once a term
+        qualifies, every casing counts as a mention. Ranked by how many
+        accounts use the term; ``cells`` carries per-account counts for the
+        matrix.
+
+        Honest limit: a brand the network *always* writes lowercase never
+        qualifies — catching that needs the LLM brand slice, which is later.
+        """
+        with closing(self._conn()) as con:
+            texts = con.execute(
+                "SELECT author_username u, coalesce(title,'') || ' ' || "
+                "coalesce(selftext,'') t FROM post "
+                "UNION ALL SELECT author_username, coalesce(body,'') "
+                "FROM comment"
+            ).fetchall()
+        mid_total: Counter[str] = Counter()            # mid-sentence, any case
+        mid_cap: Counter[str] = Counter()              # mid-sentence, capital
+        casings: dict[str, Counter[str]] = {}          # low -> seen spellings
+        by_account: dict[str, Counter[str]] = {}       # low -> account -> n
+        for row in texts:
+            text = row["t"]
+            for m in _TOKEN_RE.finditer(text):
+                tok = m.group()
+                low = tok.lower()
+                by_account.setdefault(low, Counter())[row["u"]] += 1
+                head = text[:m.start()].rstrip(" \"'([*_")
+                if head and head[-1] not in ".!?:;\n-•":
+                    mid_total[low] += 1
+                    if tok[0].isupper():
+                        mid_cap[low] += 1
+                if tok[0].isupper():
+                    casings.setdefault(low, Counter())[tok] += 1
+        rows: list[dict[str, Any]] = []
+        for low, caps in mid_cap.items():
+            if low in _SKIP_TERMS or caps / mid_total[low] < _CAP_MIN_RATIO:
+                continue
+            accounts = by_account[low]
+            if len(accounts) < 2:
+                continue
+            spelling = sorted(casings[low].items(),
+                              key=lambda kv: (-kv[1], kv[0]))[0][0]
+            rows.append({"term": spelling, "accounts": len(accounts),
+                         "uses": sum(accounts.values()), "cells": dict(accounts)})
+        rows.sort(key=lambda r: (-r["accounts"], -r["uses"],
+                                 str(r["term"]).lower()))
+        return {"total": len(rows), "rows": rows[:MAX_ROWS]}
+
+    def _cells(self, con: sqlite3.Connection, sql: str,
+               keys: list[str]) -> dict[str, dict[str, int]]:
+        """Per-(row, account) matrix cells for the rows a section shows.
+
+        ``sql`` must select ``k`` (the row key), ``u`` and ``n``, with an
+        ``IN ({ph})`` placeholder for ``keys``.
+        """
+        cells: dict[str, dict[str, int]] = {k: {} for k in keys}
+        if keys:
+            ph = ",".join("?" * len(keys))
+            for r in con.execute(sql.format(ph=ph), keys):
+                cells[r["k"]][r["u"]] = r["n"]
+        return cells
 
     def subreddits(self) -> dict[str, Any]:
         """Shared-subreddit footprint: subs where ≥2 accounts are active.
 
         Long tails are common (a real network shares hundreds of subs), so this
         returns the ``MAX_ROWS`` widest-shared plus ``total`` for a "top N of M"
-        caption.
+        caption. Each row carries per-account activity ``cells`` for the matrix.
         """
         with closing(self._conn()) as con:
             total = con.execute(
-                """
+                f"""
                 SELECT count(*) FROM (
-                  SELECT subreddit_name FROM (
-                    SELECT author_username u, subreddit_name FROM post
-                    UNION ALL SELECT author_username, subreddit_name FROM comment)
-                  GROUP BY subreddit_name
+                  SELECT sub FROM ({_ACTIVITY})
+                  GROUP BY sub
                   HAVING count(DISTINCT u) >= 2)
                 """
             ).fetchone()[0]
@@ -158,8 +299,7 @@ class Network:
                 SELECT sub                              AS subreddit,
                        count(DISTINCT u)                AS accounts,
                        sum(kind = 'post')               AS posts,
-                       sum(kind = 'comment')            AS comments,
-                       group_concat(DISTINCT u)         AS members
+                       sum(kind = 'comment')            AS comments
                 FROM (
                   SELECT author_username u, subreddit_name sub, 'post' kind
                   FROM post
@@ -172,7 +312,15 @@ class Network:
                 """,
                 (MAX_ROWS,),
             ).fetchall()
-            return {"total": total, "rows": [self._with_members(r) for r in rows]}
+            out = [dict(r) for r in rows]
+            cells = self._cells(
+                con,
+                f"SELECT sub AS k, u, count(*) n FROM ({_ACTIVITY}) "
+                "WHERE sub IN ({ph}) GROUP BY sub, u",
+                [d["subreddit"] for d in out])
+            for d in out:
+                d["cells"] = cells[d["subreddit"]]
+            return {"total": total, "rows": out}
 
     def threads(self) -> dict[str, Any]:
         """Threads (``link_id``) commented in by ≥2 accounts — co-activity."""
@@ -190,8 +338,7 @@ class Network:
                 SELECT link_id                          AS link_id,
                        subreddit_name                   AS subreddit,
                        count(DISTINCT author_username)  AS accounts,
-                       count(*)                         AS comments,
-                       group_concat(DISTINCT author_username) AS members
+                       count(*)                         AS comments
                 FROM comment
                 GROUP BY link_id
                 HAVING accounts >= 2
@@ -200,14 +347,19 @@ class Network:
                 """,
                 (MAX_ROWS,),
             ).fetchall()
-            out = []
-            for r in rows:
-                d = self._with_members(r)
+            out = [dict(r) for r in rows]
+            cells = self._cells(
+                con,
+                "SELECT link_id AS k, author_username u, count(*) n "
+                "FROM comment WHERE link_id IN ({ph}) "
+                "GROUP BY link_id, author_username",
+                [d["link_id"] for d in out])
+            for d in out:
+                d["cells"] = cells[d["link_id"]]
                 title = con.execute(
                     "SELECT title FROM post WHERE post_id = ?", (d["link_id"],)
                 ).fetchone()
                 d["title"] = title[0] if title and title[0] else ""
-                out.append(d)
             return {"total": total, "rows": out}
 
     def content(self, username: str, kind: str, *, limit: int,
@@ -242,12 +394,6 @@ class Network:
                 ).fetchall()
             return {"kind": kind, "total": total, "limit": limit,
                     "offset": offset, "items": [dict(r) for r in rows]}
-
-    @staticmethod
-    def _with_members(row: sqlite3.Row) -> dict[str, Any]:
-        d = dict(row)
-        d["members"] = sorted((d.pop("members") or "").split(","))
-        return d
 
 
 # --------------------------------------------------------------------------- #
@@ -284,6 +430,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"db": self.net.path, **self.net.overview()})
             elif u.path == "/api/accounts":
                 self._json({"accounts": self.net.accounts()})
+            elif u.path == "/api/pairs":
+                self._json(self.net.pairs())
+            elif u.path == "/api/mentions":
+                self._json(self.net.mentions())
             elif u.path == "/api/subreddits":
                 self._json(self.net.subreddits())
             elif u.path == "/api/threads":
@@ -326,109 +476,128 @@ def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
 
 
 # --------------------------------------------------------------------------- #
-# Frontend (single self-contained page, no external assets)                   #
+# Frontend (single self-contained page, no external assets) — styled after    #
+# the redlens report (reporting/style.css): light, one red accent.            #
 # --------------------------------------------------------------------------- #
 
-INDEX_HTML = r"""<!doctype html>
+_PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>redlens · coordinated network</title>
+<title>coordinated network · redlens</title>
 <style>
-  :root { --bg:#0b0e14; --panel:#12161f; --fg:#e6edf3; --mut:#8b96a5;
-          --line:#232a35; --hl:#1a1f2b; --accent:#00b4d8; --warn:#f04a6b;
-          --alt:#0f131b; }
-  * { box-sizing: border-box; }
-  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0;
-         color:var(--fg); background:var(--bg); font-size:13px; }
-  a { color:var(--accent); text-decoration:none; }
-  a:hover { text-decoration:underline; }
-  header { padding:20px 24px; border-bottom:1px solid var(--line); }
-  header h1 { font-size:15px; margin:0 0 4px; letter-spacing:.04em; }
-  header .db { font-size:11px; color:var(--mut); word-break:break-all; }
-  .stats { display:flex; flex-wrap:wrap; gap:24px; margin-top:14px; }
-  .stat b { display:block; font-size:20px; color:var(--accent);
-            font-variant-numeric:tabular-nums; }
-  .stat span { font-size:11px; color:var(--mut); text-transform:uppercase;
-               letter-spacing:.06em; }
-  main { padding:24px; display:grid; gap:28px; max-width:1200px; }
-  section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
-               color:var(--mut); margin:0 0 4px; }
-  section .sub { font-size:11px; color:var(--mut); margin:0 0 12px; }
-  section h2 .count { color:var(--fg); font-weight:400; text-transform:none;
-                      letter-spacing:0; }
-  table { border-collapse:collapse; width:100%; font-size:12px; }
-  th, td { padding:6px 10px; text-align:left; border-bottom:1px solid var(--line);
-           vertical-align:top; }
-  th { color:var(--mut); font-weight:600; white-space:nowrap; cursor:pointer;
-       user-select:none; }
-  tbody tr:nth-child(even) { background:var(--alt); }
-  tbody tr:hover { background:var(--hl); }
-  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .u { color:var(--accent); cursor:pointer; }
-  .members { color:var(--mut); font-size:11px; }
-  .bar { height:3px; background:var(--accent); border-radius:2px; margin-top:3px; }
-  .pill { display:inline-block; background:var(--panel); border:1px solid var(--line);
-          border-radius:10px; padding:1px 8px; margin:0 3px 3px 0; font-size:11px; }
-  .drawer { position:fixed; top:0; right:0; width:min(680px,92vw); height:100vh;
-            background:var(--panel); border-left:1px solid var(--line);
-            transform:translateX(100%); transition:transform .15s ease; overflow-y:auto;
-            box-shadow:-12px 0 30px rgba(0,0,0,.4); }
-  .drawer.open { transform:translateX(0); }
-  .drawer .dh { position:sticky; top:0; background:var(--panel); padding:16px 20px;
-                border-bottom:1px solid var(--line); display:flex; align-items:center;
-                justify-content:space-between; gap:12px; }
-  .drawer .dh h3 { margin:0; font-size:14px; }
-  .drawer .tabs { display:flex; gap:4px; }
-  .drawer .tab { padding:3px 10px; border:1px solid var(--line); border-radius:4px;
-                 cursor:pointer; color:var(--mut); }
-  .drawer .tab.active { color:var(--fg); border-color:var(--accent); }
-  .drawer .close { cursor:pointer; color:var(--mut); font-size:18px; border:none;
-                   background:none; }
-  .drawer .body { padding:12px 20px 40px; }
-  .item { border-bottom:1px solid var(--line); padding:10px 0; }
-  .item .meta { color:var(--mut); font-size:11px; margin-bottom:3px; }
-  .item .meta b { color:var(--fg); }
-  .item .txt { white-space:pre-wrap; word-break:break-word; color:#c9d4e0; }
-  .item .title { color:var(--fg); font-weight:600; }
-  .pager { display:flex; gap:10px; align-items:center; margin-top:12px; }
-  .pager button { background:var(--panel); color:var(--fg); border:1px solid var(--line);
-                  border-radius:4px; padding:4px 12px; cursor:pointer; }
-  .pager button:disabled { opacity:.35; cursor:default; }
-  .muted { color:var(--mut); }
-  .warn { color:var(--warn); }
+  body { font-family: system-ui, sans-serif; max-width: 1150px; margin: 2rem auto;
+         padding: 0 1rem; line-height: 1.4; color: #222; }
+  h1 { text-align: center; font-weight: 600; margin: 0 0 .2rem; }
+  h2 { margin: 2.4rem 0 .3rem; font-size: 1rem; font-weight: 600;
+       text-transform: uppercase; letter-spacing: .05em; color: $ACCENT;
+       border-bottom: 2px solid $ACCENT; padding-bottom: .2rem; }
+  h2 .count { color: #888; font-weight: 400; text-transform: none;
+              letter-spacing: 0; font-size: .85rem; }
+  a { color: $ACCENT; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .muted { color: #888; font-size: .85rem; }
+  .sub { color: #888; font-size: .85rem; margin: 0 0 .8rem; }
+  .db { text-align: center; color: #888; font-size: .8rem; word-break: break-all; }
+  .stats { display: flex; flex-wrap: wrap; gap: .4rem 2.2rem;
+           justify-content: center; margin: 1.2rem 0 0; }
+  .stat { text-align: center; }
+  .stat b { display: block; font-size: 1.35rem; color: $ACCENT;
+            font-variant-numeric: tabular-nums; }
+  .stat span { font-size: .7rem; color: #888; text-transform: uppercase;
+               letter-spacing: .06em; }
+  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+  th, td { border-bottom: 1px solid #eee; padding: .3rem .5rem; text-align: left;
+           vertical-align: middle; }
+  th { color: #888; font-weight: 600; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
+                   white-space: nowrap; }
+  table.plain tbody tr:nth-child(even) { background: #fafafa; }
+  table.plain tbody tr:hover { background: #faf3f0; }
+  table.plain th { cursor: pointer; user-select: none; }
+  .u { color: $ACCENT; cursor: pointer; }
+  .bar { height: 3px; background: $ACCENT; margin-top: 3px; }
+  .wrap { overflow-x: auto; }
+  /* matrices — account columns, dot/heat cells */
+  .matrix th.acct { writing-mode: vertical-rl; transform: rotate(180deg);
+                    font-weight: 400; font-size: .75rem; padding: .2rem .15rem;
+                    border-bottom: none; }
+  .matrix td.cell { text-align: center; padding: .1rem; min-width: 1.35rem;
+                    line-height: 1; }
+  .matrix td.lbl { max-width: 24rem; overflow: hidden; text-overflow: ellipsis;
+                   white-space: nowrap; }
+  .matrix tbody tr:hover td { background: #faf3f0; }
+  .matrix tbody tr:hover td[style] { filter: brightness(.92); }
+  .dot { display: inline-block; border-radius: 50%; background: $ACCENT;
+         vertical-align: middle; }
+  .heat td.cell { height: 1.35rem; }
+  .heat td.diag { background: #eee; }
+  /* account drill-down drawer */
+  .drawer { position: fixed; top: 0; right: 0; width: min(680px, 92vw);
+            height: 100vh; background: #fff; border-left: 1px solid #eee;
+            transform: translateX(100%); transition: transform .15s ease;
+            overflow-y: auto; box-shadow: -12px 0 30px rgba(0,0,0,.12); }
+  .drawer.open { transform: translateX(0); }
+  .drawer .dh { position: sticky; top: 0; background: #fff; padding: 14px 20px;
+                border-bottom: 2px solid $ACCENT; display: flex;
+                align-items: center; justify-content: space-between; gap: 12px; }
+  .drawer .dh h3 { margin: 0; font-size: 1rem; }
+  .drawer .tabs { display: flex; gap: 4px; }
+  .drawer .tab { padding: 3px 10px; border: 1px solid #eee; border-radius: 4px;
+                 cursor: pointer; color: #888; font-size: .85rem; }
+  .drawer .tab.active { color: $ACCENT; border-color: $ACCENT; }
+  .drawer .close { cursor: pointer; color: #888; font-size: 18px; border: none;
+                   background: none; }
+  .drawer .body { padding: 12px 20px 40px; }
+  .item { border-bottom: 1px solid #eee; padding: 10px 0; font-size: .85rem; }
+  .item .meta { color: #888; font-size: .8rem; margin-bottom: 3px; }
+  .item .meta b { color: #222; }
+  .item .txt { white-space: pre-wrap; word-break: break-word; }
+  .item .title { font-weight: 600; }
+  .pager { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+  .pager button { background: #fff; color: $ACCENT; border: 1px solid #eee;
+                  border-radius: 4px; padding: 4px 12px; cursor: pointer;
+                  font: inherit; }
+  .pager button:disabled { opacity: .35; cursor: default; }
+  .warn { color: $ACCENT; }
 </style>
 </head>
 <body>
-<header>
-  <h1>coordinated network</h1>
-  <div class="db" id="db">…</div>
-  <div class="stats" id="stats"></div>
-</header>
+<h1>coordinated network</h1>
+<div class="db" id="db">…</div>
+<div class="stats" id="stats"></div>
 
-<main>
-  <section>
-    <h2>Accounts</h2>
-    <p class="sub">Every account in this database, treated as one cohort. Click a
-      name to drill into its raw posts and comments.</p>
-    <div style="overflow:auto"><table id="accounts"></table></div>
-  </section>
+<h2>Network matrix</h2>
+<p class="sub">How entangled each pair of accounts is — shared subreddits plus
+  co-commented threads. Darker = more co-activity; hover any cell for the
+  breakdown. <span id="pairs-note"></span></p>
+<div class="wrap" id="heat"></div>
 
-  <section>
-    <h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2>
-    <p class="sub">Subreddits where ≥2 accounts are active — where the network
-      overlaps. A wide footprint across the same subs is a coordination signal.</p>
-    <div style="overflow:auto"><table id="subreddits"></table></div>
-  </section>
+<h2>Accounts</h2>
+<p class="sub">Every account in this database, treated as one cohort. Click a
+  name to drill into its raw posts and comments.</p>
+<div class="wrap"><table id="accounts" class="plain"></table></div>
 
-  <section>
-    <h2>Co-commented threads <span class="count" id="thread-count"></span></h2>
-    <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
-      co-activity signal (they show up in the same conversations).</p>
-    <div style="overflow:auto"><table id="threads"></table></div>
-  </section>
-</main>
+<h2>Co-mentioned brands &amp; names <span class="count" id="mention-count"></span></h2>
+<p class="sub">Terms that read as proper names — capitalized nearly every time
+  they appear mid-sentence — used by ≥2 accounts: the products and names the
+  network talks about together. Dot area ~ mentions by that account. Keyless
+  heuristic (a brand always written lowercase won't qualify); LLM-verified
+  brand share-of-voice is a later slice.</p>
+<div class="wrap" id="mentions"></div>
+
+<h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2>
+<p class="sub">Subreddits where ≥2 accounts are active — where the network
+  overlaps. Dot area ~ that account's posts + comments there; a column of dots
+  down the same subreddits is a coordination signal.</p>
+<div class="wrap" id="subreddits"></div>
+
+<h2>Co-commented threads <span class="count" id="thread-count"></span></h2>
+<p class="sub">Threads touched by ≥2 accounts — the strongest cheap co-activity
+  signal (they show up in the same conversations). Dot area ~ comments in the
+  thread.</p>
+<div class="wrap" id="threads"></div>
 
 <div class="drawer" id="drawer">
   <div class="dh">
@@ -445,8 +614,10 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 const $ = s => document.querySelector(s);
 const fmt = n => (n ?? 0).toLocaleString();
-const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc = s => String(s).replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const day = t => t ? new Date(t*1000).toISOString().slice(0,10) : '—';
+const plural = (n, w) => `${fmt(n)} ${w}${n===1?'':'s'}`;
 
 async function getJSON(url){ const r = await fetch(url); const j = await r.json();
   if(!r.ok || j.error) throw new Error(j.error || r.statusText); return j; }
@@ -461,6 +632,55 @@ async function loadOverview(){
   ].map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
     + `<div class="stat"><b>${day(o.first_utc)}</b><span>first seen</span></div>`
     + `<div class="stat"><b>${day(o.last_utc)}</b><span>last seen</span></div>`;
+}
+
+// ---- shared matrix helpers ----
+const userCell = u =>
+  `<span class="u" onclick="openUser('${esc(u)}')">${esc(u)}</span>`;
+// One vertical account-label header row, shared by every matrix so the same
+// column always means the same account.
+const acctHead = accounts =>
+  accounts.map(u => `<th class="acct">${userCell(u)}</th>`).join('');
+function dotCell(n, peak, tip){
+  if(!n) return '<td class="cell"></td>';
+  const d = (4 + 14 * Math.sqrt(n / peak)).toFixed(1);
+  return `<td class="cell" title="${tip}">` +
+         `<span class="dot" style="width:${d}px;height:${d}px"></span></td>`;
+}
+function topOf(total, shown){
+  return total > shown ? `top ${fmt(shown)} of ${fmt(total)}` : `${fmt(total)}`;
+}
+
+// ---- network matrix (account × account heatmap) ----
+async function loadPairs(){
+  const p = await getJSON('/api/pairs');
+  const A = p.accounts;
+  if(p.total_accounts > A.length)
+    $('#pairs-note').textContent =
+      `Columns: the ${fmt(A.length)} most active of ${fmt(p.total_accounts)} accounts.`;
+  if(A.length < 2){
+    $('#heat').innerHTML = '<p class="muted">Need ≥2 accounts to relate.</p>';
+    return A;
+  }
+  const val = {};
+  p.pairs.forEach(x => { val[x.a+'|'+x.b] = x; });
+  const get = (a,b) => val[a+'|'+b] || val[b+'|'+a] || {subs:0, threads:0};
+  const peak = Math.max(1, ...p.pairs.map(x => x.subs + x.threads));
+  const cell = (a,b) => {
+    if(a === b) return '<td class="cell diag"></td>';
+    const v = get(a,b), t = v.subs + v.threads;
+    if(!t) return '<td class="cell"></td>';
+    const alpha = (.12 + .78 * t / peak).toFixed(2);
+    return `<td class="cell" style="background:rgba($ACCENT_RGB,${alpha})" ` +
+           `title="${esc(a)} × ${esc(b)} — ${plural(v.subs,'shared subreddit')}` +
+           ` · ${plural(v.threads,'co-commented thread')}"></td>`;
+  };
+  $('#heat').innerHTML =
+    `<table class="matrix heat"><thead><tr><th></th>${acctHead(A)}</tr></thead><tbody>` +
+    A.map(a => `<tr><td class="lbl">${userCell(a)}</td>` +
+               A.map(b => cell(a,b)).join('') + '</tr>').join('') +
+    '</tbody></table>';
+  return A;
 }
 
 // ---- accounts ----
@@ -500,7 +720,7 @@ async function loadAccounts(){
     {key:'last_utc', label:'last'},
     {key:'top_subreddit', label:'top sub'},
   ], a => `<tr>
-    <td><span class="u" onclick="openUser('${esc(a.username)}')">${esc(a.username)}</span></td>
+    <td>${userCell(a.username)}</td>
     <td class="num">${fmt(a.total)}<div class="bar" style="width:${100*a.total/max}%"></div></td>
     <td class="num">${fmt(a.posts)}</td>
     <td class="num">${fmt(a.comments)}</td>
@@ -513,50 +733,72 @@ async function loadAccounts(){
   </tr>`);
 }
 
-function members(list){
-  return list.map(u => `<span class="u" onclick="openUser('${esc(u)}')">${esc(u)}</span>`).join(', ');
+// ---- row × account dot matrices (shared subs, co-commented threads) ----
+function dotMatrix(el, rows, accounts, cols, tipFn){
+  if(!rows.length) return;
+  const peak = Math.max(1, ...rows.flatMap(
+    r => accounts.map(u => r.cells[u] || 0)));
+  el.innerHTML =
+    `<table class="matrix"><thead><tr>` +
+    cols.map(c => `<th class="${c.num?'num':''}">${c.label}</th>`).join('') +
+    `${acctHead(accounts)}</tr></thead><tbody>` +
+    rows.map(r =>
+      '<tr>' + cols.map(c => c.cell(r)).join('') +
+      accounts.map(u => dotCell(r.cells[u] || 0, peak, tipFn(r, u))).join('') +
+      '</tr>').join('') +
+    '</tbody></table>';
 }
 
-function topOf(total, shown){
-  return total > shown ? `top ${fmt(shown)} of ${fmt(total)}` : `${fmt(total)}`;
+async function loadMentions(accounts){
+  const { total, rows } = await getJSON('/api/mentions');
+  $('#mention-count').textContent = rows.length ? topOf(total, rows.length) : '';
+  if(!rows.length){
+    $('#mentions').innerHTML =
+      '<p class="muted">No name is mentioned by ≥2 accounts.</p>';
+    return;
+  }
+  dotMatrix($('#mentions'), rows, accounts, [
+    {label:'brand / name', cell: r => `<td class="lbl">${esc(r.term)}</td>`},
+    {label:'accounts', num:true, cell: r => `<td class="num">${fmt(r.accounts)}</td>`},
+    {label:'mentions', num:true, cell: r => `<td class="num">${fmt(r.uses)}</td>`},
+  ], (r, u) => `${esc(u)} — ${plural(r.cells[u], 'mention')} of ${esc(r.term)}`);
 }
 
-async function loadSubreddits(){
+async function loadSubreddits(accounts){
   const { total, rows } = await getJSON('/api/subreddits');
   $('#sub-count').textContent = rows.length ? topOf(total, rows.length) : '';
-  sortable($('#subreddits'), rows, [
-    {key:'subreddit', label:'subreddit'},
-    {key:'accounts', label:'accounts', num:true, def:true},
-    {key:'posts', label:'posts', num:true},
-    {key:'comments', label:'comments', num:true},
-  ], s => `<tr>
-    <td><a href="https://reddit.com/r/${esc(s.subreddit)}" target="_blank">r/${esc(s.subreddit)}</a></td>
-    <td class="num">${fmt(s.accounts)}</td>
-    <td class="num">${fmt(s.posts)}</td>
-    <td class="num">${fmt(s.comments)}</td>
-    <td class="members">${members(s.members)}</td>
-  </tr>`);
-  if(!rows.length) $('#subreddits').innerHTML =
-    '<tbody><tr><td class="muted">No subreddit is shared by ≥2 accounts.</td></tr></tbody>';
+  if(!rows.length){
+    $('#subreddits').innerHTML =
+      '<p class="muted">No subreddit is shared by ≥2 accounts.</p>';
+    return;
+  }
+  dotMatrix($('#subreddits'), rows, accounts, [
+    {label:'subreddit', cell: r => `<td class="lbl">` +
+      `<a href="https://reddit.com/r/${esc(r.subreddit)}" target="_blank">r/${esc(r.subreddit)}</a></td>`},
+    {label:'accounts', num:true, cell: r => `<td class="num">${fmt(r.accounts)}</td>`},
+    {label:'posts', num:true, cell: r => `<td class="num">${fmt(r.posts)}</td>`},
+    {label:'comments', num:true, cell: r => `<td class="num">${fmt(r.comments)}</td>`},
+  ], (r, u) => `${esc(u)} in r/${esc(r.subreddit)} — ` +
+               plural(r.cells[u], 'post/comment'));
 }
 
-async function loadThreads(){
+async function loadThreads(accounts){
   const { total, rows } = await getJSON('/api/threads');
   $('#thread-count').textContent = rows.length ? topOf(total, rows.length) : '';
-  sortable($('#threads'), rows, [
-    {key:'accounts', label:'accounts', num:true, def:true},
-    {key:'comments', label:'comments', num:true},
-    {key:'subreddit', label:'subreddit'},
-    {key:'title', label:'thread'},
-  ], t => `<tr>
-    <td class="num">${fmt(t.accounts)}</td>
-    <td class="num">${fmt(t.comments)}</td>
-    <td><a href="https://reddit.com/r/${esc(t.subreddit)}" target="_blank">r/${esc(t.subreddit)}</a></td>
-    <td><a href="https://redd.it/${esc(t.link_id)}" target="_blank">${esc(t.title) || t.link_id}</a>
-        <div class="members">${members(t.members)}</div></td>
-  </tr>`);
-  if(!rows.length) $('#threads').innerHTML =
-    '<tbody><tr><td class="muted">No thread is shared by ≥2 accounts.</td></tr></tbody>';
+  if(!rows.length){
+    $('#threads').innerHTML =
+      '<p class="muted">No thread is shared by ≥2 accounts.</p>';
+    return;
+  }
+  dotMatrix($('#threads'), rows, accounts, [
+    {label:'thread', cell: t => `<td class="lbl">` +
+      `<a href="https://redd.it/${esc(t.link_id)}" target="_blank" ` +
+      `title="${esc(t.title)}">${esc(t.title) || t.link_id}</a></td>`},
+    {label:'subreddit', cell: t =>
+      `<td><a href="https://reddit.com/r/${esc(t.subreddit)}" target="_blank">r/${esc(t.subreddit)}</a></td>`},
+    {label:'accounts', num:true, cell: t => `<td class="num">${fmt(t.accounts)}</td>`},
+    {label:'comments', num:true, cell: t => `<td class="num">${fmt(t.comments)}</td>`},
+  ], (t, u) => `${esc(u)} — ${plural(t.cells[u], 'comment')} in this thread`);
 }
 
 // ---- drawer ----
@@ -604,11 +846,22 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
 (async () => {
   try {
     await loadOverview();
-    await Promise.all([loadAccounts(), loadSubreddits(), loadThreads()]);
+    // The heatmap's account order is every matrix's column order.
+    const accounts = await loadPairs();
+    await Promise.all([
+      loadAccounts(), loadMentions(accounts),
+      loadSubreddits(accounts), loadThreads(accounts)]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
-    `<p class="warn" style="padding:20px">${esc(e.message)}</p>`); }
+    `<p class="warn">${esc(e.message)}</p>`); }
 })();
 </script>
 </body>
 </html>
 """
+
+# The page carries the same single accent as every redlens report; injected
+# from constants so the two can't drift.
+_ACCENT_RGB = ",".join(
+    str(int(constants.ACCENT[i:i + 2], 16)) for i in (1, 3, 5))
+INDEX_HTML = _PAGE.replace("$ACCENT_RGB", _ACCENT_RGB).replace(
+    "$ACCENT", constants.ACCENT)

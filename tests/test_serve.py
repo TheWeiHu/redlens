@@ -80,7 +80,8 @@ def test_shared_subreddits_need_two_accounts(net):
     assert set(subs) == {"vpn"}                 # solo/cats are single-account
     vpn = subs["vpn"]
     assert vpn["accounts"] == 3
-    assert vpn["members"] == ["alice", "bob", "carol"]
+    # matrix cells: per-account activity (posts + comments) in the sub
+    assert vpn["cells"] == {"alice": 2, "bob": 2, "carol": 1}
     assert vpn["posts"] == 2 and vpn["comments"] == 3
 
 
@@ -93,7 +94,65 @@ def test_threads_need_two_accounts_and_carry_title(net):
     assert t["accounts"] == 3
     assert t["comments"] == 3
     assert t["title"] == "try nord"            # resolved from the post
-    assert t["members"] == ["alice", "bob", "carol"]
+    # matrix cells: per-account comment counts in the thread
+    assert t["cells"] == {"alice": 1, "bob": 1, "carol": 1}
+
+
+def test_pairs_relate_every_entangled_account_pair(net):
+    res = net.pairs()
+    # column order: most active first (alice 3), ties broken by name
+    assert res["accounts"] == ["alice", "bob", "carol"]
+    assert res["total_accounts"] == 3
+    pairs = {(p["a"], p["b"]): p for p in res["pairs"]}
+    # all three share r/vpn and all three commented in thread p1
+    assert set(pairs) == {("alice", "bob"), ("alice", "carol"),
+                          ("bob", "carol")}
+    assert all(p["subs"] == 1 and p["threads"] == 1 for p in pairs.values())
+
+
+def test_mentions_surface_shared_names_not_prose(tmp_path):
+    path = str(tmp_path / "brands.db")
+    engine = connect(path)
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [
+            Post(post_id="p1", author_username="alice", subreddit_name="vpn",
+                 created_utc=1, title="NordVPN saved me",
+                 selftext="I love NordVPN"),
+            Post(post_id="p2", author_username="bob", subreddit_name="vpn",
+                 created_utc=2, title="is NordVPN worth it"),
+        ])
+        upsert(s, [
+            # "Great" is capitalized once but lowercase twice — prose, not a
+            # name, so the capitalization-ratio gate must drop it.
+            Comment(comment_id="c1", author_username="alice",
+                    subreddit_name="vpn", link_id="p2", created_utc=3,
+                    body="Great value, great speed, great support"),
+            Comment(comment_id="c2", author_username="bob",
+                    subreddit_name="vpn", link_id="p2", created_utc=4,
+                    body="NordVPN it is"),
+        ])
+        s.commit()
+    res = Network(path).mentions()
+    terms = {r["term"]: r for r in res["rows"]}
+    assert "NordVPN" in terms
+    nord = terms["NordVPN"]
+    assert nord["accounts"] == 2
+    assert nord["cells"] == {"alice": 2, "bob": 2}   # matrix cells per account
+    assert "Great" not in terms                       # prose word filtered
+
+
+def test_pairs_handles_a_single_account(tmp_path):
+    path = str(tmp_path / "solo.db")
+    engine = connect(path)
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [Post(post_id="p1", author_username="alice",
+                        subreddit_name="vpn", created_utc=1, title="hi")])
+        s.commit()
+    res = Network(path).pairs()
+    assert res["accounts"] == ["alice"]
+    assert res["pairs"] == []
 
 
 def test_content_drills_posts_and_comments_newest_first(net):
