@@ -39,6 +39,7 @@ from redlens.topics import (
     list_topics,
     require_topic,
     topic_comments,
+    topic_doc_count,
     topic_drop_confidences,
     topic_posts,
 )
@@ -417,11 +418,13 @@ def slug(name: str) -> str:
 @dataclass(frozen=True)
 class PageResult:
     """One topic's outcome from ``render_all``: ``written`` is False when the
-    topic had zero matched posts and was skipped (noted on the index)."""
+    topic was skipped — either zero matched posts, or ``too_large`` (its
+    posts + comments exceed the render doc cap). Both are noted on the index."""
     name: str
     slug: str
     matched: int
     written: bool
+    too_large: bool = False
 
 
 def _unique_slug(name: str, used: set[str]) -> str:
@@ -481,7 +484,8 @@ class Sections:
 
 
 def render_all(engine: Engine, out_dir: Path,
-               renderers: Renderers | None = None) -> list[PageResult]:
+               renderers: Renderers | None = None,
+               doc_limit: int | None = None) -> list[PageResult]:
     """Render every tracked topic into ``out_dir`` plus an ``index.html`` that
     links them. Topics with zero matched posts are skipped (and noted on the
     index) since there is nothing to chart. Returns one result per topic,
@@ -489,7 +493,10 @@ def render_all(engine: Engine, out_dir: Path,
 
     ``renderers`` supplies the optional per-topic LLM sections (narrative,
     sentiment trend, theme labels, brands, complaints, use cases); omit it for a
-    keyless render with none of them."""
+    keyless render with none of them. ``doc_limit`` is the render OOM guard: a
+    topic whose posts + comments exceed it is skipped (``too_large``, noted on
+    the index) instead of sinking the whole batch — the renderer holds each
+    topic fully in RAM."""
     renderers = renderers or Renderers()
     out_dir.mkdir(parents=True, exist_ok=True)
     with Session(engine) as session:
@@ -504,6 +511,14 @@ def render_all(engine: Engine, out_dir: Path,
         if listing.matched_posts == 0:
             results.append(PageResult(listing.name, s, 0, written=False))
             continue
+        if doc_limit:
+            with Session(engine) as sess:
+                docs = topic_doc_count(sess, listing.name)
+            if docs > doc_limit:
+                results.append(PageResult(
+                    listing.name, s, listing.matched_posts,
+                    written=False, too_large=True))
+                continue
         name = listing.name
         sections = Sections(
             summary=renderers.summarize(name) if renderers.summarize else None,
@@ -524,9 +539,10 @@ def render_all(engine: Engine, out_dir: Path,
 
 def render_index(results: list[PageResult]) -> str:
     """A small overview page linking each rendered topic's report, with a note
-    listing any topics skipped for having no matched posts."""
+    listing any topics skipped — no matched posts, or too large to render."""
     written = [r for r in results if r.written]
-    skipped = [r for r in results if not r.written]
+    empty = [r for r in results if not r.written and not r.too_large]
+    too_large = [r for r in results if r.too_large]
     rows = "\n".join(
         f"<tr><td><a href='{r.slug}.html'>{html.escape(r.name)}</a></td>"
         f"<td class='n'>{r.matched:,} posts</td></tr>"
@@ -535,10 +551,14 @@ def render_index(results: list[PageResult]) -> str:
     table = (f"<table>{rows}</table>" if written
              else '<p class="muted">no tracked topics with matched posts yet</p>')
     skip_note = ""
-    if skipped:
-        names = ", ".join(html.escape(r.name) for r in skipped)
+    if empty:
+        names = ", ".join(html.escape(r.name) for r in empty)
         skip_note = (f'<p class="muted">skipped (no matched posts yet): '
                      f'{names}</p>')
+    if too_large:
+        names = ", ".join(html.escape(r.name) for r in too_large)
+        skip_note += (f'<p class="muted">skipped (too large to render in RAM): '
+                      f'{names} — re-run with a higher --limit or --force</p>')
     body = (f'<h1>tracked topics</h1>\n'
             f'<p class="muted">{len(written):,} '
             f'report{"" if len(written) == 1 else "s"}</p>\n{table}\n{skip_note}')
