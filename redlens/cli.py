@@ -587,14 +587,13 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
             return _pinned_brands
         return _section(t, "brands", lambda s: identify_brands(s, t))
 
-    def _categories(t: str, kind: str) -> list[MentionGroup] | None:
-        return _section(t, kind, lambda s: extract_categories(s, t, kind))
-
     def _complaints(t: str) -> list[MentionGroup] | None:
-        return _categories(t, "complaints")
+        return _section(t, "complaints",
+                        lambda s: extract_categories(s, t, "complaints"))
 
     def _use_cases(t: str) -> list[MentionGroup] | None:
-        return _categories(t, "use_cases")
+        return _section(t, "use_cases",
+                        lambda s: extract_categories(s, t, "use_cases"))
 
     # Theme labels are the one section with no DB and a non-None
     # fallback: one LLM call mapping LDA keyword clusters to readable
@@ -608,18 +607,20 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
                   file=sys.stderr)
             return []
 
+    # Each _section-based provider already returns None without --summary
+    # (and _brands honors --brands regardless), so the providers can be passed
+    # unconditionally; only the theme labeler needs an explicit gate.
     if args.all_topics:
         out_dir = Path(args.out) if args.out else default_report_dir()
         results = render_all(
             engine, out_dir,
             Renderers(
-                summarize=_summary if args.summary else None,
-                sentiment=_sentiment if args.summary else None,
+                summarize=_summary,
+                sentiment=_sentiment,
                 theme_labeler=_label_themes if args.summary else None,
-                brands=(_brands if args.summary or _pinned_brands is not None
-                        else None),
-                complaints=_complaints if args.summary else None,
-                use_cases=_use_cases if args.summary else None,
+                brands=_brands,
+                complaints=_complaints,
+                use_cases=_use_cases,
             ))
         written = [pg for pg in results if pg.written]
         skipped = [pg for pg in results if not pg.written]
@@ -642,8 +643,8 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
                 sentiment_days=_sentiment(args.topic),
                 theme_labeler=_label_themes if args.summary else None,
                 brands=_brands(args.topic),
-                complaints=_categories(args.topic, "complaints"),
-                use_cases=_categories(args.topic, "use_cases"),
+                complaints=_complaints(args.topic),
+                use_cases=_use_cases(args.topic),
             ),
             min_confidence=args.min_confidence)
         out = Path(args.out or f"{slug(args.topic)}.html")

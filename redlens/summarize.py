@@ -22,7 +22,7 @@ import hashlib
 import json
 from collections import Counter, defaultdict
 from datetime import date, timedelta
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from pydantic import ValidationError
 from sqlalchemy import func
@@ -60,14 +60,6 @@ def _engagement_score(post: Post) -> int:
     return max(post.score, 0) + constants.COMMENT_WEIGHT * post.num_comments
 
 
-def _complete_json(prompt: str, key: str) -> dict[str, Any]:
-    """One JSON-mode completion, parsed to a dict — the call every structured
-    extractor shares (same token budget and defensive parse)."""
-    raw = llm.complete(prompt, key, max_tokens=constants.SUMMARY_MAX_TOKENS,
-                       json_object=True)
-    return _parse_json(raw)
-
-
 def summarize_user(session: Session, username: str, *,
                    depth: str | None = None) -> Profile:
     """Infer a profile for ``username`` from their archived activity.
@@ -88,7 +80,7 @@ def summarize_user(session: Session, username: str, *,
 
     key = require_llm_key()
     prompt = _build_prompt(session, canon, resolved_depth)
-    data = _complete_json(prompt, key)
+    data = llm.complete_json(prompt, key)
     try:
         return Profile.model_validate(
             {"username": canon, "model": llm.model_name(),
@@ -122,7 +114,7 @@ def summarize_topic(session: Session, name: str, *,
 
     key = require_llm_key()
     prompt = _build_topic_prompt(session, topic, resolved_depth)
-    data = _complete_json(prompt, key)
+    data = llm.complete_json(prompt, key)
     try:
         summary = TopicSummary.model_validate(
             {"topic": topic.name, "model": llm.model_name(),
@@ -214,7 +206,7 @@ def daily_topic_sentiment(session: Session, name: str,
         "sentiment", topic=topic.name,
         keywords=", ".join(topic.keyword_list) or topic.name,
         days="\n\n".join(blocks))
-    data = _complete_json(prompt, key)
+    data = llm.complete_json(prompt, key)
 
     rows = data.get("days")
     scores: dict[str, float] = {}
@@ -271,7 +263,7 @@ def label_themes(topic: str, themes: list[list[str]], *,
     listed = "\n".join(f"{i + 1}. {', '.join(words)}"
                        for i, words in enumerate(themes))
     prompt = prompts.render("theme_labels", topic=topic, themes=listed)
-    data = _complete_json(prompt, key)
+    data = llm.complete_json(prompt, key)
     given = data.get("labels")
     given = given if isinstance(given, list) else []
     out: list[str] = []
@@ -290,9 +282,8 @@ def identify_brands(session: Session, name: str) -> list[MentionGroup]:
     variants to count them by. The caller does the actual counting; the LLM only
     recognizes. Raises :class:`NotFound`/:class:`MissingKey` like
     :func:`summarize_topic`; returns ``[]`` for a topic with no posts."""
-    named = _extract_labeled_terms(
+    return _extract_labeled_terms(
         session, name, prompt_name="brands", terms_key="aliases")
-    return [MentionGroup(name=n, terms=terms) for n, terms in named]
 
 
 def pin_brands(spec: str) -> list[MentionGroup]:
@@ -319,19 +310,18 @@ def extract_categories(session: Session, name: str, kind: str) -> list[MentionGr
     topic for) — each with the signature phrases to count it by. Same
     recognize-here / count-in-the-caller split as :func:`identify_brands`."""
     prompt_name = "complaints" if kind == "complaints" else "use_cases"
-    named = _extract_labeled_terms(
+    return _extract_labeled_terms(
         session, name, prompt_name=prompt_name, terms_key="phrases")
-    return [MentionGroup(name=n, terms=terms) for n, terms in named]
 
 
 def _extract_labeled_terms(
     session: Session, name: str, *, prompt_name: str, terms_key: str,
-) -> list[tuple[str, list[str]]]:
+) -> list[MentionGroup]:
     """Shared core for the LLM entity extractors (brands, complaints, use cases):
     sample the most-engaged posts/comments, ask ``prompt_name`` for a
-    ``{"categories": [{"name", <terms_key>}]}`` list, and return
-    ``(name, terms)`` pairs — blank names dropped, empty term lists falling back
-    to ``[name]`` so every pair is countable.
+    ``{"categories": [{"name", <terms_key>}]}`` list, and return one
+    :class:`MentionGroup` per entry — blank names dropped, empty term lists
+    falling back to ``[name]`` so every group is countable.
 
     Read-through cached (see cache.py) under ``kind=prompt_name``, so brands /
     complaints / use-cases don't clobber each other; persisting the output also
@@ -347,7 +337,8 @@ def _extract_labeled_terms(
         version = f"{version}:{about_hash}"
     cached = cache.get(session, topic.id, prompt_name, "", version)
     if cached is not None:
-        return [(n, list(terms)) for n, terms in json.loads(cached)]
+        return [MentionGroup(name=n, terms=list(terms))
+                for n, terms in json.loads(cached)]
 
     key = require_llm_key()
 
@@ -373,7 +364,7 @@ def _extract_labeled_terms(
                   if about else "")
     prompt = prompts.render(prompt_name, topic=topic.name, about=about_line,
                             sample="\n".join(lines))
-    data = _complete_json(prompt, key)
+    data = llm.complete_json(prompt, key)
 
     # brands.txt returns {"brands": [...]}; complaints/use_cases return
     # {"categories": [...]} — accept whichever list the object carries.
@@ -401,9 +392,11 @@ def _extract_labeled_terms(
             continue
         seen[norm] = len(out)
         out.append((label, terms or [label]))
+    # The cache payload stays a (name, terms) pair list — the shape older rows
+    # already hold — so the read path above keeps working across versions.
     cache.put(session, topic.id, prompt_name, "", version,
               json.dumps(out), llm.model_name())
-    return out
+    return [MentionGroup(name=n, terms=t) for n, t in out]
 
 
 def _resolve_depth(depth: str | None) -> str:
@@ -413,21 +406,6 @@ def _resolve_depth(depth: str | None) -> str:
             f"unknown depth {depth!r} "
             f"(choose from {', '.join(constants.SUMMARY_DEPTHS)})")
     return depth or constants.SUMMARY_DEFAULT_DEPTH
-
-
-def _parse_json(raw: str) -> dict[str, Any]:
-    """The JSON object from a completion, tolerant of markdown fences/prose
-    around it (we take the outermost ``{...}``)."""
-    i, j = raw.find("{"), raw.rfind("}")
-    if i == -1 or j <= i:
-        raise RedlensError("LLM did not return a JSON object")
-    try:
-        obj = json.loads(raw[i:j + 1])
-    except json.JSONDecodeError as exc:
-        raise RedlensError(f"LLM returned invalid JSON: {exc}") from exc
-    if not isinstance(obj, dict):
-        raise RedlensError("LLM JSON was not an object")
-    return obj
 
 
 def _sample(session: Session, model: type[_Activity], pk_attr: str,

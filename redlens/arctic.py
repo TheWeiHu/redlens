@@ -61,6 +61,40 @@ def search_subreddits(prefix: str, limit: int = 25) -> list[dict[str, Any]]:
     return arr
 
 
+def _paginate(
+    path: str,
+    *,
+    full_page: int | None,
+    before: int | None = None,
+    **params: Any,
+) -> Iterator[dict[str, Any]]:
+    """Yield search results newest first, walking backwards in time via the
+    ``before`` cursor — the pagination loop every ``iter_*`` shares.
+
+    Stops on an empty page, when a page comes back shorter than ``full_page``
+    (i.e. the last page; pass ``None`` to skip that check and run until an
+    empty page or a stalled cursor), or when ``MAX_ITEMS_PER_STREAM`` (the
+    test interruption hook) trips.
+    """
+    yielded = 0
+    while True:
+        batch = _get(path, before=before, **params).get("data") or []
+        if not batch:
+            return
+        for item in batch:
+            yield item
+            yielded += 1
+            if MAX_ITEMS_PER_STREAM is not None and yielded >= MAX_ITEMS_PER_STREAM:
+                return
+        if full_page is not None and len(batch) < full_page:
+            return
+        oldest = min(int(b.get("created_utc") or 0) for b in batch)
+        if not oldest or oldest == before:
+            return
+        before = oldest
+        time.sleep(PAGINATION_SLEEP_S)
+
+
 def _iter_kind(
     kind: str,
     username: str,
@@ -69,33 +103,15 @@ def _iter_kind(
 ) -> Iterator[dict[str, Any]]:
     """Yield a user's posts or comments, newest first.
 
-    Pagination walks backwards in time via the ``before`` cursor. ``after`` and
-    the initial ``before`` bound ``created_utc`` (epoch seconds): incremental
-    sync passes ``after=newest_seen_utc`` to fetch only what's new, and resumes
-    an interrupted backfill by passing ``before=oldest_seen_utc``.
+    ``after`` and the initial ``before`` bound ``created_utc`` (epoch
+    seconds): incremental sync passes ``after=newest_seen_utc`` to fetch only
+    what's new, and resumes an interrupted backfill by passing
+    ``before=oldest_seen_utc``.
     """
-    yielded = 0
-    while True:
-        batch = (
-            _get(f"/api/{kind}/search",
-                 author=username, limit="auto", sort="desc",
-                 after=after, before=before)
-            .get("data") or []
-        )
-        if not batch:
-            return
-        for item in batch:
-            yield item
-            yielded += 1
-            if MAX_ITEMS_PER_STREAM is not None and yielded >= MAX_ITEMS_PER_STREAM:
-                return
-        if len(batch) < 50:
-            return
-        oldest = min(int(b.get("created_utc") or 0) for b in batch)
-        if not oldest or oldest == before:
-            return
-        before = oldest
-        time.sleep(PAGINATION_SLEEP_S)
+    # limit="auto" pages are ~50 rows; a shorter page means history ran out.
+    return _paginate(f"/api/{kind}/search", full_page=50,
+                     author=username, limit="auto", sort="desc",
+                     after=after, before=before)
 
 
 def _iter_scoped_query(
@@ -109,31 +125,14 @@ def _iter_scoped_query(
     Arctic's full-text params (``query``/``title``/``selftext``) only work when
     scoped to an ``author`` or ``subreddit`` — there is no global text search —
     so callers fan this out across a set of scopes. ``after``/``before`` are
-    epoch seconds bounding ``created_utc``; pagination walks backwards in time
-    via the ``before`` cursor, mirroring :func:`_iter_kind`.
+    epoch seconds bounding ``created_utc``. Full-text scans can return short
+    intermediate pages, so there is no short-page stop: pagination runs until
+    an empty page. (arctic also rejects limit="auto" alongside a full-text
+    query, hence the explicit page size.)
     """
-    cursor = before
-    yielded = 0
-    while True:
-        # arctic rejects limit="auto" alongside a full-text query.
-        batch = (
-            _get("/api/posts/search",
-                 query=query, limit=ARCTIC_PAGE_LIMIT,
-                 sort="desc", after=after, before=cursor, **scope)
-            .get("data") or []
-        )
-        if not batch:
-            return
-        for item in batch:
-            yield item
-            yielded += 1
-            if MAX_ITEMS_PER_STREAM is not None and yielded >= MAX_ITEMS_PER_STREAM:
-                return
-        oldest = min(int(b.get("created_utc") or 0) for b in batch)
-        if not oldest or oldest == cursor:
-            return
-        cursor = oldest
-        time.sleep(PAGINATION_SLEEP_S)
+    return _paginate("/api/posts/search", full_page=None,
+                     query=query, limit=ARCTIC_PAGE_LIMIT, sort="desc",
+                     after=after, before=before, **scope)
 
 
 def iter_subreddit_query(
@@ -180,25 +179,5 @@ def iter_post_comments(post_id: str) -> Iterator[dict[str, Any]]:
     through the posts already matched, so no topic-to-comment table is
     needed — ``comment.link_id`` is the bridge.
     """
-    cursor: int | None = None
-    yielded = 0
-    while True:
-        batch = (
-            _get("/api/comments/search",
-                 link_id=post_id, limit=ARCTIC_PAGE_LIMIT, sort="desc", before=cursor)
-            .get("data") or []
-        )
-        if not batch:
-            return
-        for item in batch:
-            yield item
-            yielded += 1
-            if MAX_ITEMS_PER_STREAM is not None and yielded >= MAX_ITEMS_PER_STREAM:
-                return
-        if len(batch) < ARCTIC_PAGE_LIMIT:
-            return
-        oldest = min(int(b.get("created_utc") or 0) for b in batch)
-        if not oldest or oldest == cursor:
-            return
-        cursor = oldest
-        time.sleep(PAGINATION_SLEEP_S)
+    return _paginate("/api/comments/search", full_page=ARCTIC_PAGE_LIMIT,
+                     link_id=post_id, limit=ARCTIC_PAGE_LIMIT, sort="desc")
