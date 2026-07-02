@@ -8,18 +8,21 @@ report surfaces the deterministic, keyless coordination signals between them —
 - the **network matrix**: an account × account heatmap of pairwise co-activity
   (shared subreddits + co-commented threads), darker = more entangled,
 - who the accounts are and how much each posts/comments,
-- the **brands & names they co-mention** (capitalized-term mining — a keyless
-  brand proxy), drawn as a term × account dot matrix,
+- the **brand mentions** matrix: a curated roster (``brands.csv`` next to the
+  DB, or ``--brands PATH``) counted exactly — case-insensitive, whole-word —
+  with mined proper names as the keyless fallback when no roster exists,
 - the **subreddit footprint** they share (subs ≥2 accounts are active in),
   drawn the same way,
 - the **threads they co-occur in** (``link_id`` touched by ≥2 accounts) — the
-  strongest cheap co-activity signal,
+  strongest cheap co-activity signal.
 
-and lets you drill from any account into its raw posts and comments.
+Every matrix cell is **clickable**: the drawer opens with the exact
+posts/comments (or shared subs + threads, for a heatmap pair) behind that
+cell, and any account drills into its raw history.
 
     redlens serve                          # over the default DB
     redlens --db redrover.db serve         # dogfood on the redrover network
-    redlens serve --port 9000 --no-browser
+    redlens serve --brands brands.csv --port 9000 --no-browser
 
 The page follows the redlens report style (light, one ``constants.ACCENT``
 red). The database is opened **read-only**; nothing here can mutate data and no
@@ -29,9 +32,11 @@ slices.
 """
 from __future__ import annotations
 
+import csv
 import json
 import re
 import sqlite3
+import sys
 import threading
 import webbrowser
 from collections import Counter
@@ -51,7 +56,8 @@ MAX_ACCOUNTS = 40    # matrix columns — top accounts by activity
 _ACTIVITY = ("SELECT author_username u, subreddit_name sub FROM post "
              "UNION ALL SELECT author_username, subreddit_name FROM comment")
 
-# Brand-ish term mining (the keyless brand proxy behind /api/mentions).
+# Brand-ish term mining (the fallback brand proxy behind /api/mentions when
+# no roster file is given).
 _TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]{2,}\b")
 _CAP_MIN_RATIO = 0.75  # a name is capitalized nearly every time it appears
 _SKIP_TERMS = frozenset(constants.data_lines("stopwords.txt")) | frozenset({
@@ -59,6 +65,37 @@ _SKIP_TERMS = frozenset(constants.data_lines("stopwords.txt")) | frozenset({
     "sunday", "january", "february", "march", "april", "may", "june", "july",
     "august", "september", "october", "november", "december",
     "reddit", "redditor", "redditors"})
+
+BrandRoster = list[tuple[str, list[str]]]  # (display name, match terms)
+
+
+def load_brands(path: Path) -> BrandRoster:
+    """Parse a brand-roster CSV into ``(name, terms)`` rows.
+
+    One brand per line: the display name, then the terms that count as a
+    mention (``NordVPN, nordvpn, nord vpn``). A name with no terms matches
+    itself. Blank lines and ``#`` comments are skipped.
+    """
+    roster: BrandRoster = []
+    with path.open(newline="", encoding="utf-8") as fh:
+        for row in csv.reader(fh):
+            cells = [c.strip() for c in row if c.strip()]
+            if not cells or cells[0].startswith("#"):
+                continue
+            roster.append((cells[0], cells[1:] or cells[:1]))
+    return roster
+
+
+def _term_pattern(terms: list[str]) -> re.Pattern[str]:
+    # (?<!\w)…(?!\w) instead of \b…\b: a plain \b needs a word char on the
+    # boundary, so a symbol-edged term ("C++", "222.place") would never match.
+    # Lookarounds assert only that the *adjacent* char isn't a word char, so
+    # symbol-edged names count while "Go" still won't hit "Google". (The same
+    # matcher as reporting/page.py's mention counting — and case-insensitive,
+    # so a roster brand the network writes lowercase still counts.)
+    return re.compile(
+        r"(?<!\w)(?:" + "|".join(re.escape(t) for t in terms) + r")(?!\w)",
+        re.IGNORECASE)
 
 
 # --------------------------------------------------------------------------- #
@@ -68,8 +105,9 @@ _SKIP_TERMS = frozenset(constants.data_lines("stopwords.txt")) | frozenset({
 class Network:
     """Read-only queries that describe the account network in one DB."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, roster: BrandRoster | None = None) -> None:
         self.path = str(Path(path).resolve())
+        self.roster = roster or []
 
     def _conn(self) -> sqlite3.Connection:
         con = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
@@ -210,28 +248,54 @@ class Network:
                           for (a, b), v in sorted(cells.items())],
             }
 
-    def mentions(self) -> dict[str, Any]:
-        """Co-mentioned brand-ish terms: proper names ≥2 accounts use.
-
-        The keyless brand proxy: a token counts as a *name* when, looking only
-        at **mid-sentence** occurrences (sentence starts prove nothing — every
-        word is capitalized there), it is capitalized at least
-        ``_CAP_MIN_RATIO`` of the time. Products and proper names are; prose
-        words show up lowercase mid-sentence and drop out. Once a term
-        qualifies, every casing counts as a mention. Ranked by how many
-        accounts use the term; ``cells`` carries per-account counts for the
-        matrix.
-
-        Honest limit: a brand the network *always* writes lowercase never
-        qualifies — catching that needs the LLM brand slice, which is later.
-        """
+    def _texts(self) -> list[sqlite3.Row]:
+        """Every account's text, one row per post/comment: ``(u, t)``."""
         with closing(self._conn()) as con:
-            texts = con.execute(
+            return con.execute(
                 "SELECT author_username u, coalesce(title,'') || ' ' || "
                 "coalesce(selftext,'') t FROM post "
                 "UNION ALL SELECT author_username, coalesce(body,'') "
                 "FROM comment"
             ).fetchall()
+
+    def mentions(self) -> dict[str, Any]:
+        """Brand/name mentions per account, for the mention matrix.
+
+        With a roster (``brands.csv`` / ``--brands``) the counting is exact:
+        deterministic, case-insensitive, whole-word over each brand's terms —
+        a mention is a post/comment that matches. Without one it falls back
+        to mined proper names (see ``_mined_mentions``).
+        """
+        return self._roster_mentions() if self.roster else self._mined_mentions()
+
+    def _roster_mentions(self) -> dict[str, Any]:
+        texts = self._texts()
+        rows: list[dict[str, Any]] = []
+        for name, terms in self.roster:
+            pat = _term_pattern(terms)
+            cells = Counter(r["u"] for r in texts if pat.search(r["t"]))
+            if not cells:
+                continue
+            rows.append({"term": name, "accounts": len(cells),
+                         "uses": sum(cells.values()), "cells": dict(cells)})
+        rows.sort(key=lambda r: (-r["accounts"], -r["uses"],
+                                 str(r["term"]).lower()))
+        return {"source": "roster", "total": len(rows), "rows": rows[:MAX_ROWS]}
+
+    def _mined_mentions(self) -> dict[str, Any]:
+        """Co-mentioned proper names, mined keylessly — the no-roster fallback.
+
+        A token counts as a *name* when, looking only at **mid-sentence**
+        occurrences (sentence starts prove nothing — every word is capitalized
+        there), it is capitalized at least ``_CAP_MIN_RATIO`` of the time.
+        Products and proper names are; prose words show up lowercase
+        mid-sentence and drop out. Once a term qualifies, every casing counts
+        as a mention. Ranked by how many accounts use the term (≥2).
+
+        Honest limit: a brand the network *always* writes lowercase never
+        qualifies — that's what the roster (and later the LLM slice) is for.
+        """
+        texts = self._texts()
         mid_total: Counter[str] = Counter()            # mid-sentence, any case
         mid_cap: Counter[str] = Counter()              # mid-sentence, capital
         casings: dict[str, Counter[str]] = {}          # low -> seen spellings
@@ -262,7 +326,7 @@ class Network:
                          "uses": sum(accounts.values()), "cells": dict(accounts)})
         rows.sort(key=lambda r: (-r["accounts"], -r["uses"],
                                  str(r["term"]).lower()))
-        return {"total": len(rows), "rows": rows[:MAX_ROWS]}
+        return {"source": "mined", "total": len(rows), "rows": rows[:MAX_ROWS]}
 
     def _cells(self, con: sqlite3.Connection, sql: str,
                keys: list[str]) -> dict[str, dict[str, int]]:
@@ -362,6 +426,96 @@ class Network:
                 d["title"] = title[0] if title and title[0] else ""
             return {"total": total, "rows": out}
 
+    # ---- cell evidence: the posts/comments behind any matrix cell ---- #
+
+    def pair_evidence(self, a: str, b: str) -> dict[str, Any]:
+        """What entangles two accounts — the exact units the network-matrix
+        cell counts: subreddits both are active in and threads both
+        commented in, with each side's activity count."""
+        with closing(self._conn()) as con:
+            subs = con.execute(
+                f"""
+                SELECT sub                AS subreddit,
+                       sum(u = ?)         AS a_n,
+                       sum(u = ?)         AS b_n
+                FROM ({_ACTIVITY}) WHERE u IN (?, ?)
+                GROUP BY sub HAVING a_n > 0 AND b_n > 0
+                ORDER BY (a_n + b_n) DESC, subreddit LIMIT ?
+                """, (a, b, a, b, MAX_ROWS)).fetchall()
+            threads = con.execute(
+                """
+                SELECT link_id, subreddit_name        AS subreddit,
+                       sum(author_username = ?)       AS a_n,
+                       sum(author_username = ?)       AS b_n
+                FROM comment WHERE author_username IN (?, ?)
+                GROUP BY link_id HAVING a_n > 0 AND b_n > 0
+                ORDER BY (a_n + b_n) DESC, link_id LIMIT ?
+                """, (a, b, a, b, MAX_ROWS)).fetchall()
+            out = []
+            for r in threads:
+                d = dict(r)
+                title = con.execute(
+                    "SELECT title FROM post WHERE post_id = ?", (d["link_id"],)
+                ).fetchone()
+                d["title"] = title[0] if title and title[0] else ""
+                out.append(d)
+            return {"subs": [dict(r) for r in subs], "threads": out}
+
+    @staticmethod
+    def _items_payload(rows: list[sqlite3.Row]) -> dict[str, Any]:
+        items = sorted((dict(r) for r in rows),
+                       key=lambda d: -(d["created_utc"] or 0))
+        return {"total": len(items), "items": items[:MAX_CONTENT]}
+
+    def account_sub_items(self, username: str, sub: str) -> dict[str, Any]:
+        """One account's posts + comments in one subreddit (a footprint cell)."""
+        with closing(self._conn()) as con:
+            rows = con.execute(
+                "SELECT 'post' AS kind, subreddit_name AS subreddit, title, "
+                "selftext, url, score, created_utc FROM post "
+                "WHERE author_username = ? AND subreddit_name = ? "
+                "UNION ALL "
+                "SELECT 'comment', subreddit_name, NULL, body, NULL, score, "
+                "created_utc FROM comment "
+                "WHERE author_username = ? AND subreddit_name = ?",
+                (username, sub, username, sub)).fetchall()
+        return self._items_payload(rows)
+
+    def account_thread_items(self, username: str, link_id: str) -> dict[str, Any]:
+        """One account's comments in one thread (a co-commented cell)."""
+        with closing(self._conn()) as con:
+            rows = con.execute(
+                "SELECT 'comment' AS kind, subreddit_name AS subreddit, "
+                "NULL AS title, body AS selftext, NULL AS url, score, "
+                "created_utc FROM comment "
+                "WHERE author_username = ? AND link_id = ?",
+                (username, link_id)).fetchall()
+            title = con.execute(
+                "SELECT title FROM post WHERE post_id = ?", (link_id,)
+            ).fetchone()
+        out = self._items_payload(rows)
+        out["title"] = title[0] if title and title[0] else ""
+        return out
+
+    def account_term_items(self, username: str, term: str) -> dict[str, Any]:
+        """One account's posts + comments mentioning a brand/name (a mention
+        cell). ``term`` is a roster name (matched by its terms) or a mined
+        term (matched by itself)."""
+        terms = next((t for n, t in self.roster if n == term), [term])
+        pat = _term_pattern(terms)
+        with closing(self._conn()) as con:
+            rows = con.execute(
+                "SELECT 'post' AS kind, subreddit_name AS subreddit, title, "
+                "selftext, url, score, created_utc FROM post "
+                "WHERE author_username = ? "
+                "UNION ALL "
+                "SELECT 'comment', subreddit_name, NULL, body, NULL, score, "
+                "created_utc FROM comment WHERE author_username = ?",
+                (username, username)).fetchall()
+        hits = [r for r in rows
+                if pat.search(f"{r['title'] or ''} {r['selftext'] or ''}")]
+        return self._items_payload(hits)
+
     def content(self, username: str, kind: str, *, limit: int,
                 offset: int) -> dict[str, Any]:
         """One account's raw posts or comments, newest first (drill-down)."""
@@ -434,6 +588,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.pairs())
             elif u.path == "/api/mentions":
                 self._json(self.net.mentions())
+            elif u.path == "/api/evidence":
+                kind = one("type")
+                if kind == "pair":
+                    self._json(self.net.pair_evidence(one("a"), one("b")))
+                elif kind == "sub":
+                    self._json(self.net.account_sub_items(one("u"), one("sub")))
+                elif kind == "thread":
+                    self._json(
+                        self.net.account_thread_items(one("u"), one("link")))
+                elif kind == "mention":
+                    self._json(
+                        self.net.account_term_items(one("u"), one("term")))
+                else:
+                    self._json({"error": "unknown evidence type"}, 400)
             elif u.path == "/api/subreddits":
                 self._json(self.net.subreddits())
             elif u.path == "/api/threads":
@@ -456,9 +624,21 @@ class Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------- #
 
 def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
-          open_browser: bool = True) -> int:
-    net = Network(str(db))
+          open_browser: bool = True, brands: str | Path | None = None) -> int:
+    # Brand roster: an explicit --brands path must exist; otherwise a
+    # brands.csv sitting next to the DB is picked up automatically.
+    brands_path = Path(brands) if brands else Path(db).resolve().parent / "brands.csv"
+    roster: BrandRoster = []
+    if brands and not brands_path.is_file():
+        print(f"brands file not found: {brands_path}", file=sys.stderr)
+        return 2
+    if brands_path.is_file():
+        roster = load_brands(brands_path)
+
+    net = Network(str(db), roster=roster)
     net.overview()  # fail fast if the DB is missing or unreadable
+    if roster:
+        print(f"brand roster: {len(roster)} brands from {brands_path}")
 
     handler = type("BoundHandler", (Handler,), {"net": net})
     httpd = ThreadingHTTPServer((host, port), handler)
@@ -515,7 +695,7 @@ _PAGE = r"""<!doctype html>
                    white-space: nowrap; }
   table.plain tbody tr:nth-child(even) { background: #fafafa; }
   table.plain tbody tr:hover { background: #faf3f0; }
-  table.plain th { cursor: pointer; user-select: none; }
+  #accounts th { cursor: pointer; user-select: none; }
   .u { color: $ACCENT; cursor: pointer; }
   .bar { height: 3px; background: $ACCENT; margin-top: 3px; }
   .wrap { overflow-x: auto; }
@@ -529,6 +709,8 @@ _PAGE = r"""<!doctype html>
                    white-space: nowrap; }
   .matrix tbody tr:hover td { background: #faf3f0; }
   .matrix tbody tr:hover td[style] { filter: brightness(.92); }
+  .matrix td.click { cursor: pointer; }
+  .matrix td.click:hover { outline: 2px solid $ACCENT; outline-offset: -2px; }
   .dot { display: inline-block; border-radius: 50%; background: $ACCENT;
          vertical-align: middle; }
   .heat td.cell { height: 1.35rem; }
@@ -543,6 +725,8 @@ _PAGE = r"""<!doctype html>
                 border-bottom: 2px solid $ACCENT; display: flex;
                 align-items: center; justify-content: space-between; gap: 12px; }
   .drawer .dh h3 { margin: 0; font-size: 1rem; }
+  .drawer h4 { margin: 1.1rem 0 .3rem; font-size: .8rem; color: $ACCENT;
+               text-transform: uppercase; letter-spacing: .05em; }
   .drawer .tabs { display: flex; gap: 4px; }
   .drawer .tab { padding: 3px 10px; border: 1px solid #eee; border-radius: 4px;
                  cursor: pointer; color: #888; font-size: .85rem; }
@@ -570,8 +754,8 @@ _PAGE = r"""<!doctype html>
 
 <h2>Network matrix</h2>
 <p class="sub">How entangled each pair of accounts is — shared subreddits plus
-  co-commented threads. Darker = more co-activity; hover any cell for the
-  breakdown. <span id="pairs-note"></span></p>
+  co-commented threads. Darker = more co-activity; click any cell for the
+  subreddits and threads behind it. <span id="pairs-note"></span></p>
 <div class="wrap" id="heat"></div>
 
 <h2>Accounts</h2>
@@ -579,30 +763,27 @@ _PAGE = r"""<!doctype html>
   name to drill into its raw posts and comments.</p>
 <div class="wrap"><table id="accounts" class="plain"></table></div>
 
-<h2>Co-mentioned brands &amp; names <span class="count" id="mention-count"></span></h2>
-<p class="sub">Terms that read as proper names — capitalized nearly every time
-  they appear mid-sentence — used by ≥2 accounts: the products and names the
-  network talks about together. Dot area ~ mentions by that account. Keyless
-  heuristic (a brand always written lowercase won't qualify); LLM-verified
-  brand share-of-voice is a later slice.</p>
+<h2>Brand mentions <span class="count" id="mention-count"></span></h2>
+<p class="sub" id="mention-sub"></p>
 <div class="wrap" id="mentions"></div>
 
 <h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2>
 <p class="sub">Subreddits where ≥2 accounts are active — where the network
-  overlaps. Dot area ~ that account's posts + comments there; a column of dots
-  down the same subreddits is a coordination signal.</p>
+  overlaps. Dot area ~ that account's posts + comments there; click a dot to
+  read them. A column of dots down the same subreddits is a coordination
+  signal.</p>
 <div class="wrap" id="subreddits"></div>
 
 <h2>Co-commented threads <span class="count" id="thread-count"></span></h2>
 <p class="sub">Threads touched by ≥2 accounts — the strongest cheap co-activity
   signal (they show up in the same conversations). Dot area ~ comments in the
-  thread.</p>
+  thread; click a dot to read them.</p>
 <div class="wrap" id="threads"></div>
 
 <div class="drawer" id="drawer">
   <div class="dh">
     <h3 id="d-user"></h3>
-    <div class="tabs">
+    <div class="tabs" id="d-tabs">
       <div class="tab active" data-kind="posts" id="tab-posts">posts</div>
       <div class="tab" data-kind="comments" id="tab-comments">comments</div>
     </div>
@@ -641,10 +822,10 @@ const userCell = u =>
 // column always means the same account.
 const acctHead = accounts =>
   accounts.map(u => `<th class="acct">${userCell(u)}</th>`).join('');
-function dotCell(n, peak, tip){
+function dotCell(n, peak, tip, ri, ci){
   if(!n) return '<td class="cell"></td>';
   const d = (4 + 14 * Math.sqrt(n / peak)).toFixed(1);
-  return `<td class="cell" title="${tip}">` +
+  return `<td class="cell click" data-r="${ri}" data-c="${ci}" title="${tip}">` +
          `<span class="dot" style="width:${d}px;height:${d}px"></span></td>`;
 }
 function topOf(total, shown){
@@ -666,20 +847,23 @@ async function loadPairs(){
   p.pairs.forEach(x => { val[x.a+'|'+x.b] = x; });
   const get = (a,b) => val[a+'|'+b] || val[b+'|'+a] || {subs:0, threads:0};
   const peak = Math.max(1, ...p.pairs.map(x => x.subs + x.threads));
-  const cell = (a,b) => {
+  const cell = (a,b,ri,ci) => {
     if(a === b) return '<td class="cell diag"></td>';
     const v = get(a,b), t = v.subs + v.threads;
     if(!t) return '<td class="cell"></td>';
     const alpha = (.12 + .78 * t / peak).toFixed(2);
-    return `<td class="cell" style="background:rgba($ACCENT_RGB,${alpha})" ` +
+    return `<td class="cell click" data-r="${ri}" data-c="${ci}" ` +
+           `style="background:rgba($ACCENT_RGB,${alpha})" ` +
            `title="${esc(a)} × ${esc(b)} — ${plural(v.subs,'shared subreddit')}` +
            ` · ${plural(v.threads,'co-commented thread')}"></td>`;
   };
   $('#heat').innerHTML =
     `<table class="matrix heat"><thead><tr><th></th>${acctHead(A)}</tr></thead><tbody>` +
-    A.map(a => `<tr><td class="lbl">${userCell(a)}</td>` +
-               A.map(b => cell(a,b)).join('') + '</tr>').join('') +
+    A.map((a,ri) => `<tr><td class="lbl">${userCell(a)}</td>` +
+               A.map((b,ci) => cell(a,b,ri,ci)).join('') + '</tr>').join('') +
     '</tbody></table>';
+  $('#heat').querySelectorAll('td.click').forEach(td => td.onclick =
+    () => openPair(A[+td.dataset.r], A[+td.dataset.c]));
   return A;
 }
 
@@ -733,8 +917,9 @@ async function loadAccounts(){
   </tr>`);
 }
 
-// ---- row × account dot matrices (shared subs, co-commented threads) ----
-function dotMatrix(el, rows, accounts, cols, tipFn){
+// ---- row × account dot matrices (brands, shared subs, threads) ----
+// onCell(row, account) opens the evidence behind a clicked dot.
+function dotMatrix(el, rows, accounts, cols, tipFn, onCell){
   if(!rows.length) return;
   const peak = Math.max(1, ...rows.flatMap(
     r => accounts.map(u => r.cells[u] || 0)));
@@ -742,26 +927,41 @@ function dotMatrix(el, rows, accounts, cols, tipFn){
     `<table class="matrix"><thead><tr>` +
     cols.map(c => `<th class="${c.num?'num':''}">${c.label}</th>`).join('') +
     `${acctHead(accounts)}</tr></thead><tbody>` +
-    rows.map(r =>
+    rows.map((r, ri) =>
       '<tr>' + cols.map(c => c.cell(r)).join('') +
-      accounts.map(u => dotCell(r.cells[u] || 0, peak, tipFn(r, u))).join('') +
+      accounts.map((u, ci) =>
+        dotCell(r.cells[u] || 0, peak, tipFn(r, u), ri, ci)).join('') +
       '</tr>').join('') +
     '</tbody></table>';
+  el.querySelectorAll('td.click').forEach(td => td.onclick =
+    () => onCell(rows[+td.dataset.r], accounts[+td.dataset.c]));
 }
 
 async function loadMentions(accounts){
-  const { total, rows } = await getJSON('/api/mentions');
+  const { source, total, rows } = await getJSON('/api/mentions');
+  $('#mention-sub').textContent = source === 'roster'
+    ? 'Roster brands (brands.csv next to the DB, or --brands), matched ' +
+      'case-insensitively as whole words. Dot area ~ that account’s ' +
+      'posts + comments mentioning the brand; click a dot to read them.'
+    : 'No brand roster found (add brands.csv next to the DB, or --brands) ' +
+      '— falling back to mined proper names: terms capitalized nearly ' +
+      'every time they appear mid-sentence, used by ≥2 accounts. ' +
+      'Click a dot to read the mentions.';
   $('#mention-count').textContent = rows.length ? topOf(total, rows.length) : '';
   if(!rows.length){
-    $('#mentions').innerHTML =
-      '<p class="muted">No name is mentioned by ≥2 accounts.</p>';
+    $('#mentions').innerHTML = source === 'roster'
+      ? '<p class="muted">No roster brand is mentioned in this database.</p>'
+      : '<p class="muted">No name is mentioned by ≥2 accounts.</p>';
     return;
   }
   dotMatrix($('#mentions'), rows, accounts, [
     {label:'brand / name', cell: r => `<td class="lbl">${esc(r.term)}</td>`},
     {label:'accounts', num:true, cell: r => `<td class="num">${fmt(r.accounts)}</td>`},
     {label:'mentions', num:true, cell: r => `<td class="num">${fmt(r.uses)}</td>`},
-  ], (r, u) => `${esc(u)} — ${plural(r.cells[u], 'mention')} of ${esc(r.term)}`);
+  ], (r, u) => `${esc(u)} — ${plural(r.cells[u], 'mention')} of ${esc(r.term)}`,
+  (r, u) => openEvidence(`${u} · ${r.term}`,
+    `/api/evidence?type=mention&u=${encodeURIComponent(u)}&term=${encodeURIComponent(r.term)}`,
+    itemsHtml));
 }
 
 async function loadSubreddits(accounts){
@@ -779,7 +979,10 @@ async function loadSubreddits(accounts){
     {label:'posts', num:true, cell: r => `<td class="num">${fmt(r.posts)}</td>`},
     {label:'comments', num:true, cell: r => `<td class="num">${fmt(r.comments)}</td>`},
   ], (r, u) => `${esc(u)} in r/${esc(r.subreddit)} — ` +
-               plural(r.cells[u], 'post/comment'));
+               plural(r.cells[u], 'post/comment'),
+  (r, u) => openEvidence(`${u} · r/${r.subreddit}`,
+    `/api/evidence?type=sub&u=${encodeURIComponent(u)}&sub=${encodeURIComponent(r.subreddit)}`,
+    itemsHtml));
 }
 
 async function loadThreads(accounts){
@@ -798,14 +1001,68 @@ async function loadThreads(accounts){
       `<td><a href="https://reddit.com/r/${esc(t.subreddit)}" target="_blank">r/${esc(t.subreddit)}</a></td>`},
     {label:'accounts', num:true, cell: t => `<td class="num">${fmt(t.accounts)}</td>`},
     {label:'comments', num:true, cell: t => `<td class="num">${fmt(t.comments)}</td>`},
-  ], (t, u) => `${esc(u)} — ${plural(t.cells[u], 'comment')} in this thread`);
+  ], (t, u) => `${esc(u)} — ${plural(t.cells[u], 'comment')} in this thread`,
+  (t, u) => openEvidence(`${u} · in thread`,
+    `/api/evidence?type=thread&u=${encodeURIComponent(u)}&link=${encodeURIComponent(t.link_id)}`,
+    r => (r.title ? `<p class="muted">${esc(r.title)}</p>` : '') + itemsHtml(r)));
 }
 
 // ---- drawer ----
+// Two modes share it: an account's paginated posts/comments (tabs shown), and
+// one-shot cell evidence (tabs hidden).
 let cur = { user:null, kind:'posts', offset:0, limit:50 };
+function openDrawer(title, tabs){
+  $('#d-user').textContent = title;
+  $('#d-tabs').style.display = tabs ? 'flex' : 'none';
+  $('#drawer').classList.add('open');
+}
 function openUser(u){ cur = { user:u, kind:'posts', offset:0, limit:50 };
-  $('#drawer').classList.add('open'); setTab('posts'); loadContent(); }
+  openDrawer(u, true); setTab('posts'); loadContent(); }
 $('#d-close').onclick = () => $('#drawer').classList.remove('open');
+
+// ---- cell evidence ----
+function renderEvidenceItem(it){
+  const head = `<div class="meta">r/${esc(it.subreddit)} · <b>${fmt(it.score)}</b> pts · ${day(it.created_utc)} · ${esc(it.kind)}</div>`;
+  return `<div class="item">${head}
+    ${it.title ? `<div class="title">${esc(it.title)}</div>` : ''}
+    ${it.selftext ? `<div class="txt">${esc(it.selftext)}</div>` : ''}
+    ${it.url ? `<div><a href="${esc(it.url)}" target="_blank">${esc(it.url)}</a></div>` : ''}</div>`;
+}
+const itemsHtml = r =>
+  (r.items.map(renderEvidenceItem).join('') ||
+    '<p class="muted">Nothing here.</p>') +
+  (r.total > r.items.length
+    ? `<p class="muted">first ${fmt(r.items.length)} of ${fmt(r.total)}</p>` : '');
+
+async function openEvidence(title, url, render){
+  openDrawer(title, false);
+  $('#d-body').innerHTML = '<p class="muted">loading…</p>';
+  try { const r = await getJSON(url); $('#d-body').innerHTML = render(r); }
+  catch(e){ $('#d-body').innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+}
+
+function openPair(a, b){
+  openEvidence(`${a} × ${b}`,
+    `/api/evidence?type=pair&a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`,
+    r => {
+      const head = `<thead><tr><th></th><th class="num">${esc(a)}</th><th class="num">${esc(b)}</th></tr></thead>`;
+      const subs = r.subs.map(s =>
+        `<tr><td><a href="https://reddit.com/r/${esc(s.subreddit)}" target="_blank">r/${esc(s.subreddit)}</a></td>
+         <td class="num">${fmt(s.a_n)}</td><td class="num">${fmt(s.b_n)}</td></tr>`).join('');
+      const threads = r.threads.map(t =>
+        `<tr><td><a href="https://redd.it/${esc(t.link_id)}" target="_blank">${esc(t.title) || t.link_id}</a>
+         <div class="muted">r/${esc(t.subreddit)}</div></td>
+         <td class="num">${fmt(t.a_n)}</td><td class="num">${fmt(t.b_n)}</td></tr>`).join('');
+      return `<h4>Shared subreddits (${fmt(r.subs.length)})</h4>
+        <p class="muted">posts + comments by each account</p>
+        <table class="plain">${head}<tbody>${subs ||
+          '<tr><td class="muted">none</td></tr>'}</tbody></table>
+        <h4>Co-commented threads (${fmt(r.threads.length)})</h4>
+        <p class="muted">comments by each account</p>
+        <table class="plain">${head}<tbody>${threads ||
+          '<tr><td class="muted">none</td></tr>'}</tbody></table>`;
+    });
+}
 function setTab(kind){
   cur.kind = kind; cur.offset = 0;
   $('#tab-posts').classList.toggle('active', kind==='posts');
