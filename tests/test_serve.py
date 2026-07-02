@@ -347,6 +347,38 @@ def test_share_of_voice_splits_coordinated_vs_organic(tmp_path):
     assert g["coord_pct"] == 100     # only the seeder was archived
 
 
+def test_suggested_coordinated_flags_multi_brand_unlabeled_authors(tmp_path):
+    path = str(tmp_path / "sus.db")
+    engine = connect(path)
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [
+            # 'hidden' is unlabeled but pushes 3 distinct roster brands → flag
+            Post(post_id="h1", author_username="hidden", subreddit_name="x",
+                 created_utc=1, title="love Alpha and Beta", selftext="Gamma too"),
+            # 'real' is unlabeled but mentions one brand → genuine organic, skip
+            Post(post_id="r1", author_username="real", subreddit_name="x",
+                 created_utc=2, title="Alpha worked for me"),
+            # 'seed' is already labeled coordinated → never a "suggestion"
+            Post(post_id="s1", author_username="seed", subreddit_name="x",
+                 created_utc=3, title="Alpha Beta Gamma Delta"),
+        ])
+        s.commit()
+    roster = [("Alpha", ["alpha"]), ("Beta", ["beta"]),
+              ("Gamma", ["gamma"]), ("Delta", ["delta"])]
+    n = Network(path, roster=roster, cohorts={"seed": "coordinated"})
+    res = n.suggested_coordinated()
+    assert res["available"] and res["threshold"] == 3
+    assert [r["account"] for r in res["rows"]] == ["hidden"]   # only the pusher
+    hit = res["rows"][0]
+    assert hit["brand_count"] == 3
+    assert hit["brands"] == ["Alpha", "Beta", "Gamma"]
+
+
+def test_suggested_coordinated_needs_roster_and_labels(net):
+    assert net.suggested_coordinated()["available"] is False
+
+
 def test_share_of_voice_needs_roster_and_labels(net):
     # no roster → unavailable; roster but no coordinated label → unavailable
     assert net.share_of_voice()["available"] is False

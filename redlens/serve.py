@@ -61,6 +61,8 @@ MAX_CONTENT = 100    # account drill-down page cap
 MAX_ACCOUNTS = 40    # matrix columns — top accounts by activity
 AI_SAMPLE = 20       # posts / comments sampled into the AI-profile prompt
 AI_SNIPPET = 240     # chars of a comment fed to the prompt
+SUGGEST_MIN_BRANDS = 3  # unlabeled accounts pushing ≥ this many distinct roster
+                        # brands are flagged as likely-undetected seeders
 
 # All accounts' activity, one row per post/comment (the network's event log).
 _ACTIVITY = ("SELECT author_username u, subreddit_name sub FROM post "
@@ -409,6 +411,43 @@ class Network:
                                  -int(r["coordinated"]), str(r["term"]).lower()))
         return {"available": True,
                 "coordinated_accounts": len(self._coordinated),
+                "total": len(rows), "rows": rows[:MAX_ROWS]}
+
+    def suggested_coordinated(self) -> dict[str, Any]:
+        """Unlabeled accounts that push many distinct roster brands — likely
+        undetected seeders. The keyless verification signal behind the "these
+        49 organic authors" question: a genuine organic user mentions a brand
+        or two they actually use; a seeder pushes a catalog. An account not in
+        ``cohorts.csv`` mentioning ≥ ``SUGGEST_MIN_BRANDS`` distinct roster
+        brands (across whatever history is synced) is surfaced for review —
+        confirm from its profile, then add it to ``cohorts.csv``.
+
+        Only as strong as the archived history: an account with only a single
+        pulled post can't show breadth. Sync the pool's full histories first
+        (author-scoped) for this to bite. Needs a roster and cohort labels.
+        """
+        if not self.roster or not self.cohorts:
+            return {"available": False, "rows": []}
+        pats = [(name, _term_pattern(terms)) for name, terms in self.roster]
+        brands_by: dict[str, set[str]] = {}
+        mentions_by: Counter[str] = Counter()
+        for r in self._texts():
+            u = r["u"]
+            if u in self.cohorts:        # already labeled — not a suggestion
+                continue
+            for name, pat in pats:
+                if pat.search(r["t"]):
+                    brands_by.setdefault(u, set()).add(name)
+                    mentions_by[u] += 1
+        flagged = sorted(
+            (u for u, bs in brands_by.items() if len(bs) >= SUGGEST_MIN_BRANDS),
+            key=lambda u: (-len(brands_by[u]), -mentions_by[u], u))
+        rows: list[dict[str, Any]] = [
+            {"account": u, "brands": sorted(brands_by[u]),
+             "brand_count": len(brands_by[u]), "mentions": mentions_by[u]}
+            for u in flagged
+        ]
+        return {"available": True, "threshold": SUGGEST_MIN_BRANDS,
                 "total": len(rows), "rows": rows[:MAX_ROWS]}
 
     def _mined_mentions(self) -> dict[str, Any]:
@@ -886,6 +925,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.mentions())
             elif u.path == "/api/share-of-voice":
                 self._json(self.net.share_of_voice())
+            elif u.path == "/api/suggested-coordinated":
+                self._json(self.net.suggested_coordinated())
             elif u.path == "/api/profile":
                 self._json(self.net.profile(one("u")))
             elif u.path == "/api/ai-profile":
@@ -1120,6 +1161,16 @@ _PAGE = r"""<!doctype html>
       accounts on each side.</p>
     <div id="sov"></div>
     <p class="sub" id="sov-nobase"></p>
+  </section>
+
+  <section id="suspect-section" hidden>
+    <h2>Suspected undetected seeders <span class="count" id="suspect-count"></span></h2>
+    <p class="sub">Accounts <b>not</b> in the labeled cohort that push several
+      distinct roster brands across their history — a genuine user mentions a
+      product they use; a seeder pushes a catalog. Review each from its profile,
+      then add confirmed ones to <code>cohorts.csv</code>. Only as strong as the
+      history archived for each account.</p>
+    <div class="wrap"><table id="suspect" class="plain"></table></div>
   </section>
 
   <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
@@ -1421,6 +1472,23 @@ async function loadShareOfVoice(){
   });
 }
 
+// ---- suspected undetected seeders (brand-breadth over the organic pool) ----
+async function loadSuspects(){
+  const r = await getJSON('/api/suggested-coordinated');
+  if(!r.available || !r.rows.length) return;
+  $('#suspect-section').hidden = false;
+  $('#suspect-count').textContent = topOf(r.total, r.rows.length);
+  $('#suspect').innerHTML =
+    '<thead><tr><th>account</th><th class="num">roster brands</th>' +
+    '<th class="num">mentions</th><th>brands pushed</th></tr></thead><tbody>' +
+    r.rows.map(s => `<tr>
+      <td>${userCell(s.account)}</td>
+      <td class="num">${fmt(s.brand_count)}</td>
+      <td class="num">${fmt(s.mentions)}</td>
+      <td class="members">${s.brands.map(esc).join(', ')}</td>
+    </tr>`).join('') + '</tbody>';
+}
+
 let mentionsCache = { source: 'mined', rows: [] };  // reused by profiles
 async function loadMentions(accounts){
   mentionsCache = await getJSON('/api/mentions');
@@ -1699,7 +1767,8 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
     // The heatmap's account order is every matrix's column order.
     const accounts = await loadPairs();
     await Promise.all([
-      loadAccounts(), loadShareOfVoice(), loadMentions(accounts),
+      loadAccounts(), loadShareOfVoice(), loadSuspects(),
+      loadMentions(accounts),
       loadSubreddits(accounts), loadThreads(accounts)]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
     `<p class="warn">${esc(e.message)}</p>`); }
