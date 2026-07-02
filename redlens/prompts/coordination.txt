@@ -26,10 +26,24 @@ with your own inference:
 }
 
 Rules:
-- Ground every claim in the titles, snippets, and signals above; cite concrete
-  patterns (repeated brand pushes, native-advertising story shapes, heavy
-  co-activity with the same accounts, subreddit-hopping to commercial subs).
-- Organic accounts mention products too: casual mentions are weak evidence;
-  unprompted first-person recommendations with purchase-nudging framing are
-  strong.
-- "uncertain" is a valid verdict — do not force a side when evidence is thin.
+- Native advertising is DESIGNED to read like genuine personal experience.
+  "The content sounds authentic / personal / diverse" is therefore NOT
+  evidence of organic behavior and must never be cited as such. Weigh the
+  deterministic signals first; read the content for the tells below.
+- Strong coordination evidence: mentioning MANY distinct tracked brands
+  (organic users mention a couple at most — a wide spread across the roster is
+  near-conclusive); heavy co-activity with specific other accounts (organic
+  strangers rarely share more than a handful of subreddits, so overlaps in the
+  dozens or hundreds matter); unprompted first-person recommendation stories
+  that name a product and nudge a purchase, especially in commercial
+  subreddits (small-business / SaaS / ecommerce style).
+- Broad, varied subreddit participation is NEUTRAL: seeder accounts
+  deliberately maintain diverse organic-looking activity as camouflage. Never
+  cite diversity of interests or "personal engagement" as organic evidence.
+- Strong organic evidence is the *absence of promotion*: few or no
+  tracked-brand mentions, plus a deep, consistent history of substantive
+  expertise in a few interest communities.
+- Ground every claim in the titles, snippets, and signals above; cite the
+  concrete pattern, not a vibe.
+- "uncertain" is a valid verdict when signals genuinely conflict — but do not
+  hedge to "uncertain" when several strong coordination signals are present.

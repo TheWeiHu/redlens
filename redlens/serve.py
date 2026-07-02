@@ -586,11 +586,22 @@ class Network:
                 f"- co-activity with u/{c['account']}: active in "
                 f"{c['subs']} of the same subreddits, commented in "
                 f"{c['threads']} of the same threads")
-        for row in self.mentions()["rows"]:
-            if (n := row["cells"].get(username)):
-                signals.append(
-                    f"- mentions \"{row['term']}\" in {n} posts/comments "
-                    f"(a brand {row['accounts']} tracked accounts mention)")
+        brand_rows = [row for row in self.mentions()["rows"]
+                      if row["cells"].get(username)]
+        if self.roster:
+            # Breadth is the strongest cheap tell: organic accounts mention a
+            # couple of tracked brands at most; seeders push dozens.
+            signals.append(
+                f"- mentions {len(brand_rows)} distinct brands from the "
+                f"tracked roster of {len(self.roster)}")
+        for row in brand_rows[:12]:
+            n = row["cells"][username]
+            signals.append(
+                f"- mentions \"{row['term']}\" in {n} posts/comments "
+                f"(a brand {row['accounts']} tracked accounts mention)")
+        if len(brand_rows) > 12:
+            signals.append(
+                f"- … plus {len(brand_rows) - 12} more tracked brands")
         communities = ", ".join(
             f"r/{s['subreddit']}" for s in p["top_subreddits"][:10]) or "—"
         return prompts.render(
