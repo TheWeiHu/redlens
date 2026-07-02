@@ -328,17 +328,23 @@ def _sov_db(tmp_path):
 
 
 def test_share_of_voice_splits_coordinated_vs_organic(tmp_path):
-    n = Network(_sov_db(tmp_path), roster=[("Widget", ["widget"])],
+    # Gadget is mentioned ONLY by the seeder — without an organic baseline its
+    # "100%" is an artifact of what was archived, so it must be flagged and
+    # sorted after the measurable brands.
+    n = Network(_sov_db(tmp_path),
+                roster=[("Widget", ["widget"]), ("Gadget", ["widget rocks"])],
                 cohorts={"seed": "coordinated"})
     sov = n.share_of_voice()
     assert sov["available"] and sov["coordinated_accounts"] == 1
-    w = sov["rows"][0]
-    assert w["term"] == "Widget"
+    w, g = sov["rows"]
+    assert w["term"] == "Widget" and w["baseline"] is True
     assert w["total"] == 3           # s1 title+selftext = 1 post match, o1, oc1
     assert w["coordinated"] == 1 and w["organic"] == 2
     assert w["coord_pct"] == 33
     assert w["coord_authors"] == 1 and w["organic_authors"] == 2
     assert set(w["top_organic"]) == {"org1", "org2"}
+    assert g["term"] == "Gadget" and g["baseline"] is False
+    assert g["coord_pct"] == 100     # only the seeder was archived
 
 
 def test_share_of_voice_needs_roster_and_labels(net):
