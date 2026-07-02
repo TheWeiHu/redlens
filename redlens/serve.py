@@ -134,10 +134,15 @@ class Network:
     """Read-only queries that describe the account network in one DB."""
 
     def __init__(self, path: str, roster: BrandRoster | None = None,
-                 cohorts: CohortLabels | None = None) -> None:
+                 cohorts: CohortLabels | None = None,
+                 promoted: set[str] | None = None) -> None:
         self.path = str(Path(path).resolve())
         self.roster = roster or []
         self.cohorts = cohorts or {}
+        # accounts folded into the cohort from a --promote suggestions file
+        # (verified seeders, kept separate from hand-labeled ground truth so
+        # the UI can mark them); they're already in `cohorts`.
+        self.promoted = promoted or set()
         # cohort display order = first appearance in the labels file
         self._cohort_rank: dict[str, int] = {}
         for c in self.cohorts.values():
@@ -204,6 +209,7 @@ class Network:
                         tally.items(),
                         key=lambda kv: self._cohort_rank.get(kv[0], 0))
                 ]
+                out["promoted"] = sum(1 for u in labeled if u in self.promoted)
             else:
                 out["accounts"] = len(authors)
             return out
@@ -269,6 +275,7 @@ class Network:
                 d["total"] = d["posts"] + d["comments"]
                 d["top_subreddit"] = top.get(d["username"], "")
                 d["cohort"] = self.cohorts.get(d["username"], "")
+                d["promoted"] = d["username"] in self.promoted
                 out.append(d)
             out.sort(key=lambda d: (-d["total"], d["username"]))
             return out
@@ -994,22 +1001,35 @@ def _sidecar(db: str | Path, explicit: str | Path | None,
 
 def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
           open_browser: bool = True, brands: str | Path | None = None,
-          cohorts: str | Path | None = None) -> int:
+          cohorts: str | Path | None = None,
+          promote: str | Path | None = None) -> int:
     try:
         brands_path = _sidecar(db, brands, "brands.csv")
         cohorts_path = _sidecar(db, cohorts, "cohorts.csv")
+        promote_path = Path(promote) if promote else None
+        if promote_path and not promote_path.is_file():
+            raise FileNotFoundError(promote_path)
     except FileNotFoundError as e:
         print(f"file not found: {e}", file=sys.stderr)
         return 2
     roster = load_brands(brands_path) if brands_path else []
     labels = load_cohorts(cohorts_path) if cohorts_path else {}
+    # --promote folds a reviewed suggestions file (account, cohort, …) into the
+    # cohort: verified-but-not-hand-labeled seeders join the coordinated set so
+    # scoping + share-of-voice reflect the real network, without editing the
+    # ground-truth cohorts.csv. Kept separate so the UI can mark them.
+    promoted_labels = load_cohorts(promote_path) if promote_path else {}
+    labels = {**labels, **promoted_labels}    # promotions win on conflict
 
-    net = Network(str(db), roster=roster, cohorts=labels)
+    net = Network(str(db), roster=roster, cohorts=labels,
+                  promoted=set(promoted_labels))
     net.overview()  # fail fast if the DB is missing or unreadable
     if roster:
         print(f"brand roster: {len(roster)} brands from {brands_path}")
     if labels:
-        print(f"cohort labels: {len(labels)} accounts from {cohorts_path}")
+        print(f"cohort labels: {len(labels)} accounts"
+              + (f" ({len(promoted_labels)} promoted from {promote_path})"
+                 if promoted_labels else ""))
 
     handler = type("BoundHandler", (Handler,), {"net": net})
     httpd = ThreadingHTTPServer((host, port), handler)
@@ -1284,6 +1304,7 @@ async function loadOverview(){
     .map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
     + (o.cohorts || []).map(c =>
       `<div class="stat"><b>${fmt(c.accounts)}</b><span>${esc(c.cohort)}</span></div>`).join('')
+    + (o.promoted ? `<div class="stat"><b>${fmt(o.promoted)}</b><span>promoted</span></div>` : '')
     + `<div class="stat"><b>${day(o.first_utc)}</b><span>first seen</span></div>`
     + `<div class="stat"><b>${day(o.last_utc)}</b><span>last seen</span></div>`;
   // once organic discussion is in the DB the network view is scoped to the
@@ -1403,7 +1424,7 @@ async function loadAccounts(){
     {key:'top_subreddit', label:'top sub'},
   ], a => `<tr>
     <td>${userCell(a.username)}</td>
-    ${hasCohorts ? `<td>${pill(a.cohort)}</td>` : ''}
+    ${hasCohorts ? `<td>${pill(a.cohort)}${a.promoted ? ' <span class="pill">promoted</span>' : ''}</td>` : ''}
     <td class="num">${fmt(a.total)}<div class="bar" style="width:${100*a.total/max}%"></div></td>
     <td class="num">${fmt(a.posts)}</td>
     <td class="num">${fmt(a.comments)}</td>

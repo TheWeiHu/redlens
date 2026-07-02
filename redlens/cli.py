@@ -392,6 +392,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--cohorts", metavar="PATH",
         help="cohort-labels CSV (account, cohort) grouping the matrices; "
              "default: cohorts.csv next to the DB, if present")
+    sv.add_argument(
+        "--promote", metavar="PATH",
+        help="a reviewed suggestions CSV (account, cohort) folded into the "
+             "cohort at run time — e.g. verified seeders — without editing "
+             "cohorts.csv; marked as promoted in the report")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -881,7 +886,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "serve":
             return serve.serve(db, host=args.host, port=args.port,
                                open_browser=not args.no_browser,
-                               brands=args.brands, cohorts=args.cohorts)
+                               brands=args.brands, cohorts=args.cohorts,
+                               promote=args.promote)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
