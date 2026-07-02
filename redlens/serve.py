@@ -374,6 +374,13 @@ class Network:
         if not self.roster or not self._coordinated:
             return {"available": False, "rows": []}
         texts = self._texts()
+        # A share is only meaningful once the brand's ORGANIC conversation is
+        # in the DB (the brand was tracked as a topic, or organic authors
+        # mention it). Without that baseline, "100% coordinated" would just
+        # mean "we only archived the seeders" — flag those rows instead.
+        with closing(self._conn()) as con:
+            tracked = {r[0].lower() for r in con.execute(
+                "SELECT name FROM topic")}
         rows: list[dict[str, Any]] = []
         for name, terms in self.roster:
             pat = _term_pattern(terms)
@@ -388,6 +395,7 @@ class Network:
                 continue
             rows.append({
                 "term": name,
+                "baseline": bool(org) or name.lower() in tracked,
                 "total": total,
                 "coordinated": sum(coord.values()),
                 "organic": sum(org.values()),
@@ -397,8 +405,8 @@ class Network:
                 "top_coordinated": [u for u, _ in coord.most_common(10)],
                 "top_organic": [u for u, _ in org.most_common(10)],
             })
-        rows.sort(key=lambda r: (-r["coord_pct"], -int(r["coordinated"]),
-                                 str(r["term"]).lower()))
+        rows.sort(key=lambda r: (not r["baseline"], -r["coord_pct"],
+                                 -int(r["coordinated"]), str(r["term"]).lower()))
         return {"available": True,
                 "coordinated_accounts": len(self._coordinated),
                 "total": len(rows), "rows": rows[:MAX_ROWS]}
@@ -1105,12 +1113,13 @@ _PAGE = r"""<!doctype html>
 
   <section id="sov-section" hidden>
     <h2>Share of voice <span class="count" id="sov-count"></span></h2>
-    <p class="sub">For each brand, the coordinated cohort's share of its Reddit
-      conversation — mentions by the network ÷ all mentions. The bar fills
-      <b style="color:$ACCENT">coordinated</b> vs <span class="muted">organic</span>;
-      brands the network most dominates sort first. Click a row for the
+    <p class="sub">Of everything said about a brand on Reddit (in this
+      database), how much came from the <b style="color:$ACCENT">coordinated
+      network</b> vs <span class="muted">real, unaffiliated users</span>?
+      Brands the network most dominates sort first; click a row for the
       accounts on each side.</p>
     <div id="sov"></div>
+    <p class="sub" id="sov-nobase"></p>
   </section>
 
   <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
@@ -1369,12 +1378,29 @@ function dotMatrix(el, rows, accounts, cols, tipFn, onCell){
 async function loadShareOfVoice(){
   const r = await getJSON('/api/share-of-voice');
   if(!r.available || !r.rows.length) return;   // no roster/labels, or no data
+  // A bar is only honest for brands whose ORGANIC conversation is in the DB.
+  // The rest would read "100% coordinated" purely because only the seeders
+  // were archived — list them as not-yet-tracked instead.
+  const based = r.rows.filter(b => b.baseline);
+  const noBase = r.rows.filter(b => !b.baseline);
+  if(noBase.length)
+    $('#sov-nobase').innerHTML =
+      `${fmt(noBase.length)} roster brands have no organic baseline yet ` +
+      `(not tracked as topics — their share can't be measured): ` +
+      `<span class="muted">${noBase.map(b => esc(b.term)).join(', ')}</span>`;
+  if(!based.length){
+    $('#sov-section').hidden = false;
+    $('#sov-count').textContent = '';
+    $('#sov').innerHTML = '<p class="muted">No brand has an organic baseline '
+      + 'yet — run the brand-tracking ingest first.</p>';
+    return;
+  }
   $('#sov-section').hidden = false;
-  $('#sov-count').textContent = topOf(r.total, r.rows.length);
+  $('#sov-count').textContent = topOf(r.total, based.length);
   const authorList = (label, us) => us.length
     ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
       us.map(userCell).join(', ') + '</p>' : '';
-  $('#sov').innerHTML = r.rows.map((b, i) =>
+  $('#sov').innerHTML = based.map((b, i) =>
     `<div class="sovrow" data-i="${i}">
        <div class="lbl">${esc(b.term)}</div>
        <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
@@ -1383,7 +1409,7 @@ async function loadShareOfVoice(){
        <div class="v"><b>${b.coord_pct}%</b> of ${fmt(b.total)}</div>
      </div>`).join('');
   $('#sov').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
-    const b = r.rows[+el.dataset.i];
+    const b = based[+el.dataset.i];
     openDrawer(`${b.term} · share of voice`);
     $('#d-body').innerHTML =
       `<p><b>${b.coord_pct}%</b> of ${plural(b.total, 'mention')} are the `
