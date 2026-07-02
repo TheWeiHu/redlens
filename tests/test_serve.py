@@ -9,7 +9,7 @@ from sqlmodel import Session
 
 from redlens.db import connect, init_schema, upsert
 from redlens.models import Comment, Post, User
-from redlens.serve import Network, load_brands
+from redlens.serve import Network, load_brands, load_cohorts
 
 
 @pytest.fixture
@@ -160,6 +160,39 @@ def test_profile_rolls_up_one_account(net):
 def test_profile_rejects_unknown_accounts(net):
     with pytest.raises(ValueError, match="unknown account"):
         net.profile("nobody")
+
+
+def test_load_cohorts_maps_accounts_to_labels(tmp_path):
+    p = tmp_path / "cohorts.csv"
+    p.write_text(
+        "# ground truth\n"
+        "bob, coordinated\n"
+        "carol, coordinated\n"
+        "alice, organic\n"
+        "dangling-line-without-label\n",
+        encoding="utf-8")
+    assert load_cohorts(p) == {
+        "bob": "coordinated", "carol": "coordinated", "alice": "organic"}
+
+
+def test_cohorts_group_the_matrix_and_tag_everything(net):
+    labels = {"bob": "coordinated", "carol": "coordinated",
+              "alice": "organic"}
+    n = Network(net.path, cohorts=labels)
+    # matrix order: cohorts in file order (coordinated first), activity
+    # within — even though alice is the most active account overall
+    assert n.pairs()["accounts"] == ["bob", "carol", "alice"]
+    assert n.pairs()["cohorts"] == labels
+    # overview counts per cohort, in the same order
+    assert n.overview()["cohorts"] == [
+        {"cohort": "coordinated", "accounts": 2},
+        {"cohort": "organic", "accounts": 1}]
+    # accounts and profiles carry the label ('' when unlabeled)
+    rows = {a["username"]: a["cohort"] for a in n.accounts()}
+    assert rows == {"alice": "organic", "bob": "coordinated",
+                    "carol": "coordinated"}
+    assert n.profile("bob")["cohort"] == "coordinated"
+    assert "cohorts" not in net.overview()   # unlabeled DB: no cohort block
 
 
 def test_load_brands_parses_names_aliases_and_comments(tmp_path):
