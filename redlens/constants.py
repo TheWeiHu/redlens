@@ -132,6 +132,10 @@ SENTIMENT_DAY_SAMPLE = 8        # most-engaged titles per day sent to the LLM sc
 EXTRACT_SAMPLE_POSTS = 60       # most-engaged titles sent to LLM entity extractors
 EXTRACT_SAMPLE_COMMENTS = 80    # most-upvoted comment snippets sent with them
 TOP_MENTIONS = 12               # rows shown per mention section (brands/complaints/uses)
+MAX_PAGE_DOCS = 100_000         # page --limit default: the renderer holds the whole
+                                # topic in RAM (a 419 MB box OOM-killed at ~182k
+                                # docs), so refuse bigger topics unless --limit
+                                # raises the cap or --force overrides it
 ACCENT = "#d93a00"             # redlens red — the page's one accent color
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
