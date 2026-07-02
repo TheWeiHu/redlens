@@ -293,6 +293,23 @@ def test_ai_profile_stays_keyless_without_a_key(net, monkeypatch):
         net.ai_profile("alice")
 
 
+def test_promoted_accounts_join_the_coordinated_cohort(net):
+    # carol was unlabeled (organic pool); promoting her folds her into the
+    # coordinated cohort so scoping + share-of-voice pick her up, and she's
+    # marked promoted.
+    labels = {"alice": "coordinated", "bob": "coordinated",
+              "carol": "coordinated"}
+    n = Network(net.path, roster=[("Nord", ["nord"])], cohorts=labels,
+                promoted={"carol"})
+    o = n.overview()
+    assert o["accounts"] == 3 and o["promoted"] == 1
+    rows = {a["username"]: a for a in n.accounts()}
+    assert rows["carol"]["promoted"] is True
+    assert rows["alice"]["promoted"] is False
+    assert "carol" in n._coordinated          # counts as coordinated now
+    assert {a["username"] for a in n.accounts()} == {"alice", "bob", "carol"}
+
+
 def test_network_view_scopes_to_labeled_cohort(net):
     # alice + bob are the curated cohort; carol is an unlabeled "organic"
     # author (as if pulled in by brand-tracking) and must drop out of the
