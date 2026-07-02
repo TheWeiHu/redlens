@@ -374,6 +374,49 @@ def test_cli_page_all_decollides_slugs(engine, tmp_path, monkeypatch):
     assert "c.html" in index and "c-2.html" in index   # both topics linked
 
 
+def test_cli_page_limit_hard_errors_and_force_overrides(engine, tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"a": [raw("p1", "a"), raw("p2", "a")]}))
+    assert main(["--db", str(db), "track", "big",
+                 "--subreddits", "a", "--yes"]) == 0
+
+    out = tmp_path / "big.html"
+    # 2 docs > --limit 1 → refuse fast, write nothing
+    assert main(["--db", str(db), "page", "big",
+                 "-o", str(out), "--limit", "1"]) == 1
+    assert not out.exists()
+    # --force renders past the cap; --limit 0 disables it entirely
+    assert main(["--db", str(db), "page", "big",
+                 "-o", str(out), "--limit", "1", "--force"]) == 0
+    assert out.exists()
+    out.unlink()
+    assert main(["--db", str(db), "page", "big",
+                 "-o", str(out), "--limit", "0"]) == 0
+    assert out.exists()
+
+
+def test_cli_page_all_skips_oversized_topics(engine, tmp_path, monkeypatch, capsys):
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(arctic, "iter_subreddit_query",
+                        fake_query({"a": [raw("p1", "a"), raw("p2", "a")],
+                                    "b": [raw("p3", "b")]}))
+    assert main(["--db", str(db), "track", "big",
+                 "--subreddits", "a", "--yes"]) == 0
+    assert main(["--db", str(db), "track", "small",
+                 "--subreddits", "b", "--yes"]) == 0
+
+    out = tmp_path / "reports"
+    # big (2 docs) exceeds --limit 1; small (1 doc) renders; batch succeeds
+    assert main(["--db", str(db), "page", "--all",
+                 "-o", str(out), "--limit", "1"]) == 0
+    assert (out / "small.html").exists()
+    assert not (out / "big.html").exists()
+    index = (out / "index.html").read_text()
+    assert "too large to render" in index and "big" in index
+    assert "over --limit" in capsys.readouterr().err
+
+
 def test_track_does_not_advance_cursor_when_a_subreddit_fails(engine, monkeypatch):
     # a succeeds with a recent post; b fails transiently. The net-wide cursor
     # must NOT advance past a's post, or b's older posts would never be

@@ -500,6 +500,30 @@ def topic_drop_confidences(session: Session, name: str) -> list[float]:
     return sorted({round(v, 1) for v in vals if v is not None})
 
 
+def topic_doc_count(session: Session, name: str) -> int:
+    """Posts + comments a ``page`` render of ``name`` would materialize,
+    counted without loading any of them — the renderer's OOM preflight.
+
+    Counts the loosest view (``min_confidence`` 0.0, every matched post plus
+    every comment under one), which is the largest set the page builds, so the
+    cap can't be dodged by the confidence slider. 0 for an unknown topic (the
+    render path raises its own NotFound)."""
+    if (topic := get_topic(session, name)) is None:
+        return 0
+    posts = session.exec(
+        select(func.count())
+        .select_from(TopicPost)
+        .where(TopicPost.topic_id == topic.id, relevant_clause(0.0))
+    ).one()
+    comments = session.exec(
+        select(func.count())
+        .select_from(Comment)
+        .join(TopicPost, TopicPost.post_id == Comment.link_id)  # type: ignore[arg-type]
+        .where(TopicPost.topic_id == topic.id, relevant_clause(0.0))
+    ).one()
+    return int(posts) + int(comments)
+
+
 def topic_posts(session: Session, name: str, min_confidence: float = 0.0) -> list[Post]:
     """Posts matched to a topic, highest-scoring first (post_id tie-break
     keeps the order deterministic, matching the rendered page). ``min_confidence``

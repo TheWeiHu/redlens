@@ -21,7 +21,7 @@ from redlens.analytics import (
     list_users,
 )
 from redlens.config import default_report_dir, llm_api_key, resolve_db
-from redlens.constants import SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
+from redlens.constants import MAX_PAGE_DOCS, SUMMARY_DEFAULT_DEPTH, SUMMARY_DEPTHS
 from redlens.db import connect, init_schema, session
 from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
@@ -52,6 +52,7 @@ from redlens.topics import (
     pull_topic_comments,
     query_terms,
     search_subreddits,
+    topic_doc_count,
     track_topic,
     untrack_topic,
 )
@@ -466,6 +467,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--depth", choices=SUMMARY_DEPTHS, default=SUMMARY_DEFAULT_DEPTH,
                    help="how much of the archive the --summary samples "
                    f"(default: {SUMMARY_DEFAULT_DEPTH})")
+    g.add_argument("--limit", type=int, default=MAX_PAGE_DOCS, metavar="DOCS",
+                   help="refuse to render a topic whose posts + comments exceed "
+                   "this (the renderer holds the whole topic in RAM; big topics "
+                   "OOM small boxes); 0 disables the cap "
+                   f"(default: {MAX_PAGE_DOCS:,})")
+    g.add_argument("--force", action="store_true",
+                   help="render past --limit anyway (may OOM a small box)")
     g.add_argument("--days", type=int, default=None, metavar="N",
                    help="cap the sentiment-over-time chart to the most recent N "
                    "days of activity (default: no cap). The whole trend is one "
@@ -623,6 +631,10 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
     # Each _section-based provider already returns None without --summary
     # (and _brands honors --brands regardless), so the providers can be passed
     # unconditionally; only the theme labeler needs an explicit gate.
+    # The render OOM guard: the page holds a whole topic (posts + comments +
+    # LDA) in RAM, so refuse oversized topics unless --force / a higher --limit.
+    doc_limit = 0 if args.force else args.limit
+
     if args.all_topics:
         out_dir = Path(args.out) if args.out else default_report_dir()
         results = render_all(
@@ -634,14 +646,22 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
                 brands=_brands,
                 complaints=_complaints,
                 use_cases=_use_cases,
-            ))
+            ),
+            doc_limit=doc_limit or None)
         written = [pg for pg in results if pg.written]
-        skipped = [pg for pg in results if not pg.written]
+        empty = [pg for pg in results if not pg.written and not pg.too_large]
+        too_large = [pg for pg in results if pg.too_large]
         for pg in written:
             print(f"wrote {out_dir / (pg.slug + '.html')}")
-        if skipped:
-            print(f"skipped {len(skipped)} topic(s) with no matched "
-                  f"posts: {', '.join(pg.name for pg in skipped)}",
+        if empty:
+            print(f"skipped {len(empty)} topic(s) with no matched "
+                  f"posts: {', '.join(pg.name for pg in empty)}",
+                  file=sys.stderr)
+        if too_large:
+            print(f"skipped {len(too_large)} topic(s) over --limit "
+                  f"({doc_limit:,} docs): "
+                  f"{', '.join(pg.name for pg in too_large)} — raise --limit "
+                  f"or pass --force (may OOM a small box)",
                   file=sys.stderr)
         index = out_dir / "index.html"
         print(f"index: {index} "
@@ -649,6 +669,16 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
         if args.open and not args.no_browser:
             webbrowser.open(index.resolve().as_uri())
     elif args.topic:
+        if doc_limit:
+            with session(engine) as s:
+                docs = topic_doc_count(s, args.topic)
+            if docs > doc_limit:
+                raise RedlensError(
+                    f"topic '{args.topic}' would render {docs:,} posts + "
+                    f"comments, over the --limit cap of {doc_limit:,}. The "
+                    "renderer holds the whole topic in RAM (a 419 MB box "
+                    "OOM-killed at ~182k docs) — raise --limit or pass "
+                    "--force to render anyway.")
         html_doc = render_topic_page(
             engine, args.topic,
             Sections(
