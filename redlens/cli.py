@@ -387,6 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--brands", metavar="PATH",
         help="brand-roster CSV (name, match terms…) for the mentions matrix; "
              "default: brands.csv next to the DB, if present")
+    sv.add_argument(
+        "--cohorts", metavar="PATH",
+        help="cohort-labels CSV (account, cohort) grouping the matrices; "
+             "default: cohorts.csv next to the DB, if present")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -847,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "serve":
             return serve.serve(db, host=args.host, port=args.port,
                                open_browser=not args.no_browser,
-                               brands=args.brands)
+                               brands=args.brands, cohorts=args.cohorts)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
