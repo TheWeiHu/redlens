@@ -59,6 +59,7 @@ Two runtime dependencies (`platformdirs`, `sqlmodel`), all permissively licensed
 | `redlens topics` | Every tracked topic — keywords, net size, match count |
 | `redlens page <topic>` | Render a standalone HTML report (`--all` for every topic + index) |
 | `redlens explore` | Browse the DB in your browser (read-only, with a SQL console) |
+| `redlens serve` | Open the local listening report — a coordinated-network view (drill any account to its posts/comments) |
 | `redlens summarize <user>` | LLM-powered summary (needs an API key — see below) |
 | `redlens setup` | Configure the optional LLM API key |
 | `redlens completions <shell>` | Print a `bash\|zsh\|fish` completion script |

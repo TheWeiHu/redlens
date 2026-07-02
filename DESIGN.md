@@ -47,6 +47,7 @@ first use — there is no separate migration step.
 | `summarize.py` / `llm.py` / `prompts/` | optional AI profile summaries via a BYO OpenAI-compatible key |
 | `reporting/` | standalone HTML report rendering for `page` |
 | `explore.py` | read-only in-browser DB explorer (opened read-only; cannot mutate) |
+| `serve.py` | `serve` — the local listening report; read-only stdlib server + vanilla-JS dashboard |
 | `config.py` | DB-path resolution, `config.toml`, env vars, optional API-key getters |
 | `onboarding.py` | first-run `setup` wizard for optional keys |
 | `db.py` | engine, session, `upsert` |
@@ -66,6 +67,27 @@ subreddits and archives posts whose keywords match within it. Sources:
 Omitting `--sources` opens an interactive picker and a curating step; the net
 is then remembered and re-tracking is incremental. `--discover` widens the net
 one round by following authors of matching posts.
+
+## Listening report (`serve`)
+
+`serve` opens a localhost dashboard over an existing DB, framed as a
+**coordinated network**: every account is one cohort and the report surfaces the
+deterministic, keyless coordination signals between them as **matrices** that
+share one account-column order — the account × account **network matrix**
+(pairwise shared subs + co-commented threads, drawn as a heatmap), per-account
+volume, the **brands & names they co-mention** (mid-sentence-capitalization
+mining; a brand always written lowercase needs the LLM slice), the
+**shared-subreddit footprint** (subs ≥2 accounts touch), and the **threads they
+co-comment in** (`link_id` seen by ≥2 accounts) — then drills from any account
+into its raw posts and comments.
+
+It reuses `explore.py`'s pattern: a stdlib `http.server` opening the DB
+**read-only**, a JSON API, and one self-contained vanilla-JS page (no build
+step, no framework, no LLM key) in the redlens report style (light, one
+`constants.ACCENT` red). This is the first slice of the paid listening report;
+per-account `gpt-4o-mini` profiles with a `coordinated?` flag, brand
+share-of-voice, and view-time NL-plots are later slices, and the stdlib server
+is a cheap swap for a hosted front door when that era arrives.
 
 ## Configuration
 
