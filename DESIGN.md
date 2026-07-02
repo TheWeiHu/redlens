@@ -78,10 +78,12 @@ share one account-column order — the account × account **network matrix**
 volume, **brand mentions** (a curated roster — `brands.csv` next to the DB or
 `--brands PATH` — counted exactly; mined proper names as the keyless fallback),
 the **shared-subreddit footprint** (subs ≥2 accounts touch), and the **threads
-they co-comment in** (`link_id` seen by ≥2 accounts). **Every matrix cell is
-clickable** — a drawer opens with the exact posts/comments (or shared units,
-for a heatmap pair) behind that cell — and any account drills into its raw
-history.
+they co-comment in** (`link_id` seen by ≥2 accounts). The landing page shows
+only the stats, the heatmap, and the accounts table — the other matrices sit
+in **collapsed sections**. **Every matrix cell is clickable** (a drawer opens
+with the exact posts/comments behind it), and every account name opens a
+hash-routed **profile view** (`#/user/<name>`): identity stats, subreddit
+breakdown, top co-actors, brand mentions, and the raw paginated activity.
 
 It reuses `explore.py`'s pattern: a stdlib `http.server` opening the DB
 **read-only**, a JSON API, and one self-contained vanilla-JS page (no build
