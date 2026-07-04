@@ -1689,10 +1689,10 @@ async function loadShareOfVoice(){
   const authorList = (label, us) => us.length
     ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
       us.map(userCell).join(', ') + '</p>' : '';
-  // a brand the network mentions but that's dwarfed by organic talk rounds to
-  // 0% — show <1% so it doesn't read as "the network never touches it".
-  const pctLabel = b => (b.coord_pct === 0 && b.coordinated > 0)
-    ? '<1%' : b.coord_pct + '%';
+  // one-decimal precision so a brand dwarfed by organic talk (7OH: 0.5%) isn't
+  // rounded away to 0%; trailing .0 dropped so 100% / 95% stay clean integers.
+  const pctLabel = b => parseFloat(
+    (b.total ? 100 * b.coordinated / b.total : 0).toFixed(1)) + '%';
   $('#sov').innerHTML = rows.map((b, i) =>
     `<div class="sovrow" data-i="${i}">
        <div class="lbl">${esc(b.term)}${b.baseline ? ''
