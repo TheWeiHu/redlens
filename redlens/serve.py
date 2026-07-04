@@ -41,6 +41,7 @@ slices.
 from __future__ import annotations
 
 import csv
+import html
 import json
 import re
 import sqlite3
@@ -944,6 +945,7 @@ class Network:
 
 class Handler(BaseHTTPRequestHandler):
     net: Network  # injected on the server
+    page_html: str  # the index HTML with the title baked in, injected per-serve
 
     def log_message(self, format: str, *args: Any) -> None:  # quiet
         pass
@@ -967,7 +969,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if u.path == "/":
-                self._send(200, INDEX_HTML.encode(), "text/html; charset=utf-8")
+                self._send(200, self.page_html.encode(), "text/html; charset=utf-8")
             elif u.path == "/api/overview":
                 self._json({"db": self.net.path, **self.net.overview()})
             elif u.path == "/api/accounts":
@@ -1038,7 +1040,8 @@ def _sidecar(db: str | Path, explicit: str | Path | None,
 def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
           open_browser: bool = True, brands: str | Path | None = None,
           cohorts: str | Path | None = None,
-          promote: str | Path | None = None) -> int:
+          promote: str | Path | None = None,
+          title: str = "coordinated network") -> int:
     try:
         brands_path = _sidecar(db, brands, "brands.csv")
         cohorts_path = _sidecar(db, cohorts, "cohorts.csv")
@@ -1067,7 +1070,8 @@ def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
               + (f" ({len(promoted_labels)} promoted from {promote_path})"
                  if promoted_labels else ""))
 
-    handler = type("BoundHandler", (Handler,), {"net": net})
+    page_html = INDEX_HTML.replace("$TITLE", html.escape(title))
+    handler = type("BoundHandler", (Handler,), {"net": net, "page_html": page_html})
     httpd = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{port}/"
     print(f"redlens listening report → {url}  (Ctrl-C to stop)")
@@ -1092,7 +1096,7 @@ _PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>coordinated network · redlens</title>
+<title>$TITLE · redlens</title>
 <style>
   /* Dark, card-based dashboard — the redlens red stays the one brand accent;
      structure/hierarchy borrowed from the devbrain operator console. */
@@ -1250,7 +1254,7 @@ _PAGE = r"""<!doctype html>
 </head>
 <body>
 <div id="view-overview">
-  <h1>coordinated network</h1>
+  <h1>$TITLE</h1>
   <div class="db" id="db">…</div>
   <div class="stats" id="stats"></div>
 

@@ -397,6 +397,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="a reviewed suggestions CSV (account, cohort) folded into the "
              "cohort at run time — e.g. verified seeders — without editing "
              "cohorts.csv; marked as promoted in the report")
+    sv.add_argument(
+        "--title", default="coordinated network", metavar="NAME",
+        help="dashboard heading — e.g. the client or brand name "
+             "(default: 'coordinated network')")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -887,7 +891,7 @@ def main(argv: list[str] | None = None) -> int:
             return serve.serve(db, host=args.host, port=args.port,
                                open_browser=not args.no_browser,
                                brands=args.brands, cohorts=args.cohorts,
-                               promote=args.promote)
+                               promote=args.promote, title=args.title)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
