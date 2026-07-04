@@ -1225,14 +1225,12 @@ _PAGE = r"""<!doctype html>
   .brow .f { background: var(--accent); height: 100%; border-radius: 3px; }
   .brow .v { text-align: right; color: var(--muted); font-size: .8rem;
              white-space: nowrap; font-variant-numeric: tabular-nums; }
-  /* network-exclusive brands — the strongest coordination signal, so it leads
-     the section as a red callout rather than a muted footnote. */
-  .netexcl { background: rgba($ACCENT_RGB,.09);
-             border: 1px solid rgba($ACCENT_RGB,.34); border-radius: 10px;
-             padding: 11px 14px; margin: 0 0 1rem; font-size: .84rem;
-             line-height: 1.5; color: var(--text); }
-  .netexcl b { color: var(--accent); }
-  .netexcl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  /* network-only tag on a 100%-coordinated (no organic baseline) share row */
+  .sovrow .tag { font: 600 8.5px/1.6 var(--mono); text-transform: uppercase;
+                 letter-spacing: .05em; color: var(--accent);
+                 background: rgba($ACCENT_RGB,.15);
+                 border: 1px solid rgba($ACCENT_RGB,.36); border-radius: 4px;
+                 padding: 0 5px; vertical-align: 1px; }
   /* share-of-voice / topics: accent fill vs muted-grey reference remainder */
   .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
             align-items: center; margin: .12rem 0; cursor: pointer;
@@ -1675,41 +1673,33 @@ async function loadShareOfVoice(){
   // A bar is only honest for brands whose ORGANIC conversation is in the DB.
   // The rest would read "100% coordinated" purely because only the seeders
   // were archived — list them as not-yet-tracked instead.
-  const based = r.rows.filter(b => b.baseline);
-  const noBase = r.rows.filter(b => !b.baseline);
-  $('#sov-nobase').innerHTML = noBase.length
-    ? `<div class="netexcl"><b>${fmt(noBase.length)} network-exclusive `
-      + `brand${noBase.length === 1 ? '' : 's'}</b> — mentioned <b>only</b> by the `
-      + `coordinated network, with zero organic voice. The strongest coordination `
-      + `signal here: nobody unaffiliated talks about these.`
-      + `<div class="netexcl-chips">`
-      + noBase.map(b => `<span class="pill hot" title="${fmt(b.coordinated)} `
-          + `mentions from ${fmt(b.coord_authors)} coordinated accounts">`
-          + `${esc(b.term)}</span>`).join('')
-      + '</div></div>'
-    : '';
-  if(!based.length){
-    $('#sov-section').hidden = false;
-    $('#sov-count').textContent = '';
-    $('#sov').innerHTML = '<p class="muted">No brand has an organic baseline '
-      + 'yet — run the brand-tracking ingest first.</p>';
-    return;
-  }
+  // All brands, most-coordinated first. A brand at 100% is network-exclusive:
+  // the organic pool IS in the DB, yet not one unaffiliated user mentions it —
+  // the strongest coordination signal, so it leads the list (was hidden before).
+  const rows = r.rows.slice().sort((a, b) =>
+    b.coord_pct - a.coord_pct || b.total - a.total);
+  const noBase = rows.filter(b => !b.baseline);
   $('#sov-section').hidden = false;
-  $('#sov-count').textContent = topOf(r.total, based.length);
+  $('#sov-count').textContent = topOf(r.total, rows.length);
+  $('#sov-nobase').innerHTML = noBase.length
+    ? `<p class="sub"><b style="color:$ACCENT">${fmt(noBase.length)} brands at `
+      + `100%</b> are network-exclusive — the organic pool is archived, yet not `
+      + `one unaffiliated user mentions them.</p>`
+    : '';
   const authorList = (label, us) => us.length
     ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
       us.map(userCell).join(', ') + '</p>' : '';
-  $('#sov').innerHTML = based.map((b, i) =>
+  $('#sov').innerHTML = rows.map((b, i) =>
     `<div class="sovrow" data-i="${i}">
-       <div class="lbl">${esc(b.term)}</div>
+       <div class="lbl">${esc(b.term)}${b.baseline ? ''
+         : ' <span class="tag">network-only</span>'}</div>
        <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
          <div class="c" style="width:${b.coord_pct}%"></div>
          <div class="o" style="width:${100-b.coord_pct}%"></div></div>
        <div class="v"><b>${b.coord_pct}%</b> of ${fmt(b.total)}</div>
      </div>`).join('');
   $('#sov').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
-    const b = based[+el.dataset.i];
+    const b = rows[+el.dataset.i];
     openDrawer(`${b.term} · share of voice`);
     $('#d-body').innerHTML =
       `<p><b>${b.coord_pct}%</b> of ${plural(b.total, 'mention')} are the `
