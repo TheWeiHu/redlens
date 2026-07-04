@@ -1225,6 +1225,14 @@ _PAGE = r"""<!doctype html>
   .brow .f { background: var(--accent); height: 100%; border-radius: 3px; }
   .brow .v { text-align: right; color: var(--muted); font-size: .8rem;
              white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* network-exclusive brands — the strongest coordination signal, so it leads
+     the section as a red callout rather than a muted footnote. */
+  .netexcl { background: rgba($ACCENT_RGB,.09);
+             border: 1px solid rgba($ACCENT_RGB,.34); border-radius: 10px;
+             padding: 11px 14px; margin: 0 0 1rem; font-size: .84rem;
+             line-height: 1.5; color: var(--text); }
+  .netexcl b { color: var(--accent); }
+  .netexcl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
   /* share-of-voice / topics: accent fill vs muted-grey reference remainder */
   .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
             align-items: center; margin: .12rem 0; cursor: pointer;
@@ -1320,8 +1328,8 @@ _PAGE = r"""<!doctype html>
         <b style="color:$ACCENT">coordinated network</b> vs
         <span class="muted">real users</span> — most-dominated first; click a row
         for the accounts.</p>
+      <div id="sov-nobase"></div>
       <div id="sov"></div>
-      <p class="sub" id="sov-nobase"></p>
     </section>
 
     <section class="card" id="suspect-section" hidden>
@@ -1669,11 +1677,17 @@ async function loadShareOfVoice(){
   // were archived — list them as not-yet-tracked instead.
   const based = r.rows.filter(b => b.baseline);
   const noBase = r.rows.filter(b => !b.baseline);
-  if(noBase.length)
-    $('#sov-nobase').innerHTML =
-      `${fmt(noBase.length)} roster brands have no organic baseline yet ` +
-      `(not tracked as topics — their share can't be measured): ` +
-      `<span class="muted">${noBase.map(b => esc(b.term)).join(', ')}</span>`;
+  $('#sov-nobase').innerHTML = noBase.length
+    ? `<div class="netexcl"><b>${fmt(noBase.length)} network-exclusive `
+      + `brand${noBase.length === 1 ? '' : 's'}</b> — mentioned <b>only</b> by the `
+      + `coordinated network, with zero organic voice. The strongest coordination `
+      + `signal here: nobody unaffiliated talks about these.`
+      + `<div class="netexcl-chips">`
+      + noBase.map(b => `<span class="pill hot" title="${fmt(b.coordinated)} `
+          + `mentions from ${fmt(b.coord_authors)} coordinated accounts">`
+          + `${esc(b.term)}</span>`).join('')
+      + '</div></div>'
+    : '';
   if(!based.length){
     $('#sov-section').hidden = false;
     $('#sov-count').textContent = '';
