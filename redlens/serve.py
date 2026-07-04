@@ -1414,19 +1414,22 @@ async function getJSON(url){ const r = await fetch(url); const j = await r.json(
 // ---- overview ----
 async function loadOverview(){
   const o = await getJSON('/api/overview');
-  $('#db').textContent = o.db;
+  $('#db').textContent = o.db.split('/').pop();   // filename; full path on hover
+  $('#db').title = o.db;
   const stats = [
     ['accounts', o.accounts], ['posts', o.posts], ['comments', o.comments],
     ['subreddits', o.subreddits],
   ];
   if(o.organic_authors) stats.push(['organic authors', o.organic_authors]);
+  // The date range is context, not a headline — fold it into one span-range
+  // card instead of two, so the strip leads with counts.
   $('#stats').innerHTML = stats
     .map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
     + (o.cohorts || []).map(c =>
       `<div class="stat"><b>${fmt(c.accounts)}</b><span>${esc(c.cohort)}</span></div>`).join('')
     + (o.promoted ? `<div class="stat"><b>${fmt(o.promoted)}</b><span>promoted</span></div>` : '')
-    + `<div class="stat"><b>${day(o.first_utc)}</b><span>first seen</span></div>`
-    + `<div class="stat"><b>${day(o.last_utc)}</b><span>last seen</span></div>`;
+    + `<div class="stat"><b>${day(o.first_utc)}–${day(o.last_utc)}</b>`
+    + `<span>date range</span></div>`;
   // once organic discussion is in the DB the network view is scoped to the
   // labeled cohort; say so on the Accounts heading.
   if(o.organic_authors){
@@ -1441,7 +1444,10 @@ async function loadOverview(){
 const userCell = u =>
   `<a class="u" href="#/user/${encodeURIComponent(u)}">${esc(u)}</a>`;
 let cohortOf = {};  // account -> cohort label (from /api/pairs)
-const pill = c => c ?
+let cohortsMixed = false;  // >1 distinct cohort — else the pill is pure noise
+// Only tag a cohort when the DB actually has more than one: when every account
+// is 'coordinated', a 'coordinated' pill on every row says nothing.
+const pill = c => (c && cohortsMixed) ?
   `<span class="pill${c === 'coordinated' ? ' hot' : ''}">${esc(c)}</span>` : '';
 // A cohort boundary between column i-1 and i gets a separator line.
 const boundary = (accounts, i) => i > 0 &&
@@ -1468,6 +1474,7 @@ async function loadPairs(){
   const p = await getJSON('/api/pairs');
   const A = p.accounts;
   cohortOf = p.cohorts || {};
+  cohortsMixed = new Set(Object.values(cohortOf)).size > 1;
   const notes = [];
   if(Object.keys(cohortOf).length) notes.push('Grouped by cohort.');
   if(p.total_accounts > A.length)
@@ -1965,10 +1972,12 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
 
 // ---- boot ----
 (async () => {
+  $('#heat').innerHTML = '<p class="muted">loading…</p>';
   try {
-    await loadOverview();
-    // The heatmap's account order is every matrix's column order.
-    const accounts = await loadPairs();
+    // Overview and pairs don't depend on each other — run them together so the
+    // stats strip and the (slower) co-activity matrix don't paint in series.
+    // pairs sets the account column order every other matrix reuses.
+    const [, accounts] = await Promise.all([loadOverview(), loadPairs()]);
     await Promise.all([
       loadAccounts(), loadListening(), loadShareOfVoice(), loadSuspects(),
       loadMentions(accounts),
