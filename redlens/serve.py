@@ -1294,9 +1294,10 @@ _PAGE = r"""<!doctype html>
         matched posts. Click one for its accounts.</p>
       <div id="topics"></div>
       <h2>Crossings <span class="count" id="crossings-count"></span></h2>
-      <p class="sub">Which accounts show up in which topics — click an account for
-        its profile.</p>
-      <div class="wrap"><table id="crossings" class="plain"></table></div>
+      <p class="sub">Which accounts show up in which topics — dot size ~
+        mentions. A busy row is one account spanning many topics; click its name
+        for the profile.</p>
+      <div class="wrap"><table id="crossings" class="matrix"></table></div>
     </section>
   </div>
 
@@ -1606,14 +1607,40 @@ async function loadListening(){
       ? '<p>' + cs.map(c => `${userCell(c.account)} (${fmt(c.n)})`).join(', ') + '</p>'
       : '<p class="muted">No tracked account appears in this topic.</p>';
   });
-  $('#crossings-count').textContent = fmt(r.crossings.length);
-  const xhead = '<thead><tr><th>account</th><th>topic</th>'
-    + '<th class="num">mentions</th></tr></thead>';
-  $('#crossings').innerHTML = r.crossings.length
-    ? xhead + '<tbody>' + r.crossings.map(c => `<tr>
-        <td>${userCell(c.account)}</td><td>${esc(c.topic)}</td>
-        <td class="num">${fmt(c.n)}</td></tr>`).join('') + '</tbody>'
-    : '<tbody><tr><td class="muted">No account appears in a tracked topic yet.</td></tr></tbody>';
+  // Crossings as an account × topic matrix (reusing the network-matrix look):
+  // one row per account, one column per topic, dot size ~ mentions. Far more
+  // scannable than a flat list — a busy row is an account spanning many topics.
+  const x = $('#crossings');
+  if(!r.crossings.length){
+    x.className = 'plain';
+    x.innerHTML = '<tbody><tr><td class="muted">No account appears in a '
+      + 'tracked topic yet.</td></tr></tbody>';
+    return;
+  }
+  const topicNames = r.topics.map(t => t.name);
+  const total = {};
+  r.crossings.forEach(c => { total[c.account] = (total[c.account] || 0) + c.n; });
+  const accts = Object.keys(total).sort((a, b) => total[b] - total[a]
+    || a.localeCompare(b));
+  const val = {};
+  r.crossings.forEach(c => { val[c.account + '|' + c.topic] = c.n; });
+  const xpeak = Math.max(1, ...r.crossings.map(c => c.n));
+  $('#crossings-count').textContent = topOf(accts.length, accts.length);
+  x.className = 'matrix';
+  x.innerHTML =
+    '<thead><tr><th></th>'
+    + topicNames.map(t => `<th class="acct">${esc(t)}</th>`).join('')
+    + '</tr></thead><tbody>'
+    + accts.map(a => `<tr><td class="lbl">${userCell(a)}</td>`
+        + topicNames.map(t => {
+            const n = val[a + '|' + t] || 0;
+            if(!n) return '<td class="cell"></td>';
+            const d = (5 + 13 * Math.sqrt(n / xpeak)).toFixed(1);
+            return `<td class="cell" title="${esc(a)} × ${esc(t)}: `
+              + `${fmt(n)}"><span class="dot" style="width:${d}px;height:${d}px">`
+              + '</span></td>';
+          }).join('') + '</tr>').join('')
+    + '</tbody>';
 }
 
 // ---- share of voice (coordinated cohort's share of each brand) ----
