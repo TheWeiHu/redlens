@@ -18,7 +18,7 @@ from sqlmodel import Session, col, func, select
 
 from redlens.analytics import list_users
 from redlens.constants import ACCENT
-from redlens.models import Post, Topic, TopicPost
+from redlens.models import Post, Topic, TopicListing, TopicPost, UserListing
 from redlens.reporting.page import _html_shell, _unique_slug
 from redlens.topics import list_topics, relevant_clause
 
@@ -48,7 +48,7 @@ _STYLE = f"""
 """
 
 
-def _topic_slugs(listings: list) -> dict[str, str]:
+def _topic_slugs(listings: list[TopicListing]) -> dict[str, str]:
     """Assign each topic the same ``<slug>.html`` filename ``page --all`` would,
     by walking ``list_topics`` order through ``_unique_slug`` — so home's topic
     links land on the files a sibling ``page --all`` writes."""
@@ -89,7 +89,7 @@ def _crossings(session: Session, usernames: set[str]) -> list[tuple[str, str, in
     return out
 
 
-def _topics_panel(listings: list, slugs: dict[str, str]) -> str:
+def _topics_panel(listings: list[TopicListing], slugs: dict[str, str]) -> str:
     ranked = sorted((t for t in listings if t.matched_posts > 0),
                     key=lambda t: t.matched_posts, reverse=True)
     total = sum(t.matched_posts for t in ranked)
@@ -108,7 +108,7 @@ def _topics_panel(listings: list, slugs: dict[str, str]) -> str:
     return "<h2>Topics</h2>\n" + "\n".join(rows)
 
 
-def _users_panel(users: list, main_sub: dict[str, str]) -> str:
+def _users_panel(users: list[UserListing], main_sub: dict[str, str]) -> str:
     if not users:
         return '<h2>Users</h2><p class="empty">no synced users yet</p>'
     rows = []
