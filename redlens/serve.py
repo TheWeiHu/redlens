@@ -1592,8 +1592,10 @@ async function loadListening(){
       : '<p class="muted">No tracked account appears in this topic.</p>';
   });
   $('#crossings-count').textContent = fmt(r.crossings.length);
+  const xhead = '<thead><tr><th>account</th><th>topic</th>'
+    + '<th class="num">mentions</th></tr></thead>';
   $('#crossings').innerHTML = r.crossings.length
-    ? '<tbody>' + r.crossings.map(c => `<tr>
+    ? xhead + '<tbody>' + r.crossings.map(c => `<tr>
         <td>${userCell(c.account)}</td><td>${esc(c.topic)}</td>
         <td class="num">${fmt(c.n)}</td></tr>`).join('') + '</tbody>'
     : '<tbody><tr><td class="muted">No account appears in a tracked topic yet.</td></tr></tbody>';
