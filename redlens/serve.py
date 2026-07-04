@@ -1109,9 +1109,12 @@ _PAGE = r"""<!doctype html>
   /* Dark, card-based dashboard — the redlens red stays the one brand accent;
      structure/hierarchy borrowed from the devbrain operator console. */
   :root {
-    --bg:#161619; --panel:#1e1e22; --panel2:#26262b; --hover:#2e2e34;
-    --line:#34343b; --line2:#29292f; --text:#f2f2f5; --muted:#96969e;
-    --accent:$ACCENT; --coord:#ff5545; --radius:11px;
+    /* surfaces + semantic palette borrowed from the devbrain console — lighter
+       panels lift cards off the background; one saturated color per category. */
+    --bg:#1c1c1e; --panel:#2c2c2e; --panel2:#242426; --hover:#3a3a3c;
+    --line:#38383a; --line2:#2e2e30; --text:#f5f5f7; --muted:#98989d;
+    --accent:$ACCENT; --coord:$ACCENT;         /* coordinated = the brand red */
+    --ok:#30d158; --amber:#ff9f0a; --review:#bf5af2; --radius:10px;
     --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,monospace;
   }
   * { box-sizing: border-box; }
@@ -1128,6 +1131,12 @@ _PAGE = r"""<!doctype html>
           border-radius: var(--radius); padding: 15px 18px; margin: 13px 0; }
   h2 { margin: 0 0 .2rem; font: 700 11px/1.3 var(--mono);
        text-transform: uppercase; letter-spacing: .13em; color: var(--muted); }
+  /* primary section headers (direct card children) read brighter + carry an
+     accent tick; collapsed <details> summaries stay muted → clear hierarchy. */
+  .card > h2 { color: var(--text); }
+  .card > h2::before { content: ''; display: inline-block; width: 3px;
+       height: 11px; background: var(--accent); border-radius: 2px;
+       margin-right: 8px; vertical-align: -1px; }
   h2 .count { color: var(--muted); font-weight: 500; letter-spacing: .05em;
               font-size: 10.5px; }
   a { color: var(--accent); text-decoration: none; }
@@ -1146,9 +1155,9 @@ _PAGE = r"""<!doctype html>
   .stat span { font-size: 9.5px; color: var(--muted); text-transform: uppercase;
                letter-spacing: .07em; }
   /* page tabs — the overview is split into pages, not one long scroll */
-  .nav { display: flex; gap: 4px; position: sticky; top: 0; z-index: 5;
-         margin: 1.2rem 0 .3rem; padding: 8px 0;
-         background: rgba(22,22,25,.82); backdrop-filter: saturate(160%) blur(14px);
+  .nav { display: flex; justify-content: center; gap: 4px; position: sticky;
+         top: 0; z-index: 5; margin: 1.2rem 0 .3rem; padding: 8px 0;
+         background: rgba(28,28,30,.82); backdrop-filter: saturate(160%) blur(14px);
          border-bottom: 1px solid var(--line); }
   .nav a { color: var(--muted); font: 600 11px/1 var(--mono);
            text-transform: uppercase; letter-spacing: .09em; padding: 8px 14px;
@@ -1188,12 +1197,14 @@ _PAGE = r"""<!doctype html>
          vertical-align: middle; }
   .heat td.cell { height: 1.35rem; }
   .heat td.diag { background: var(--line2); }
-  /* cohort grouping — coordinated is the one hot category */
+  /* cohort grouping — one saturated color per cohort */
   .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
           padding: 0 8px; font: 600 10.5px/1.7 var(--mono); color: var(--muted);
           vertical-align: middle; white-space: nowrap; background: var(--panel2); }
-  .pill.hot { border-color: rgba(255,85,69,.42); color: var(--coord);
-              background: rgba(255,85,69,.15); }
+  .pill.hot { border-color: rgba($ACCENT_RGB,.5); color: var(--accent);
+              background: rgba($ACCENT_RGB,.16); }
+  .pill.ok { border-color: rgba(48,209,88,.5); color: var(--ok);
+             background: rgba(48,209,88,.15); }
   .matrix th.cs, .matrix td.cs { border-left: 2px solid var(--line); }
   .heat tr.rs td { border-top: 2px solid var(--line); }
   /* collapsed sections — click a heading to expand */
@@ -1222,8 +1233,8 @@ _PAGE = r"""<!doctype html>
                  font-size: .85rem; }
   .sovbar { display: flex; height: 1rem; background: var(--panel2);
             border-radius: 4px; overflow: hidden; }
-  .sovbar .c { background: var(--accent); height: 100%; }
-  .sovbar .o { background: #4c4c54; height: 100%; }
+  .sovbar .c { background: var(--accent); height: 100%; }  /* coordinated */
+  .sovbar .o { background: #2f6b45; height: 100%; }         /* organic = green */
   .sovrow .v { text-align: right; color: var(--muted); font-size: .8rem;
                white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tabs { display: flex; gap: 4px; margin: .4rem 0 .6rem; }
@@ -1426,9 +1437,13 @@ async function loadOverview(){
   // card instead of two, so the strip leads with counts.
   $('#stats').innerHTML = stats
     .map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
-    + (o.cohorts || []).map(c =>
-      `<div class="stat"><b>${fmt(c.accounts)}</b><span>${esc(c.cohort)}</span></div>`).join('')
-    + (o.promoted ? `<div class="stat"><b>${fmt(o.promoted)}</b><span>promoted</span></div>` : '')
+    + (o.cohorts || []).map(c => {
+        const col = c.cohort === 'coordinated' ? 'var(--accent)'
+          : c.cohort === 'organic' ? 'var(--ok)' : 'var(--text)';
+        return `<div class="stat"><b style="color:${col}">${fmt(c.accounts)}</b>`
+          + `<span>${esc(c.cohort)}</span></div>`;
+      }).join('')
+    + (o.promoted ? `<div class="stat"><b style="color:var(--amber)">${fmt(o.promoted)}</b><span>promoted</span></div>` : '')
     + `<div class="stat"><b>${day(o.first_utc)}–${day(o.last_utc)}</b>`
     + `<span>date range</span></div>`;
   // once organic discussion is in the DB the network view is scoped to the
@@ -1449,7 +1464,7 @@ let cohortsMixed = false;  // >1 distinct cohort — else the pill is pure noise
 // Only tag a cohort when the DB actually has more than one: when every account
 // is 'coordinated', a 'coordinated' pill on every row says nothing.
 const pill = c => (c && cohortsMixed) ?
-  `<span class="pill${c === 'coordinated' ? ' hot' : ''}">${esc(c)}</span>` : '';
+  `<span class="pill${c === 'coordinated' ? ' hot' : c === 'organic' ? ' ok' : ''}">${esc(c)}</span>` : '';
 // A cohort boundary between column i-1 and i gets a separator line.
 const boundary = (accounts, i) => i > 0 &&
   (cohortOf[accounts[i]] || '~') !== (cohortOf[accounts[i-1]] || '~');
