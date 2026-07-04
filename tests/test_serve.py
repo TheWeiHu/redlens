@@ -10,7 +10,7 @@ from sqlmodel import Session
 from redlens import serve as serve_mod
 from redlens.db import connect, init_schema, upsert
 from redlens.errors import MissingKey
-from redlens.models import Comment, Post, User
+from redlens.models import Comment, Post, Topic, TopicPost, User
 from redlens.serve import Network, load_brands, load_cohorts
 
 
@@ -431,3 +431,62 @@ def test_content_paginates(net):
     assert page["limit"] == 1 and page["offset"] == 1
     assert len(page["items"]) == 1
     assert page["items"][0]["title"] == "try nord"  # 2nd newest
+
+
+def _topic_db(tmp_path, *, cohorts=False):
+    """A DB with tracked topics + topicpost, for the listening layer."""
+    path = str(tmp_path / "redlens.db")
+    engine = connect(path)
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [User(username="alice"), User(username="bob")])
+        upsert(s, [
+            Post(post_id="p1", author_username="alice", subreddit_name="vpn",
+                 created_utc=1_700_000_000, score=1),
+            Post(post_id="p2", author_username="alice", subreddit_name="vpn",
+                 created_utc=1_700_000_001, score=1),
+            Post(post_id="p3", author_username="bob", subreddit_name="vpn",
+                 created_utc=1_700_000_002, score=1),
+            Post(post_id="p4", author_username="carol", subreddit_name="vpn",
+                 created_utc=1_700_000_003, score=1),   # carol: not synced
+        ])
+        s.add(Topic(id=1, name="nordvpn"))
+        s.add(Topic(id=2, name="protonvpn"))
+        s.commit()
+        # nordvpn: p1(alice)+p3(bob)+p4(carol) ; protonvpn: p2(alice)
+        s.add_all([
+            TopicPost(topic_id=1, post_id="p1"),
+            TopicPost(topic_id=1, post_id="p3"),
+            TopicPost(topic_id=1, post_id="p4"),
+            TopicPost(topic_id=2, post_id="p2"),
+        ])
+        s.commit()
+    return path
+
+
+def test_listening_empty_for_network_only_db(net):
+    # the base fixture has no tracked topics — section stays hidden
+    assert net.listening() == {"topics": [], "crossings": []}
+
+
+def test_listening_topics_share_of_voice(tmp_path):
+    r = Network(_topic_db(tmp_path)).listening()
+    names = [t["name"] for t in r["topics"]]
+    assert names == ["nordvpn", "protonvpn"]        # by matched-post desc
+    shares = {t["name"]: t["share"] for t in r["topics"]}
+    assert shares == {"nordvpn": 75, "protonvpn": 25}  # 3 vs 1 of 4
+
+
+def test_listening_crossings_scoped_to_watchlist(tmp_path):
+    # no cohorts → scope is the synced `user` table (alice, bob); carol excluded
+    r = Network(_topic_db(tmp_path)).listening()
+    pairs = {(c["account"], c["topic"]): c["n"] for c in r["crossings"]}
+    assert pairs == {("alice", "nordvpn"): 1, ("alice", "protonvpn"): 1,
+                     ("bob", "nordvpn"): 1}
+    assert not any(c["account"] == "carol" for c in r["crossings"])
+
+
+def test_listening_crossings_scoped_to_cohort_when_labeled(tmp_path):
+    # a cohort label narrows the scope to just the labeled account
+    r = Network(_topic_db(tmp_path), cohorts={"alice": "coordinated"}).listening()
+    assert {c["account"] for c in r["crossings"]} == {"alice"}

@@ -214,6 +214,40 @@ class Network:
                 out["accounts"] = len(authors)
             return out
 
+    def listening(self) -> dict[str, Any]:
+        """The topic-tracking layer fused into the network view: tracked topics
+        by share-of-voice (matched-post volume) and the *crossings* — which of
+        our accounts show up in which topic. Empty ``topics`` for a
+        network-only DB (no tracked topics, e.g. mydata), so the section
+        stays hidden and this view is unchanged for coordinated-network work."""
+        with closing(self._conn()) as con:
+            topics = [dict(r) for r in con.execute(
+                "SELECT t.name AS name, count(tp.post_id) AS matched "
+                "FROM topic t LEFT JOIN topicpost tp ON tp.topic_id = t.id "
+                "GROUP BY t.id ORDER BY matched DESC, t.name"
+            ) if r["matched"]]
+            if not topics:
+                return {"topics": [], "crossings": []}
+            total = sum(t["matched"] for t in topics)
+            for t in topics:
+                t["share"] = round(100 * t["matched"] / total) if total else 0
+            # Crossings are scoped to the accounts of interest — the labeled
+            # cohort when there is one, else the synced watchlist (the `user`
+            # table) — so topic-tracking's thousands of organic authors don't
+            # swamp the list.
+            watch = self._scope or [
+                r[0] for r in con.execute("SELECT username FROM user")]
+            marks = ",".join("?" * len(watch))
+            crossings = [dict(r) for r in con.execute(
+                f"SELECT p.author_username AS account, t.name AS topic, "
+                f"count(*) AS n FROM topicpost tp "
+                f"JOIN post p ON p.post_id = tp.post_id "
+                f"JOIN topic t ON t.id = tp.topic_id "
+                f"WHERE p.author_username IN ({marks}) "
+                f"GROUP BY p.author_username, t.name ORDER BY n DESC, account",
+                watch)] if watch else []
+        return {"topics": topics, "crossings": crossings}
+
     def _authors(self, con: sqlite3.Connection) -> list[str]:
         return [
             r[0] for r in con.execute(
@@ -944,6 +978,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.mentions())
             elif u.path == "/api/share-of-voice":
                 self._json(self.net.share_of_voice())
+            elif u.path == "/api/listening":
+                self._json(self.net.listening())
             elif u.path == "/api/suggested-coordinated":
                 self._json(self.net.suggested_coordinated())
             elif u.path == "/api/profile":
@@ -1183,6 +1219,18 @@ _PAGE = r"""<!doctype html>
     co-commented threads. Darker = more co-activity; click any cell for the
     subreddits and threads behind it. <span id="pairs-note"></span></p>
   <div class="wrap" id="heat"></div>
+
+  <section id="listening-section" hidden>
+    <h2>Topics <span class="count" id="topics-count"></span></h2>
+    <p class="sub">Tracked topics by share of voice — how much of the matched
+      conversation each holds. Click a topic for the accounts in it.</p>
+    <div id="topics"></div>
+    <h2>Crossings <span class="count" id="crossings-count"></span></h2>
+    <p class="sub">Which accounts show up in which tracked topics — the bridge
+      between the network and what it's discussing. Click an account for its
+      profile.</p>
+    <div class="wrap"><table id="crossings" class="plain"></table></div>
+  </section>
 
   <section id="sov-section" hidden>
     <h2>Share of voice <span class="count" id="sov-count"></span></h2>
@@ -1456,6 +1504,36 @@ function dotMatrix(el, rows, accounts, cols, tipFn, onCell){
     '</tbody></table>';
   el.querySelectorAll('td.click').forEach(td => td.onclick =
     () => onCell(rows[+td.dataset.r], accounts[+td.dataset.c]));
+}
+
+// ---- topics + crossings (the tracked-topic layer over the network) ----
+async function loadListening(){
+  const r = await getJSON('/api/listening');
+  if(!r.topics.length) return;   // network-only DB (no tracked topics)
+  $('#listening-section').hidden = false;
+  $('#topics-count').textContent = fmt(r.topics.length);
+  const peak = Math.max(1, ...r.topics.map(t => t.matched));
+  $('#topics').innerHTML = r.topics.map((t, i) =>
+    `<div class="sovrow" data-i="${i}">
+       <div class="lbl">${esc(t.name)}</div>
+       <div class="sovbar"><div class="c" style="width:${100 * t.matched / peak}%"></div></div>
+       <div class="v"><b>${t.share}%</b> of ${fmt(t.matched)}</div>
+     </div>`).join('');
+  const byTopic = {};
+  r.crossings.forEach(c => (byTopic[c.topic] = byTopic[c.topic] || []).push(c));
+  $('#topics').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
+    const t = r.topics[+el.dataset.i], cs = byTopic[t.name] || [];
+    openDrawer(`${t.name} · accounts`);
+    $('#d-body').innerHTML = cs.length
+      ? '<p>' + cs.map(c => `${userCell(c.account)} (${fmt(c.n)})`).join(', ') + '</p>'
+      : '<p class="muted">No tracked account appears in this topic.</p>';
+  });
+  $('#crossings-count').textContent = fmt(r.crossings.length);
+  $('#crossings').innerHTML = r.crossings.length
+    ? '<tbody>' + r.crossings.map(c => `<tr>
+        <td>${userCell(c.account)}</td><td>${esc(c.topic)}</td>
+        <td class="num">${fmt(c.n)}</td></tr>`).join('') + '</tbody>'
+    : '<tbody><tr><td class="muted">No account appears in a tracked topic yet.</td></tr></tbody>';
 }
 
 // ---- share of voice (coordinated cohort's share of each brand) ----
@@ -1800,7 +1878,7 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
     // The heatmap's account order is every matrix's column order.
     const accounts = await loadPairs();
     await Promise.all([
-      loadAccounts(), loadShareOfVoice(), loadSuspects(),
+      loadAccounts(), loadListening(), loadShareOfVoice(), loadSuspects(),
       loadMentions(accounts),
       loadSubreddits(accounts), loadThreads(accounts)]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
