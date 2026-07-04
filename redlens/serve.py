@@ -213,6 +213,7 @@ class Network:
                 out["promoted"] = sum(1 for u in labeled if u in self.promoted)
             else:
                 out["accounts"] = len(authors)
+            out["brands"] = len(self.roster)   # tracked brand roster size
             return out
 
     def listening(self) -> dict[str, Any]:
@@ -1432,6 +1433,7 @@ async function loadOverview(){
     ['accounts', o.accounts], ['posts', o.posts], ['comments', o.comments],
     ['subreddits', o.subreddits],
   ];
+  if(o.brands) stats.push(['brands', o.brands]);
   if(o.organic_authors) stats.push(['organic authors', o.organic_authors]);
   // The date range is context, not a headline — fold it into one span-range
   // card instead of two, so the strip leads with counts.
