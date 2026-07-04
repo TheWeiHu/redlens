@@ -1689,6 +1689,10 @@ async function loadShareOfVoice(){
   const authorList = (label, us) => us.length
     ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
       us.map(userCell).join(', ') + '</p>' : '';
+  // a brand the network mentions but that's dwarfed by organic talk rounds to
+  // 0% — show <1% so it doesn't read as "the network never touches it".
+  const pctLabel = b => (b.coord_pct === 0 && b.coordinated > 0)
+    ? '<1%' : b.coord_pct + '%';
   $('#sov').innerHTML = rows.map((b, i) =>
     `<div class="sovrow" data-i="${i}">
        <div class="lbl">${esc(b.term)}${b.baseline ? ''
@@ -1696,13 +1700,13 @@ async function loadShareOfVoice(){
        <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
          <div class="c" style="width:${b.coord_pct}%"></div>
          <div class="o" style="width:${100-b.coord_pct}%"></div></div>
-       <div class="v"><b>${b.coord_pct}%</b> of ${fmt(b.total)}</div>
+       <div class="v"><b>${pctLabel(b)}</b> of ${fmt(b.total)}</div>
      </div>`).join('');
   $('#sov').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
     const b = rows[+el.dataset.i];
     openDrawer(`${b.term} · share of voice`);
     $('#d-body').innerHTML =
-      `<p><b>${b.coord_pct}%</b> of ${plural(b.total, 'mention')} are the `
+      `<p><b>${pctLabel(b)}</b> of ${plural(b.total, 'mention')} are the `
       + `coordinated cohort — ${plural(b.coordinated, 'mention')} from `
       + `${plural(b.coord_authors, 'account')} vs ${plural(b.organic, 'mention')} `
       + `from ${plural(b.organic_authors, 'organic author')}.</p>`
