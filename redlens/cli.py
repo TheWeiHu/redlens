@@ -28,6 +28,7 @@ from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.models import MentionGroup, Profile, TopicAnalytics, TopicSummary
 from redlens.reporting import explore
+from redlens.reporting.home import render_home
 from redlens.reporting.page import (
     Renderers,
     Sections,
@@ -488,6 +489,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only hide off-topic posts the relevance filter was at least "
                    "this confident about; lower-confidence drops stay visible (default 0 "
                    "= hide all). The model is overconfident, so treat this as a coarse dial.")
+    hm = sub.add_parser(
+        "home", help="render the unified home dashboard (topics + users + "
+        "their crossings) as one standalone HTML page")
+    hm.add_argument("-o", "--out", help="output file (default: ./home.html)")
+    hm.add_argument("--open", action="store_true",
+                    help="open the rendered page in a browser after writing it")
+    hm.add_argument("--no-browser", action="store_true",
+                    help="never open a browser, even with --open (for scripts/CI)")
     ut = sub.add_parser(
         "untrack", help="stop tracking a topic and drop its orphaned matches")
     ut.add_argument("topic")
@@ -573,6 +582,15 @@ def _cmd_track(args: argparse.Namespace, engine: Engine) -> None:
         )
         print(f"{res.topic.name!r}: {n:,} comments stored")
     print(f"next: redlens page {res.topic.name!r}")
+
+
+def _cmd_home(args: argparse.Namespace, engine: Engine) -> None:
+    html_doc = render_home(engine)
+    out = Path(args.out or "home.html")
+    out.write_text(html_doc, encoding="utf-8")
+    print(f"wrote {out} ({len(html_doc):,} bytes)")
+    if args.open and not args.no_browser:
+        webbrowser.open(out.resolve().as_uri())
 
 
 def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
@@ -849,6 +867,7 @@ _DB_COMMANDS: dict[str, Callable[[argparse.Namespace, Engine], int | None]] = {
     "sync": _cmd_sync,
     "track": _cmd_track,
     "page": _cmd_page,
+    "home": _cmd_home,
     "untrack": _cmd_untrack,
     "summarize": _cmd_summarize,
     "list": _cmd_list,
