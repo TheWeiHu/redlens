@@ -1133,6 +1133,20 @@ _PAGE = r"""<!doctype html>
             font-variant-numeric: tabular-nums; }
   .stat span { font-size: 9.5px; color: var(--muted); text-transform: uppercase;
                letter-spacing: .07em; }
+  /* page tabs — the overview is split into pages, not one long scroll */
+  .nav { display: flex; gap: 4px; position: sticky; top: 0; z-index: 5;
+         margin: 1.2rem 0 .3rem; padding: 8px 0;
+         background: rgba(22,22,25,.82); backdrop-filter: saturate(160%) blur(14px);
+         border-bottom: 1px solid var(--line); }
+  .nav a { color: var(--muted); font: 600 11px/1 var(--mono);
+           text-transform: uppercase; letter-spacing: .09em; padding: 8px 14px;
+           border-radius: 8px; }
+  .nav a:hover { color: var(--text); background: var(--panel2);
+                 text-decoration: none; }
+  .nav a.on { color: #fff; background: var(--accent); }
+  .nav a[hidden] { display: none; }
+  .page { display: none; }
+  .page.active { display: block; }
   table { border-collapse: collapse; width: 100%; font-size: .83rem; }
   th, td { border-bottom: 1px solid var(--line2); padding: .38rem .55rem;
            text-align: left; vertical-align: middle; }
@@ -1240,70 +1254,83 @@ _PAGE = r"""<!doctype html>
   <div class="db" id="db">…</div>
   <div class="stats" id="stats"></div>
 
-  <section class="card">
-    <h2>Network matrix</h2>
-    <p class="sub">Pairwise co-activity — darker = more shared subreddits and
-      threads; click a cell for the evidence. <span id="pairs-note"></span></p>
-    <div class="wrap" id="heat"></div>
-  </section>
+  <nav class="nav" id="nav">
+    <a href="#/network" data-page="network">Network</a>
+    <a href="#/topics" data-page="topics">Topics</a>
+    <a href="#/brands" data-page="brands">Brands</a>
+    <a href="#/footprint" data-page="footprint">Footprint</a>
+  </nav>
 
-  <section class="card" id="listening-section" hidden>
-    <h2>Topics <span class="count" id="topics-count"></span></h2>
-    <p class="sub">Tracked topics by share of voice — click one for its
-      accounts.</p>
-    <div id="topics"></div>
-    <h2>Crossings <span class="count" id="crossings-count"></span></h2>
-    <p class="sub">Which accounts show up in which topics — click an account for
-      its profile.</p>
-    <div class="wrap"><table id="crossings" class="plain"></table></div>
-  </section>
+  <div class="page active" data-page="network">
+    <section class="card">
+      <h2>Network matrix</h2>
+      <p class="sub">Pairwise co-activity — darker = more shared subreddits and
+        threads; click a cell for the evidence. <span id="pairs-note"></span></p>
+      <div class="wrap" id="heat"></div>
+    </section>
+    <section class="card">
+      <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
+      <p class="sub" id="accounts-sub">Click a name for its full profile.</p>
+      <div class="wrap"><table id="accounts" class="plain"></table></div>
+    </section>
+  </div>
 
-  <section class="card" id="sov-section" hidden>
-    <h2>Share of voice <span class="count" id="sov-count"></span></h2>
-    <p class="sub">Per brand, how much came from the
-      <b style="color:$ACCENT">coordinated network</b> vs
-      <span class="muted">real users</span> — most-dominated first; click a row
-      for the accounts.</p>
-    <div id="sov"></div>
-    <p class="sub" id="sov-nobase"></p>
-  </section>
+  <div class="page" data-page="topics">
+    <section class="card" id="listening-section" hidden>
+      <h2>Topics <span class="count" id="topics-count"></span></h2>
+      <p class="sub">Tracked topics by share of voice — click one for its
+        accounts.</p>
+      <div id="topics"></div>
+      <h2>Crossings <span class="count" id="crossings-count"></span></h2>
+      <p class="sub">Which accounts show up in which topics — click an account for
+        its profile.</p>
+      <div class="wrap"><table id="crossings" class="plain"></table></div>
+    </section>
+  </div>
 
-  <details class="card" id="suspect-section" hidden>
-    <summary><h2>Suspected undetected seeders <span class="count" id="suspect-count"></span></h2></summary>
-    <p class="sub">Unlabeled accounts pushing several distinct roster brands —
-      review each from its profile, then add confirmed ones to
-      <code>cohorts.csv</code>.</p>
-    <div class="wrap"><table id="suspect" class="plain"></table></div>
-  </details>
+  <div class="page" data-page="brands">
+    <section class="card" id="sov-section" hidden>
+      <h2>Share of voice <span class="count" id="sov-count"></span></h2>
+      <p class="sub">Per brand, how much came from the
+        <b style="color:$ACCENT">coordinated network</b> vs
+        <span class="muted">real users</span> — most-dominated first; click a row
+        for the accounts.</p>
+      <div id="sov"></div>
+      <p class="sub" id="sov-nobase"></p>
+    </section>
 
-  <section class="card">
-    <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
-    <p class="sub" id="accounts-sub">Click a name for its full profile.</p>
-    <div class="wrap"><table id="accounts" class="plain"></table></div>
-  </section>
+    <section class="card" id="suspect-section" hidden>
+      <h2>Suspected undetected seeders <span class="count" id="suspect-count"></span></h2>
+      <p class="sub">Unlabeled accounts pushing several distinct roster brands —
+        review each from its profile, then add confirmed ones to
+        <code>cohorts.csv</code>.</p>
+      <div class="wrap"><table id="suspect" class="plain"></table></div>
+    </section>
 
-  <details class="card">
-    <summary><h2>Brand mentions <span class="count" id="mention-count"></span></h2></summary>
-    <p class="sub" id="mention-sub"></p>
-    <div class="wrap" id="mentions"></div>
-  </details>
+    <details class="card">
+      <summary><h2>Brand mentions <span class="count" id="mention-count"></span></h2></summary>
+      <p class="sub" id="mention-sub"></p>
+      <div class="wrap" id="mentions"></div>
+    </details>
+  </div>
 
-  <details class="card">
-    <summary><h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2></summary>
-    <p class="sub">Subreddits where ≥2 accounts are active — where the network
-      overlaps. Dot area ~ that account's posts + comments there; click a dot to
-      read them. A column of dots down the same subreddits is a coordination
-      signal.</p>
-    <div class="wrap" id="subreddits"></div>
-  </details>
+  <div class="page" data-page="footprint">
+    <details class="card">
+      <summary><h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2></summary>
+      <p class="sub">Subreddits where ≥2 accounts are active — where the network
+        overlaps. Dot area ~ that account's posts + comments there; click a dot to
+        read them.</p>
+      <div class="wrap" id="subreddits"></div>
+    </details>
 
-  <details class="card">
-    <summary><h2>Co-commented threads <span class="count" id="thread-count"></span></h2></summary>
-    <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
-      co-activity signal (they show up in the same conversations). Dot area ~
-      comments in the thread; click a dot to read them.</p>
-    <div class="wrap" id="threads"></div>
-  </details>
+    <details class="card">
+      <summary><h2>Co-commented threads <span class="count" id="thread-count"></span></h2></summary>
+      <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
+        co-activity signal. Dot area ~ comments in the thread; click a dot to
+        read them.</p>
+      <div class="wrap" id="threads"></div>
+    </details>
+  </div>
 </div>
 
 <div id="view-profile" hidden>
@@ -1892,13 +1919,32 @@ function renderAiSection(u){
   };
 }
 
-// ---- routing (overview <-> profile) ----
+// ---- routing (overview pages <-> profile) ----
+const PAGES = ['network', 'topics', 'brands', 'footprint'];
+const navTab = p => $(`#nav a[data-page="${p}"]`);
+// Hide a page's tab when every section on it is empty (e.g. no tracked topics),
+// so the nav only offers pages that have something to show.
+function updateNav(){
+  document.querySelectorAll('.page').forEach(pg => {
+    const has = [...pg.children].some(c => !c.hidden);
+    const tab = navTab(pg.dataset.page);
+    if(tab) tab.hidden = !has;
+  });
+  route();
+}
+const firstPage = () => PAGES.find(p => navTab(p) && !navTab(p).hidden) || 'network';
 function route(){
   const m = location.hash.match(/^#\/user\/(.+)$/);
   $('#view-profile').hidden = !m;
   $('#view-overview').hidden = !!m;
   $('#drawer').classList.remove('open');
-  if(m) showProfile(decodeURIComponent(m[1]));
+  if(m){ showProfile(decodeURIComponent(m[1])); return; }
+  const want = (location.hash.match(/^#\/(network|topics|brands|footprint)$/) || [])[1];
+  const page = (want && navTab(want) && !navTab(want).hidden) ? want : firstPage();
+  document.querySelectorAll('.page').forEach(
+    pg => pg.classList.toggle('active', pg.dataset.page === page));
+  document.querySelectorAll('#nav a').forEach(
+    a => a.classList.toggle('on', a.dataset.page === page));
 }
 window.addEventListener('hashchange', route);
 document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('open'); };
@@ -1915,7 +1961,7 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
       loadSubreddits(accounts), loadThreads(accounts)]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
     `<p class="warn">${esc(e.message)}</p>`); }
-  route();
+  updateNav();
 })();
 </script>
 </body>
