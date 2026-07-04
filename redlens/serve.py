@@ -1094,118 +1094,144 @@ _PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>coordinated network · redlens</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 1150px; margin: 2rem auto;
-         padding: 0 1rem; line-height: 1.4; color: #222; }
-  h1 { text-align: center; font-weight: 600; margin: 0 0 .2rem; }
-  h2 { margin: 2.4rem 0 .3rem; font-size: 1rem; font-weight: 600;
-       text-transform: uppercase; letter-spacing: .05em; color: $ACCENT;
-       border-bottom: 2px solid $ACCENT; padding-bottom: .2rem; }
-  h2 .count { color: #888; font-weight: 400; text-transform: none;
-              letter-spacing: 0; font-size: .85rem; }
-  a { color: $ACCENT; text-decoration: none; }
+  /* Dark, card-based dashboard — the redlens red stays the one brand accent;
+     structure/hierarchy borrowed from the devbrain operator console. */
+  :root {
+    --bg:#161619; --panel:#1e1e22; --panel2:#26262b; --hover:#2e2e34;
+    --line:#34343b; --line2:#29292f; --text:#f2f2f5; --muted:#96969e;
+    --accent:$ACCENT; --coord:#ff5545; --radius:11px;
+    --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,monospace;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         max-width: 1180px; margin: 0 auto; padding: 1.7rem 1.1rem 4rem;
+         background: var(--bg); color: var(--text); line-height: 1.45;
+         font-size: 13.5px; -webkit-font-smoothing: antialiased; }
+  h1 { text-align: center; font-weight: 650; font-size: 1.5rem;
+       letter-spacing: -.01em; margin: .1rem 0 .1rem; }
+  .db { text-align: center; color: var(--muted); font: 11px/1.4 var(--mono);
+        word-break: break-all; margin-bottom: 1.5rem; }
+  /* every section is a card — the main hierarchy device */
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: 15px 18px; margin: 13px 0; }
+  h2 { margin: 0 0 .2rem; font: 700 11px/1.3 var(--mono);
+       text-transform: uppercase; letter-spacing: .13em; color: var(--muted); }
+  h2 .count { color: var(--muted); font-weight: 500; letter-spacing: .05em;
+              font-size: 10.5px; }
+  a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .muted { color: #888; font-size: .85rem; }
-  .sub { color: #888; font-size: .85rem; margin: 0 0 .8rem; }
-  .db { text-align: center; color: #888; font-size: .8rem; word-break: break-all; }
-  .stats { display: flex; flex-wrap: wrap; gap: .4rem 2.2rem;
-           justify-content: center; margin: 1.2rem 0 0; }
-  .stat { text-align: center; }
-  .stat b { display: block; font-size: 1.35rem; color: $ACCENT;
+  .muted { color: var(--muted); font-size: .82rem; }
+  .sub { color: var(--muted); font-size: .82rem; margin: .2rem 0 .95rem;
+         line-height: 1.5; }
+  /* stat cards */
+  .stats { display: flex; flex-wrap: wrap; gap: 9px; justify-content: center;
+           margin: 1.1rem 0 .2rem; }
+  .stat { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 12px; padding: 9px 17px; text-align: center;
+          min-width: 76px; }
+  .stat b { display: block; font: 650 1.25rem/1.2 var(--mono); color: var(--text);
             font-variant-numeric: tabular-nums; }
-  .stat span { font-size: .7rem; color: #888; text-transform: uppercase;
-               letter-spacing: .06em; }
-  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
-  th, td { border-bottom: 1px solid #eee; padding: .3rem .5rem; text-align: left;
-           vertical-align: middle; }
-  th { color: #888; font-weight: 600; white-space: nowrap; }
+  .stat span { font-size: 9.5px; color: var(--muted); text-transform: uppercase;
+               letter-spacing: .07em; }
+  table { border-collapse: collapse; width: 100%; font-size: .83rem; }
+  th, td { border-bottom: 1px solid var(--line2); padding: .38rem .55rem;
+           text-align: left; vertical-align: middle; }
+  th { color: var(--muted); font: 600 10px/1 var(--mono); text-transform: uppercase;
+       letter-spacing: .05em; white-space: nowrap; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
-                   white-space: nowrap; }
-  table.plain tbody tr:nth-child(even) { background: #fafafa; }
-  table.plain tbody tr:hover { background: #faf3f0; }
+                   white-space: nowrap; font-family: var(--mono); }
+  table.plain tbody tr:nth-child(even) { background: var(--panel2); }
+  table.plain tbody tr:hover { background: var(--hover); }
   #accounts th { cursor: pointer; user-select: none; }
-  .u { color: $ACCENT; cursor: pointer; }
-  .bar { height: 3px; background: $ACCENT; margin-top: 3px; }
+  .u { color: var(--accent); cursor: pointer; }
+  .bar { height: 3px; background: var(--accent); margin-top: 3px; }
   .wrap { overflow-x: auto; }
   /* matrices — account columns, dot/heat cells */
   .matrix th.acct { writing-mode: vertical-rl; transform: rotate(180deg);
-                    font-weight: 400; font-size: .75rem; padding: .2rem .15rem;
-                    border-bottom: none; }
+                    font: 400 .72rem var(--mono); padding: .2rem .15rem;
+                    border-bottom: none; color: var(--muted); }
   .matrix td.cell { text-align: center; padding: .1rem; min-width: 1.35rem;
                     line-height: 1; }
   .matrix td.lbl { max-width: 24rem; overflow: hidden; text-overflow: ellipsis;
                    white-space: nowrap; }
-  .matrix tbody tr:hover td { background: #faf3f0; }
-  .matrix tbody tr:hover td[style] { filter: brightness(.92); }
+  .matrix tbody tr:hover td { background: var(--hover); }
+  .matrix tbody tr:hover td[style] { filter: brightness(1.28); }
   .matrix td.click { cursor: pointer; }
-  .matrix td.click:hover { outline: 2px solid $ACCENT; outline-offset: -2px; }
-  .dot { display: inline-block; border-radius: 50%; background: $ACCENT;
+  .matrix td.click:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .dot { display: inline-block; border-radius: 50%; background: var(--accent);
          vertical-align: middle; }
   .heat td.cell { height: 1.35rem; }
-  .heat td.diag { background: #eee; }
-  /* cohort grouping */
-  .pill { display: inline-block; border: 1px solid #ddd; border-radius: 10px;
-          padding: 0 8px; font-size: .75rem; color: #666;
-          vertical-align: middle; white-space: nowrap; }
-  .pill.hot { border-color: $ACCENT; color: $ACCENT; }
-  .matrix th.cs, .matrix td.cs { border-left: 2px solid #d0d0d0; }
-  .heat tr.rs td { border-top: 2px solid #d0d0d0; }
+  .heat td.diag { background: var(--line2); }
+  /* cohort grouping — coordinated is the one hot category */
+  .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+          padding: 0 8px; font: 600 10.5px/1.7 var(--mono); color: var(--muted);
+          vertical-align: middle; white-space: nowrap; background: var(--panel2); }
+  .pill.hot { border-color: rgba(255,85,69,.42); color: var(--coord);
+              background: rgba(255,85,69,.15); }
+  .matrix th.cs, .matrix td.cs { border-left: 2px solid var(--line); }
+  .heat tr.rs td { border-top: 2px solid var(--line); }
   /* collapsed sections — click a heading to expand */
-  details > summary { list-style: none; cursor: pointer; }
-  details > summary::-webkit-details-marker { display: none; }
+  details.card > summary { list-style: none; cursor: pointer; }
+  details.card > summary::-webkit-details-marker { display: none; }
   summary h2::before { content: '▸ '; }
   details[open] summary h2::before { content: '▾ '; }
   /* profile view */
-  .back { font-size: .85rem; }
+  .back { font-size: .85rem; color: var(--muted); }
   .brow { display: grid; grid-template-columns: 15rem 1fr 8rem; gap: .5rem;
-          align-items: center; margin: .15rem 0; cursor: pointer; }
-  .brow:hover { background: #faf3f0; }
+          align-items: center; margin: .15rem 0; cursor: pointer;
+          border-radius: 6px; padding: .1rem .3rem; }
+  .brow:hover { background: var(--hover); }
   .brow .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                font-size: .85rem; }
-  .brow .t { background: #f0e7e3; height: .9rem; }
-  .brow .f { background: $ACCENT; height: 100%; }
-  .brow .v { text-align: right; color: #666; font-size: .8rem;
+  .brow .t { background: var(--panel2); height: .9rem; border-radius: 3px; }
+  .brow .f { background: var(--accent); height: 100%; border-radius: 3px; }
+  .brow .v { text-align: right; color: var(--muted); font-size: .8rem;
              white-space: nowrap; font-variant-numeric: tabular-nums; }
-  /* share-of-voice: coordinated (accent) vs organic (muted grey) split bar */
+  /* share-of-voice / topics: accent fill vs muted-grey reference remainder */
   .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
-            align-items: center; margin: .15rem 0; cursor: pointer; }
-  .sovrow:hover { background: #faf3f0; }
+            align-items: center; margin: .12rem 0; cursor: pointer;
+            border-radius: 6px; padding: .12rem .3rem; }
+  .sovrow:hover { background: var(--hover); }
   .sovrow .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                  font-size: .85rem; }
-  .sovbar { display: flex; height: 1rem; background: #eee; overflow: hidden; }
-  .sovbar .c { background: $ACCENT; height: 100%; }
-  .sovbar .o { background: #c9ccd1; height: 100%; }
-  .sovrow .v { text-align: right; color: #666; font-size: .8rem;
+  .sovbar { display: flex; height: 1rem; background: var(--panel2);
+            border-radius: 4px; overflow: hidden; }
+  .sovbar .c { background: var(--accent); height: 100%; }
+  .sovbar .o { background: #4c4c54; height: 100%; }
+  .sovrow .v { text-align: right; color: var(--muted); font-size: .8rem;
                white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tabs { display: flex; gap: 4px; margin: .4rem 0 .6rem; }
-  .tab { padding: 3px 10px; border: 1px solid #eee; border-radius: 4px;
-         cursor: pointer; color: #888; font-size: .85rem; }
-  .tab.active { color: $ACCENT; border-color: $ACCENT; }
+  .tab { padding: 3px 11px; border: 1px solid var(--line); border-radius: 7px;
+         cursor: pointer; color: var(--muted); font-size: .85rem;
+         background: var(--panel2); }
+  .tab.active { color: #fff; border-color: var(--accent); background: var(--accent); }
   /* account drill-down drawer */
   .drawer { position: fixed; top: 0; right: 0; width: min(680px, 92vw);
-            height: 100vh; background: #fff; border-left: 1px solid #eee;
+            height: 100vh; background: var(--panel); border-left: 1px solid var(--line);
             transform: translateX(100%); transition: transform .15s ease;
-            overflow-y: auto; box-shadow: -12px 0 30px rgba(0,0,0,.12); }
+            overflow-y: auto; box-shadow: -14px 0 40px rgba(0,0,0,.5); }
   .drawer.open { transform: translateX(0); }
-  .drawer .dh { position: sticky; top: 0; background: #fff; padding: 14px 20px;
-                border-bottom: 2px solid $ACCENT; display: flex;
-                align-items: center; justify-content: space-between; gap: 12px; }
-  .drawer .dh h3 { margin: 0; font-size: 1rem; }
-  .drawer h4 { margin: 1.1rem 0 .3rem; font-size: .8rem; color: $ACCENT;
-               text-transform: uppercase; letter-spacing: .05em; }
-  .drawer .close { cursor: pointer; color: #888; font-size: 18px; border: none;
-                   background: none; }
+  .drawer .dh { position: sticky; top: 0; background: var(--panel);
+                padding: 14px 20px; border-bottom: 1px solid var(--line);
+                display: flex; align-items: center; justify-content: space-between;
+                gap: 12px; }
+  .drawer .dh h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+  .drawer h4 { margin: 1.1rem 0 .3rem; font: 700 10.5px/1 var(--mono);
+               color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+  .drawer .close { cursor: pointer; color: var(--muted); font-size: 18px;
+                   border: none; background: none; }
   .drawer .body { padding: 12px 20px 40px; }
-  .item { border-bottom: 1px solid #eee; padding: 10px 0; font-size: .85rem; }
-  .item .meta { color: #888; font-size: .8rem; margin-bottom: 3px; }
-  .item .meta b { color: #222; }
+  .item { border-bottom: 1px solid var(--line2); padding: 10px 0; font-size: .85rem; }
+  .item .meta { color: var(--muted); font-size: .8rem; margin-bottom: 3px; }
+  .item .meta b { color: var(--text); }
   .item .txt { white-space: pre-wrap; word-break: break-word; }
   .item .title { font-weight: 600; }
   .pager { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
-  .pager button { background: #fff; color: $ACCENT; border: 1px solid #eee;
-                  border-radius: 4px; padding: 4px 12px; cursor: pointer;
-                  font: inherit; }
+  .pager button { background: var(--panel2); color: var(--accent);
+                  border: 1px solid var(--line); border-radius: 7px;
+                  padding: 4px 12px; cursor: pointer; font: inherit; }
   .pager button:disabled { opacity: .35; cursor: default; }
-  .warn { color: $ACCENT; }
+  .warn { color: var(--coord); }
 </style>
 </head>
 <body>
@@ -1214,13 +1240,15 @@ _PAGE = r"""<!doctype html>
   <div class="db" id="db">…</div>
   <div class="stats" id="stats"></div>
 
-  <h2>Network matrix</h2>
-  <p class="sub">How entangled each pair of accounts is — shared subreddits plus
-    co-commented threads. Darker = more co-activity; click any cell for the
-    subreddits and threads behind it. <span id="pairs-note"></span></p>
-  <div class="wrap" id="heat"></div>
+  <section class="card">
+    <h2>Network matrix</h2>
+    <p class="sub">How entangled each pair of accounts is — shared subreddits plus
+      co-commented threads. Darker = more co-activity; click any cell for the
+      subreddits and threads behind it. <span id="pairs-note"></span></p>
+    <div class="wrap" id="heat"></div>
+  </section>
 
-  <section id="listening-section" hidden>
+  <section class="card" id="listening-section" hidden>
     <h2>Topics <span class="count" id="topics-count"></span></h2>
     <p class="sub">Tracked topics by share of voice — how much of the matched
       conversation each holds. Click a topic for the accounts in it.</p>
@@ -1232,7 +1260,7 @@ _PAGE = r"""<!doctype html>
     <div class="wrap"><table id="crossings" class="plain"></table></div>
   </section>
 
-  <section id="sov-section" hidden>
+  <section class="card" id="sov-section" hidden>
     <h2>Share of voice <span class="count" id="sov-count"></span></h2>
     <p class="sub">Of everything said about a brand on Reddit (in this
       database), how much came from the <b style="color:$ACCENT">coordinated
@@ -1243,7 +1271,7 @@ _PAGE = r"""<!doctype html>
     <p class="sub" id="sov-nobase"></p>
   </section>
 
-  <section id="suspect-section" hidden>
+  <section class="card" id="suspect-section" hidden>
     <h2>Suspected undetected seeders <span class="count" id="suspect-count"></span></h2>
     <p class="sub">Accounts <b>not</b> in the labeled cohort that push several
       distinct roster brands across their history — a genuine user mentions a
@@ -1253,19 +1281,21 @@ _PAGE = r"""<!doctype html>
     <div class="wrap"><table id="suspect" class="plain"></table></div>
   </section>
 
-  <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
-  <p class="sub" id="accounts-sub">Every account in this database, treated as one
-    cohort. Click a name for its profile — breakdown, co-actors, brand
-    mentions, raw activity.</p>
-  <div class="wrap"><table id="accounts" class="plain"></table></div>
+  <section class="card">
+    <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
+    <p class="sub" id="accounts-sub">Every account in this database, treated as one
+      cohort. Click a name for its profile — breakdown, co-actors, brand
+      mentions, raw activity.</p>
+    <div class="wrap"><table id="accounts" class="plain"></table></div>
+  </section>
 
-  <details>
+  <details class="card">
     <summary><h2>Brand mentions <span class="count" id="mention-count"></span></h2></summary>
     <p class="sub" id="mention-sub"></p>
     <div class="wrap" id="mentions"></div>
   </details>
 
-  <details>
+  <details class="card">
     <summary><h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2></summary>
     <p class="sub">Subreddits where ≥2 accounts are active — where the network
       overlaps. Dot area ~ that account's posts + comments there; click a dot to
@@ -1274,7 +1304,7 @@ _PAGE = r"""<!doctype html>
     <div class="wrap" id="subreddits"></div>
   </details>
 
-  <details>
+  <details class="card">
     <summary><h2>Co-commented threads <span class="count" id="thread-count"></span></h2></summary>
     <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
       co-activity signal (they show up in the same conversations). Dot area ~
@@ -1290,34 +1320,44 @@ _PAGE = r"""<!doctype html>
   <div class="stats" id="p-stats"></div>
   <div id="p-warn"></div>
 
-  <h2>Top subreddits <span class="count" id="p-subs-count"></span></h2>
-  <p class="sub">where this account is active — click a row to read the
-    activity behind it</p>
-  <div id="p-subs"></div>
+  <section class="card">
+    <h2>Top subreddits <span class="count" id="p-subs-count"></span></h2>
+    <p class="sub">where this account is active — click a row to read the
+      activity behind it</p>
+    <div id="p-subs"></div>
+  </section>
 
-  <h2>Top co-actors</h2>
-  <p class="sub">the accounts this one shares subreddits and threads with —
-    click a name for its profile, or the shared counts for the evidence</p>
-  <div class="wrap"><table id="p-co" class="plain"></table></div>
+  <section class="card">
+    <h2>Top co-actors</h2>
+    <p class="sub">the accounts this one shares subreddits and threads with —
+      click a name for its profile, or the shared counts for the evidence</p>
+    <div class="wrap"><table id="p-co" class="plain"></table></div>
+  </section>
 
-  <h2>Brand mentions</h2>
-  <p class="sub">brands &amp; names this account mentions — click a row to read
-    the mentions</p>
-  <div id="p-brands"></div>
+  <section class="card">
+    <h2>Brand mentions</h2>
+    <p class="sub">brands &amp; names this account mentions — click a row to read
+      the mentions</p>
+    <div id="p-brands"></div>
+  </section>
 
-  <h2>AI profile</h2>
-  <p class="sub">The LLM reads a sample of this account's posts/comments plus
-    the deterministic network signals above and returns a persona, a
-    promotional-behavior read, and a <b>coordinated?</b> verdict. One call per
-    account per server run; needs an LLM key (<code>redlens setup</code>).</p>
-  <div id="p-ai"></div>
+  <section class="card">
+    <h2>AI profile</h2>
+    <p class="sub">The LLM reads a sample of this account's posts/comments plus
+      the deterministic network signals above and returns a persona, a
+      promotional-behavior read, and a <b>coordinated?</b> verdict. One call per
+      account per server run; needs an LLM key (<code>redlens setup</code>).</p>
+    <div id="p-ai"></div>
+  </section>
 
-  <h2>Activity</h2>
-  <div class="tabs">
-    <div class="tab active" id="ptab-posts">posts</div>
-    <div class="tab" id="ptab-comments">comments</div>
-  </div>
-  <div id="p-content"></div>
+  <section class="card">
+    <h2>Activity</h2>
+    <div class="tabs">
+      <div class="tab active" id="ptab-posts">posts</div>
+      <div class="tab" id="ptab-comments">comments</div>
+    </div>
+    <div id="p-content"></div>
+  </section>
 </div>
 
 <div class="drawer" id="drawer">
