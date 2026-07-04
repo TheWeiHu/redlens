@@ -221,10 +221,18 @@ class Network:
         our accounts show up in which topic. Empty ``topics`` for a
         network-only DB (no tracked topics, e.g. mydata), so the section
         stays hidden and this view is unchanged for coordinated-network work."""
+        # Honor the same relevance verdict every other surface applies: a
+        # topicpost the LLM filter judged off-topic (relevant = 0/False) is
+        # hidden; unscored (NULL) and on-topic (1) rows are kept — sqlite's
+        # null-safe `IS NOT 0` mirrors topics.relevant_clause()'s `IS NOT False`.
+        # Without this the topic volume + crossings would double-count junk the
+        # rest of the app already drops.
+        rel = "tp.relevant IS NOT 0"
         with closing(self._conn()) as con:
             topics = [dict(r) for r in con.execute(
                 "SELECT t.name AS name, count(tp.post_id) AS matched "
-                "FROM topic t LEFT JOIN topicpost tp ON tp.topic_id = t.id "
+                "FROM topic t LEFT JOIN topicpost tp "
+                f"ON tp.topic_id = t.id AND {rel} "
                 "GROUP BY t.id ORDER BY matched DESC, t.name"
             ) if r["matched"]]
             if not topics:
@@ -244,7 +252,7 @@ class Network:
                 f"count(*) AS n FROM topicpost tp "
                 f"JOIN post p ON p.post_id = tp.post_id "
                 f"JOIN topic t ON t.id = tp.topic_id "
-                f"WHERE p.author_username IN ({marks}) "
+                f"WHERE p.author_username IN ({marks}) AND {rel} "
                 f"GROUP BY p.author_username, t.name ORDER BY n DESC, account",
                 watch)] if watch else []
         return {"topics": topics, "crossings": crossings}
