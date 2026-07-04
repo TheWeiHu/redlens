@@ -1242,50 +1242,43 @@ _PAGE = r"""<!doctype html>
 
   <section class="card">
     <h2>Network matrix</h2>
-    <p class="sub">How entangled each pair of accounts is — shared subreddits plus
-      co-commented threads. Darker = more co-activity; click any cell for the
-      subreddits and threads behind it. <span id="pairs-note"></span></p>
+    <p class="sub">Pairwise co-activity — darker = more shared subreddits and
+      threads; click a cell for the evidence. <span id="pairs-note"></span></p>
     <div class="wrap" id="heat"></div>
   </section>
 
   <section class="card" id="listening-section" hidden>
     <h2>Topics <span class="count" id="topics-count"></span></h2>
-    <p class="sub">Tracked topics by share of voice — how much of the matched
-      conversation each holds. Click a topic for the accounts in it.</p>
+    <p class="sub">Tracked topics by share of voice — click one for its
+      accounts.</p>
     <div id="topics"></div>
     <h2>Crossings <span class="count" id="crossings-count"></span></h2>
-    <p class="sub">Which accounts show up in which tracked topics — the bridge
-      between the network and what it's discussing. Click an account for its
-      profile.</p>
+    <p class="sub">Which accounts show up in which topics — click an account for
+      its profile.</p>
     <div class="wrap"><table id="crossings" class="plain"></table></div>
   </section>
 
   <section class="card" id="sov-section" hidden>
     <h2>Share of voice <span class="count" id="sov-count"></span></h2>
-    <p class="sub">Of everything said about a brand on Reddit (in this
-      database), how much came from the <b style="color:$ACCENT">coordinated
-      network</b> vs <span class="muted">real, unaffiliated users</span>?
-      Brands the network most dominates sort first; click a row for the
-      accounts on each side.</p>
+    <p class="sub">Per brand, how much came from the
+      <b style="color:$ACCENT">coordinated network</b> vs
+      <span class="muted">real users</span> — most-dominated first; click a row
+      for the accounts.</p>
     <div id="sov"></div>
     <p class="sub" id="sov-nobase"></p>
   </section>
 
-  <section class="card" id="suspect-section" hidden>
-    <h2>Suspected undetected seeders <span class="count" id="suspect-count"></span></h2>
-    <p class="sub">Accounts <b>not</b> in the labeled cohort that push several
-      distinct roster brands across their history — a genuine user mentions a
-      product they use; a seeder pushes a catalog. Review each from its profile,
-      then add confirmed ones to <code>cohorts.csv</code>. Only as strong as the
-      history archived for each account.</p>
+  <details class="card" id="suspect-section" hidden>
+    <summary><h2>Suspected undetected seeders <span class="count" id="suspect-count"></span></h2></summary>
+    <p class="sub">Unlabeled accounts pushing several distinct roster brands —
+      review each from its profile, then add confirmed ones to
+      <code>cohorts.csv</code>.</p>
     <div class="wrap"><table id="suspect" class="plain"></table></div>
-  </section>
+  </details>
 
   <section class="card">
     <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
-    <p class="sub" id="accounts-sub">Every account in this database, treated as one
-      cohort. Click a name for its profile — breakdown, co-actors, brand
-      mentions, raw activity.</p>
+    <p class="sub" id="accounts-sub">Click a name for its full profile.</p>
     <div class="wrap"><table id="accounts" class="plain"></table></div>
   </section>
 
@@ -1399,10 +1392,9 @@ async function loadOverview(){
   // labeled cohort; say so on the Accounts heading.
   if(o.organic_authors){
     $('#accounts-note').textContent = `${fmt(o.accounts)} labeled`;
-    $('#accounts-sub').innerHTML = `The curated cohort (${fmt(o.accounts)} `
-      + `labeled accounts). ${fmt(o.organic_authors)} organic authors pulled `
-      + `in by brand-tracking are reachable by drilling a share-of-voice row `
-      + `or a brand mention. Click a name for its profile.`;
+    $('#accounts-sub').innerHTML = `The curated cohort — ${fmt(o.organic_authors)} `
+      + `organic authors are reachable by drilling a share-of-voice row. `
+      + `Click a name for its profile.`;
   }
 }
 
