@@ -1290,8 +1290,8 @@ _PAGE = r"""<!doctype html>
   <div class="page" data-page="topics">
     <section class="card" id="listening-section" hidden>
       <h2>Topics <span class="count" id="topics-count"></span></h2>
-      <p class="sub">Tracked topics by share of voice — click one for its
-        accounts.</p>
+      <p class="sub">Share of tracked-topic volume — each topic's slice of all
+        matched posts. Click one for its accounts.</p>
       <div id="topics"></div>
       <h2>Crossings <span class="count" id="crossings-count"></span></h2>
       <p class="sub">Which accounts show up in which topics — click an account for
