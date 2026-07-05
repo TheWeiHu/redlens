@@ -490,3 +490,29 @@ def test_listening_crossings_scoped_to_cohort_when_labeled(tmp_path):
     # a cohort label narrows the scope to just the labeled account
     r = Network(_topic_db(tmp_path), cohorts={"alice": "coordinated"}).listening()
     assert {c["account"] for c in r["crossings"]} == {"alice"}
+
+
+def test_listening_hides_irrelevance_filtered_matches(tmp_path):
+    # a topicpost the relevance filter judged off-topic (relevant=False) must
+    # not inflate topic volume or crossings — same rule the rest of redlens uses
+    path = str(tmp_path / "redlens.db")
+    engine = connect(path)
+    init_schema(engine)
+    with Session(engine) as s:
+        upsert(s, [User(username="alice")])
+        upsert(s, [
+            Post(post_id="p1", author_username="alice", subreddit_name="vpn",
+                 created_utc=1, score=1),
+            Post(post_id="p2", author_username="alice", subreddit_name="vpn",
+                 created_utc=2, score=1),
+        ])
+        s.add(Topic(id=1, name="nordvpn"))
+        s.commit()
+        s.add_all([
+            TopicPost(topic_id=1, post_id="p1", relevant=True),
+            TopicPost(topic_id=1, post_id="p2", relevant=False),  # off-topic
+        ])
+        s.commit()
+    r = Network(path).listening()
+    assert [t["matched"] for t in r["topics"]] == [1]          # p2 excluded
+    assert {c["account"]: c["n"] for c in r["crossings"]} == {"alice": 1}

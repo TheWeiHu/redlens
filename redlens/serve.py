@@ -65,6 +65,12 @@ AI_SNIPPET = 240     # chars of a comment fed to the prompt
 SUGGEST_MIN_BRANDS = 3  # unlabeled accounts pushing ≥ this many distinct roster
                         # brands are flagged as likely-undetected seeders
 
+# Reddit collapses every deleted account and removed author into these two
+# placeholders, so a single "[deleted]" row is really many different people —
+# never a real account. Kept in the counts but sorted last + flagged so it
+# never reads as the top suspect.
+_NON_ACCOUNTS = ("[deleted]", "[removed]")
+
 # All accounts' activity, one row per post/comment (the network's event log).
 _ACTIVITY = ("SELECT author_username u, subreddit_name sub FROM post "
              "UNION ALL SELECT author_username, subreddit_name FROM comment")
@@ -213,6 +219,7 @@ class Network:
                 out["promoted"] = sum(1 for u in labeled if u in self.promoted)
             else:
                 out["accounts"] = len(authors)
+            out["brands"] = len(self.roster)   # tracked brand roster size
             return out
 
     def listening(self) -> dict[str, Any]:
@@ -221,10 +228,18 @@ class Network:
         our accounts show up in which topic. Empty ``topics`` for a
         network-only DB (no tracked topics, e.g. mydata), so the section
         stays hidden and this view is unchanged for coordinated-network work."""
+        # Honor the same relevance verdict every other surface applies: a
+        # topicpost the LLM filter judged off-topic (relevant = 0/False) is
+        # hidden; unscored (NULL) and on-topic (1) rows are kept — sqlite's
+        # null-safe `IS NOT 0` mirrors topics.relevant_clause()'s `IS NOT False`.
+        # Without this the topic volume + crossings would double-count junk the
+        # rest of the app already drops.
+        rel = "tp.relevant IS NOT 0"
         with closing(self._conn()) as con:
             topics = [dict(r) for r in con.execute(
                 "SELECT t.name AS name, count(tp.post_id) AS matched "
-                "FROM topic t LEFT JOIN topicpost tp ON tp.topic_id = t.id "
+                "FROM topic t LEFT JOIN topicpost tp "
+                f"ON tp.topic_id = t.id AND {rel} "
                 "GROUP BY t.id ORDER BY matched DESC, t.name"
             ) if r["matched"]]
             if not topics:
@@ -244,7 +259,7 @@ class Network:
                 f"count(*) AS n FROM topicpost tp "
                 f"JOIN post p ON p.post_id = tp.post_id "
                 f"JOIN topic t ON t.id = tp.topic_id "
-                f"WHERE p.author_username IN ({marks}) "
+                f"WHERE p.author_username IN ({marks}) AND {rel} "
                 f"GROUP BY p.author_username, t.name ORDER BY n DESC, account",
                 watch)] if watch else []
         return {"topics": topics, "crossings": crossings}
@@ -493,12 +508,17 @@ class Network:
                     continue
                 brands_by.setdefault(u, set()).add(name)
                 mentions_by[u] += n
+        # '[deleted]'/'[removed]' are many people merged under one name, not a
+        # real account — keep the row (its brand breadth is real signal) but
+        # sort it below every genuine account and flag it.
         flagged = sorted(
             (u for u, bs in brands_by.items() if len(bs) >= SUGGEST_MIN_BRANDS),
-            key=lambda u: (-len(brands_by[u]), -mentions_by[u], u))
+            key=lambda u: (u in _NON_ACCOUNTS, -len(brands_by[u]),
+                           -mentions_by[u], u))
         rows: list[dict[str, Any]] = [
             {"account": u, "brands": sorted(brands_by[u]),
-             "brand_count": len(brands_by[u]), "mentions": mentions_by[u]}
+             "brand_count": len(brands_by[u]), "mentions": mentions_by[u],
+             "placeholder": u in _NON_ACCOUNTS}
             for u in flagged
         ]
         return {"available": True, "threshold": SUGGEST_MIN_BRANDS,
@@ -1101,9 +1121,12 @@ _PAGE = r"""<!doctype html>
   /* Dark, card-based dashboard — the redlens red stays the one brand accent;
      structure/hierarchy borrowed from the devbrain operator console. */
   :root {
-    --bg:#161619; --panel:#1e1e22; --panel2:#26262b; --hover:#2e2e34;
-    --line:#34343b; --line2:#29292f; --text:#f2f2f5; --muted:#96969e;
-    --accent:$ACCENT; --coord:#ff5545; --radius:11px;
+    /* surfaces + semantic palette borrowed from the devbrain console — lighter
+       panels lift cards off the background; one saturated color per category. */
+    --bg:#1c1c1e; --panel:#2c2c2e; --panel2:#242426; --hover:#3a3a3c;
+    --line:#38383a; --line2:#2e2e30; --text:#f5f5f7; --muted:#98989d;
+    --accent:$ACCENT; --coord:$ACCENT;         /* coordinated = the brand red */
+    --ok:#30d158; --amber:#ff9f0a; --review:#bf5af2; --radius:10px;
     --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,monospace;
   }
   * { box-sizing: border-box; }
@@ -1120,6 +1143,12 @@ _PAGE = r"""<!doctype html>
           border-radius: var(--radius); padding: 15px 18px; margin: 13px 0; }
   h2 { margin: 0 0 .2rem; font: 700 11px/1.3 var(--mono);
        text-transform: uppercase; letter-spacing: .13em; color: var(--muted); }
+  /* primary section headers (direct card children) read brighter + carry an
+     accent tick; collapsed <details> summaries stay muted → clear hierarchy. */
+  .card > h2 { color: var(--text); }
+  .card > h2::before { content: ''; display: inline-block; width: 3px;
+       height: 11px; background: var(--accent); border-radius: 2px;
+       margin-right: 8px; vertical-align: -1px; }
   h2 .count { color: var(--muted); font-weight: 500; letter-spacing: .05em;
               font-size: 10.5px; }
   a { color: var(--accent); text-decoration: none; }
@@ -1138,9 +1167,9 @@ _PAGE = r"""<!doctype html>
   .stat span { font-size: 9.5px; color: var(--muted); text-transform: uppercase;
                letter-spacing: .07em; }
   /* page tabs — the overview is split into pages, not one long scroll */
-  .nav { display: flex; gap: 4px; position: sticky; top: 0; z-index: 5;
-         margin: 1.2rem 0 .3rem; padding: 8px 0;
-         background: rgba(22,22,25,.82); backdrop-filter: saturate(160%) blur(14px);
+  .nav { display: flex; justify-content: center; gap: 4px; position: sticky;
+         top: 0; z-index: 5; margin: 1.2rem 0 .3rem; padding: 8px 0;
+         background: rgba(28,28,30,.82); backdrop-filter: saturate(160%) blur(14px);
          border-bottom: 1px solid var(--line); }
   .nav a { color: var(--muted); font: 600 11px/1 var(--mono);
            text-transform: uppercase; letter-spacing: .09em; padding: 8px 14px;
@@ -1180,12 +1209,14 @@ _PAGE = r"""<!doctype html>
          vertical-align: middle; }
   .heat td.cell { height: 1.35rem; }
   .heat td.diag { background: var(--line2); }
-  /* cohort grouping — coordinated is the one hot category */
+  /* cohort grouping — one saturated color per cohort */
   .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
           padding: 0 8px; font: 600 10.5px/1.7 var(--mono); color: var(--muted);
           vertical-align: middle; white-space: nowrap; background: var(--panel2); }
-  .pill.hot { border-color: rgba(255,85,69,.42); color: var(--coord);
-              background: rgba(255,85,69,.15); }
+  .pill.hot { border-color: rgba($ACCENT_RGB,.5); color: var(--accent);
+              background: rgba($ACCENT_RGB,.16); }
+  .pill.ok { border-color: rgba(48,209,88,.5); color: var(--ok);
+             background: rgba(48,209,88,.15); }
   .matrix th.cs, .matrix td.cs { border-left: 2px solid var(--line); }
   .heat tr.rs td { border-top: 2px solid var(--line); }
   /* collapsed sections — click a heading to expand */
@@ -1205,6 +1236,15 @@ _PAGE = r"""<!doctype html>
   .brow .f { background: var(--accent); height: 100%; border-radius: 3px; }
   .brow .v { text-align: right; color: var(--muted); font-size: .8rem;
              white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* [deleted]/[removed] suspect row — kept but separated to the bottom, muted */
+  #suspect tr.phantom td { border-top: 2px solid var(--line); color: var(--muted); }
+  #suspect tr.phantom .note { font: 400 10.5px/1.4 var(--mono); color: var(--muted); }
+  /* network-only tag on a 100%-coordinated (no organic baseline) share row */
+  .sovrow .tag { font: 600 8.5px/1.6 var(--mono); text-transform: uppercase;
+                 letter-spacing: .05em; color: var(--accent);
+                 background: rgba($ACCENT_RGB,.15);
+                 border: 1px solid rgba($ACCENT_RGB,.36); border-radius: 4px;
+                 padding: 0 5px; vertical-align: 1px; }
   /* share-of-voice / topics: accent fill vs muted-grey reference remainder */
   .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
             align-items: center; margin: .12rem 0; cursor: pointer;
@@ -1214,8 +1254,8 @@ _PAGE = r"""<!doctype html>
                  font-size: .85rem; }
   .sovbar { display: flex; height: 1rem; background: var(--panel2);
             border-radius: 4px; overflow: hidden; }
-  .sovbar .c { background: var(--accent); height: 100%; }
-  .sovbar .o { background: #4c4c54; height: 100%; }
+  .sovbar .c { background: var(--accent); height: 100%; }  /* coordinated */
+  .sovbar .o { background: #2f6b45; height: 100%; }         /* organic = green */
   .sovrow .v { text-align: right; color: var(--muted); font-size: .8rem;
                white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tabs { display: flex; gap: 4px; margin: .4rem 0 .6rem; }
@@ -1282,13 +1322,14 @@ _PAGE = r"""<!doctype html>
   <div class="page" data-page="topics">
     <section class="card" id="listening-section" hidden>
       <h2>Topics <span class="count" id="topics-count"></span></h2>
-      <p class="sub">Tracked topics by share of voice — click one for its
-        accounts.</p>
+      <p class="sub">Share of tracked-topic volume — each topic's slice of all
+        matched posts. Click one for its accounts.</p>
       <div id="topics"></div>
       <h2>Crossings <span class="count" id="crossings-count"></span></h2>
-      <p class="sub">Which accounts show up in which topics — click an account for
-        its profile.</p>
-      <div class="wrap"><table id="crossings" class="plain"></table></div>
+      <p class="sub">Which accounts show up in which topics — dot size ~
+        mentions. A busy row is one account spanning many topics; click its name
+        for the profile.</p>
+      <div class="wrap"><table id="crossings" class="matrix"></table></div>
     </section>
   </div>
 
@@ -1300,7 +1341,6 @@ _PAGE = r"""<!doctype html>
         <span class="muted">real users</span> — most-dominated first; click a row
         for the accounts.</p>
       <div id="sov"></div>
-      <p class="sub" id="sov-nobase"></p>
     </section>
 
     <section class="card" id="suspect-section" hidden>
@@ -1406,19 +1446,27 @@ async function getJSON(url){ const r = await fetch(url); const j = await r.json(
 // ---- overview ----
 async function loadOverview(){
   const o = await getJSON('/api/overview');
-  $('#db').textContent = o.db;
+  $('#db').textContent = o.db.split('/').pop();   // filename; full path on hover
+  $('#db').title = o.db;
   const stats = [
     ['accounts', o.accounts], ['posts', o.posts], ['comments', o.comments],
     ['subreddits', o.subreddits],
   ];
+  if(o.brands) stats.push(['brands', o.brands]);
   if(o.organic_authors) stats.push(['organic authors', o.organic_authors]);
+  // The date range is context, not a headline — fold it into one span-range
+  // card instead of two, so the strip leads with counts.
   $('#stats').innerHTML = stats
     .map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
-    + (o.cohorts || []).map(c =>
-      `<div class="stat"><b>${fmt(c.accounts)}</b><span>${esc(c.cohort)}</span></div>`).join('')
-    + (o.promoted ? `<div class="stat"><b>${fmt(o.promoted)}</b><span>promoted</span></div>` : '')
-    + `<div class="stat"><b>${day(o.first_utc)}</b><span>first seen</span></div>`
-    + `<div class="stat"><b>${day(o.last_utc)}</b><span>last seen</span></div>`;
+    + (o.cohorts || []).map(c => {
+        const col = c.cohort === 'coordinated' ? 'var(--accent)'
+          : c.cohort === 'organic' ? 'var(--ok)' : 'var(--text)';
+        return `<div class="stat"><b style="color:${col}">${fmt(c.accounts)}</b>`
+          + `<span>${esc(c.cohort)}</span></div>`;
+      }).join('')
+    + (o.promoted ? `<div class="stat"><b style="color:var(--amber)">${fmt(o.promoted)}</b><span>promoted</span></div>` : '')
+    + `<div class="stat"><b>${day(o.first_utc)}–${day(o.last_utc)}</b>`
+    + `<span>date range</span></div>`;
   // once organic discussion is in the DB the network view is scoped to the
   // labeled cohort; say so on the Accounts heading.
   if(o.organic_authors){
@@ -1433,8 +1481,11 @@ async function loadOverview(){
 const userCell = u =>
   `<a class="u" href="#/user/${encodeURIComponent(u)}">${esc(u)}</a>`;
 let cohortOf = {};  // account -> cohort label (from /api/pairs)
-const pill = c => c ?
-  `<span class="pill${c === 'coordinated' ? ' hot' : ''}">${esc(c)}</span>` : '';
+let cohortsMixed = false;  // >1 distinct cohort — else the pill is pure noise
+// Only tag a cohort when the DB actually has more than one: when every account
+// is 'coordinated', a 'coordinated' pill on every row says nothing.
+const pill = c => (c && cohortsMixed) ?
+  `<span class="pill${c === 'coordinated' ? ' hot' : c === 'organic' ? ' ok' : ''}">${esc(c)}</span>` : '';
 // A cohort boundary between column i-1 and i gets a separator line.
 const boundary = (accounts, i) => i > 0 &&
   (cohortOf[accounts[i]] || '~') !== (cohortOf[accounts[i-1]] || '~');
@@ -1460,6 +1511,7 @@ async function loadPairs(){
   const p = await getJSON('/api/pairs');
   const A = p.accounts;
   cohortOf = p.cohorts || {};
+  cohortsMixed = new Set(Object.values(cohortOf)).size > 1;
   const notes = [];
   if(Object.keys(cohortOf).length) notes.push('Grouped by cohort.');
   if(p.total_accounts > A.length)
@@ -1591,14 +1643,40 @@ async function loadListening(){
       ? '<p>' + cs.map(c => `${userCell(c.account)} (${fmt(c.n)})`).join(', ') + '</p>'
       : '<p class="muted">No tracked account appears in this topic.</p>';
   });
-  $('#crossings-count').textContent = fmt(r.crossings.length);
-  const xhead = '<thead><tr><th>account</th><th>topic</th>'
-    + '<th class="num">mentions</th></tr></thead>';
-  $('#crossings').innerHTML = r.crossings.length
-    ? xhead + '<tbody>' + r.crossings.map(c => `<tr>
-        <td>${userCell(c.account)}</td><td>${esc(c.topic)}</td>
-        <td class="num">${fmt(c.n)}</td></tr>`).join('') + '</tbody>'
-    : '<tbody><tr><td class="muted">No account appears in a tracked topic yet.</td></tr></tbody>';
+  // Crossings as an account × topic matrix (reusing the network-matrix look):
+  // one row per account, one column per topic, dot size ~ mentions. Far more
+  // scannable than a flat list — a busy row is an account spanning many topics.
+  const x = $('#crossings');
+  if(!r.crossings.length){
+    x.className = 'plain';
+    x.innerHTML = '<tbody><tr><td class="muted">No account appears in a '
+      + 'tracked topic yet.</td></tr></tbody>';
+    return;
+  }
+  const topicNames = r.topics.map(t => t.name);
+  const total = {};
+  r.crossings.forEach(c => { total[c.account] = (total[c.account] || 0) + c.n; });
+  const accts = Object.keys(total).sort((a, b) => total[b] - total[a]
+    || a.localeCompare(b));
+  const val = {};
+  r.crossings.forEach(c => { val[c.account + '|' + c.topic] = c.n; });
+  const xpeak = Math.max(1, ...r.crossings.map(c => c.n));
+  $('#crossings-count').textContent = topOf(accts.length, accts.length);
+  x.className = 'matrix';
+  x.innerHTML =
+    '<thead><tr><th></th>'
+    + topicNames.map(t => `<th class="acct">${esc(t)}</th>`).join('')
+    + '</tr></thead><tbody>'
+    + accts.map(a => `<tr><td class="lbl">${userCell(a)}</td>`
+        + topicNames.map(t => {
+            const n = val[a + '|' + t] || 0;
+            if(!n) return '<td class="cell"></td>';
+            const d = (5 + 13 * Math.sqrt(n / xpeak)).toFixed(1);
+            return `<td class="cell" title="${esc(a)} × ${esc(t)}: `
+              + `${fmt(n)}"><span class="dot" style="width:${d}px;height:${d}px">`
+              + '</span></td>';
+          }).join('') + '</tr>').join('')
+    + '</tbody>';
 }
 
 // ---- share of voice (coordinated cohort's share of each brand) ----
@@ -1608,38 +1686,34 @@ async function loadShareOfVoice(){
   // A bar is only honest for brands whose ORGANIC conversation is in the DB.
   // The rest would read "100% coordinated" purely because only the seeders
   // were archived — list them as not-yet-tracked instead.
-  const based = r.rows.filter(b => b.baseline);
-  const noBase = r.rows.filter(b => !b.baseline);
-  if(noBase.length)
-    $('#sov-nobase').innerHTML =
-      `${fmt(noBase.length)} roster brands have no organic baseline yet ` +
-      `(not tracked as topics — their share can't be measured): ` +
-      `<span class="muted">${noBase.map(b => esc(b.term)).join(', ')}</span>`;
-  if(!based.length){
-    $('#sov-section').hidden = false;
-    $('#sov-count').textContent = '';
-    $('#sov').innerHTML = '<p class="muted">No brand has an organic baseline '
-      + 'yet — run the brand-tracking ingest first.</p>';
-    return;
-  }
+  // All brands, most-coordinated first. A brand at 100% is network-exclusive:
+  // the organic pool IS in the DB, yet not one unaffiliated user mentions it —
+  // the strongest coordination signal, so it leads the list (was hidden before).
+  const rows = r.rows.slice().sort((a, b) =>
+    b.coord_pct - a.coord_pct || b.total - a.total);
   $('#sov-section').hidden = false;
-  $('#sov-count').textContent = topOf(r.total, based.length);
+  $('#sov-count').textContent = topOf(r.total, rows.length);
   const authorList = (label, us) => us.length
     ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
       us.map(userCell).join(', ') + '</p>' : '';
-  $('#sov').innerHTML = based.map((b, i) =>
+  // one-decimal precision so a brand dwarfed by organic talk (7OH: 0.5%) isn't
+  // rounded away to 0%; trailing .0 dropped so 100% / 95% stay clean integers.
+  const pctLabel = b => parseFloat(
+    (b.total ? 100 * b.coordinated / b.total : 0).toFixed(1)) + '%';
+  $('#sov').innerHTML = rows.map((b, i) =>
     `<div class="sovrow" data-i="${i}">
-       <div class="lbl">${esc(b.term)}</div>
+       <div class="lbl">${esc(b.term)}${b.baseline ? ''
+         : ' <span class="tag">network-only</span>'}</div>
        <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
          <div class="c" style="width:${b.coord_pct}%"></div>
          <div class="o" style="width:${100-b.coord_pct}%"></div></div>
-       <div class="v"><b>${b.coord_pct}%</b> of ${fmt(b.total)}</div>
+       <div class="v"><b>${pctLabel(b)}</b> of ${fmt(b.total)}</div>
      </div>`).join('');
   $('#sov').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
-    const b = based[+el.dataset.i];
+    const b = rows[+el.dataset.i];
     openDrawer(`${b.term} · share of voice`);
     $('#d-body').innerHTML =
-      `<p><b>${b.coord_pct}%</b> of ${plural(b.total, 'mention')} are the `
+      `<p><b>${pctLabel(b)}</b> of ${plural(b.total, 'mention')} are the `
       + `coordinated cohort — ${plural(b.coordinated, 'mention')} from `
       + `${plural(b.coord_authors, 'account')} vs ${plural(b.organic, 'mention')} `
       + `from ${plural(b.organic_authors, 'organic author')}.</p>`
@@ -1657,8 +1731,10 @@ async function loadSuspects(){
   $('#suspect').innerHTML =
     '<thead><tr><th>account</th><th class="num">roster brands</th>' +
     '<th class="num">mentions</th><th>brands pushed</th></tr></thead><tbody>' +
-    r.rows.map(s => `<tr>
-      <td>${userCell(s.account)}</td>
+    r.rows.map(s => `<tr${s.placeholder ? ' class="phantom"' : ''}>
+      <td>${s.placeholder
+        ? `${esc(s.account)} <span class="note">aggregate of many deleted accounts — not one seeder</span>`
+        : userCell(s.account)}</td>
       <td class="num">${fmt(s.brand_count)}</td>
       <td class="num">${fmt(s.mentions)}</td>
       <td class="members">${s.brands.map(esc).join(', ')}</td>
@@ -1957,10 +2033,12 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
 
 // ---- boot ----
 (async () => {
+  $('#heat').innerHTML = '<p class="muted">loading…</p>';
   try {
-    await loadOverview();
-    // The heatmap's account order is every matrix's column order.
-    const accounts = await loadPairs();
+    // Overview and pairs don't depend on each other — run them together so the
+    // stats strip and the (slower) co-activity matrix don't paint in series.
+    // pairs sets the account column order every other matrix reuses.
+    const [, accounts] = await Promise.all([loadOverview(), loadPairs()]);
     await Promise.all([
       loadAccounts(), loadListening(), loadShareOfVoice(), loadSuspects(),
       loadMentions(accounts),
