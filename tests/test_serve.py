@@ -203,11 +203,11 @@ def test_load_brands_parses_names_aliases_and_comments(tmp_path):
         "# roster\n"
         "\n"
         "NordVPN, nordvpn, nord vpn\n"
-        "Shef\n",
+        "Acme\n",
         encoding="utf-8")
     assert load_brands(p) == [
         ("NordVPN", ["nordvpn", "nord vpn"]),  # aliases are the match terms
-        ("Shef", ["Shef"]),                    # a bare name matches itself
+        ("Acme", ["Acme"]),                    # a bare name matches itself
     ]
 
 

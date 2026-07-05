@@ -26,7 +26,7 @@ separators — the coordinated block reads as a block — and every account
 carries its cohort chip.
 
     redlens serve                          # over the default DB
-    redlens --db redrover.db serve         # dogfood on the redrover network
+    redlens --db mydata.db serve           # dogfood on your own network
     redlens serve --brands brands.csv --cohorts cohorts.csv --no-browser
 
 The page follows the redlens report style (light, one ``constants.ACCENT``
