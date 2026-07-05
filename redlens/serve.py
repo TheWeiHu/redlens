@@ -67,7 +67,8 @@ SUGGEST_MIN_BRANDS = 3  # unlabeled accounts pushing ≥ this many distinct rost
 
 # Reddit collapses every deleted account and removed author into these two
 # placeholders, so a single "[deleted]" row is really many different people —
-# never a real account. Excluded from all author-level analysis.
+# never a real account. Kept in the counts but sorted last + flagged so it
+# never reads as the top suspect.
 _NON_ACCOUNTS = ("[deleted]", "[removed]")
 
 # All accounts' activity, one row per post/comment (the network's event log).
@@ -268,7 +269,7 @@ class Network:
             r[0] for r in con.execute(
                 "SELECT author_username FROM post "
                 "UNION SELECT author_username FROM comment ORDER BY 1"
-            ) if r[0] not in _NON_ACCOUNTS
+            )
         ]
 
     def _matrix_accounts(self, con: sqlite3.Connection) -> list[str]:
@@ -410,8 +411,6 @@ class Network:
             counts: dict[str, Counter[str]] = {name: Counter() for name, _ in pats}
             for r in self._texts():
                 u, text = r["u"], r["t"]
-                if u in _NON_ACCOUNTS:   # phantom author — many people, not one
-                    continue
                 for name, pat in pats:
                     if pat.search(text):
                         counts[name][u] += 1
@@ -509,12 +508,17 @@ class Network:
                     continue
                 brands_by.setdefault(u, set()).add(name)
                 mentions_by[u] += n
+        # '[deleted]'/'[removed]' are many people merged under one name, not a
+        # real account — keep the row (its brand breadth is real signal) but
+        # sort it below every genuine account and flag it.
         flagged = sorted(
             (u for u, bs in brands_by.items() if len(bs) >= SUGGEST_MIN_BRANDS),
-            key=lambda u: (-len(brands_by[u]), -mentions_by[u], u))
+            key=lambda u: (u in _NON_ACCOUNTS, -len(brands_by[u]),
+                           -mentions_by[u], u))
         rows: list[dict[str, Any]] = [
             {"account": u, "brands": sorted(brands_by[u]),
-             "brand_count": len(brands_by[u]), "mentions": mentions_by[u]}
+             "brand_count": len(brands_by[u]), "mentions": mentions_by[u],
+             "placeholder": u in _NON_ACCOUNTS}
             for u in flagged
         ]
         return {"available": True, "threshold": SUGGEST_MIN_BRANDS,
@@ -1232,6 +1236,9 @@ _PAGE = r"""<!doctype html>
   .brow .f { background: var(--accent); height: 100%; border-radius: 3px; }
   .brow .v { text-align: right; color: var(--muted); font-size: .8rem;
              white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* [deleted]/[removed] suspect row — kept but separated to the bottom, muted */
+  #suspect tr.phantom td { border-top: 2px solid var(--line); color: var(--muted); }
+  #suspect tr.phantom .note { font: 400 10.5px/1.4 var(--mono); color: var(--muted); }
   /* network-only tag on a 100%-coordinated (no organic baseline) share row */
   .sovrow .tag { font: 600 8.5px/1.6 var(--mono); text-transform: uppercase;
                  letter-spacing: .05em; color: var(--accent);
@@ -1731,8 +1738,10 @@ async function loadSuspects(){
   $('#suspect').innerHTML =
     '<thead><tr><th>account</th><th class="num">roster brands</th>' +
     '<th class="num">mentions</th><th>brands pushed</th></tr></thead><tbody>' +
-    r.rows.map(s => `<tr>
-      <td>${userCell(s.account)}</td>
+    r.rows.map(s => `<tr${s.placeholder ? ' class="phantom"' : ''}>
+      <td>${s.placeholder
+        ? `${esc(s.account)} <span class="note">aggregate of many deleted accounts — not one seeder</span>`
+        : userCell(s.account)}</td>
       <td class="num">${fmt(s.brand_count)}</td>
       <td class="num">${fmt(s.mentions)}</td>
       <td class="members">${s.brands.map(esc).join(', ')}</td>
