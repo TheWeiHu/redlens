@@ -1340,7 +1340,6 @@ _PAGE = r"""<!doctype html>
         <b style="color:$ACCENT">coordinated network</b> vs
         <span class="muted">real users</span> — most-dominated first; click a row
         for the accounts.</p>
-      <div id="sov-nobase"></div>
       <div id="sov"></div>
     </section>
 
@@ -1692,14 +1691,8 @@ async function loadShareOfVoice(){
   // the strongest coordination signal, so it leads the list (was hidden before).
   const rows = r.rows.slice().sort((a, b) =>
     b.coord_pct - a.coord_pct || b.total - a.total);
-  const noBase = rows.filter(b => !b.baseline);
   $('#sov-section').hidden = false;
   $('#sov-count').textContent = topOf(r.total, rows.length);
-  $('#sov-nobase').innerHTML = noBase.length
-    ? `<p class="sub"><b style="color:$ACCENT">${fmt(noBase.length)} brands at `
-      + `100%</b> are network-exclusive — the organic pool is archived, yet not `
-      + `one unaffiliated user mentions them.</p>`
-    : '';
   const authorList = (label, us) => us.length
     ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
       us.map(userCell).join(', ') + '</p>' : '';
