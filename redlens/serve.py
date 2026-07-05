@@ -65,6 +65,11 @@ AI_SNIPPET = 240     # chars of a comment fed to the prompt
 SUGGEST_MIN_BRANDS = 3  # unlabeled accounts pushing ≥ this many distinct roster
                         # brands are flagged as likely-undetected seeders
 
+# Reddit collapses every deleted account and removed author into these two
+# placeholders, so a single "[deleted]" row is really many different people —
+# never a real account. Excluded from all author-level analysis.
+_NON_ACCOUNTS = ("[deleted]", "[removed]")
+
 # All accounts' activity, one row per post/comment (the network's event log).
 _ACTIVITY = ("SELECT author_username u, subreddit_name sub FROM post "
              "UNION ALL SELECT author_username, subreddit_name FROM comment")
@@ -263,7 +268,7 @@ class Network:
             r[0] for r in con.execute(
                 "SELECT author_username FROM post "
                 "UNION SELECT author_username FROM comment ORDER BY 1"
-            )
+            ) if r[0] not in _NON_ACCOUNTS
         ]
 
     def _matrix_accounts(self, con: sqlite3.Connection) -> list[str]:
@@ -405,6 +410,8 @@ class Network:
             counts: dict[str, Counter[str]] = {name: Counter() for name, _ in pats}
             for r in self._texts():
                 u, text = r["u"], r["t"]
+                if u in _NON_ACCOUNTS:   # phantom author — many people, not one
+                    continue
                 for name, pat in pats:
                     if pat.search(text):
                         counts[name][u] += 1
