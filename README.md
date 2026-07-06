@@ -21,6 +21,12 @@
   <a href="DESIGN.md">Design</a>
 </p>
 
+<p align="center">
+  <img src="docs/serve-demo.gif" alt="redlens serve — the coordinated-network view: matrix, brand share-of-voice, suspected seeders, account drill-in" width="860">
+</p>
+
+<p align="center"><sub>The <code>serve</code> coordinated-network view on a synthetic astroturf network — not real data.</sub></p>
+
 Archive and analyze public Reddit history, locally. redlens pulls from
 [arctic-shift](https://arctic-shift.photon-reddit.com) — a free, keyless mirror — and keeps
 everything in **one SQLite file you own**. No API keys, no setup, no Reddit account.
