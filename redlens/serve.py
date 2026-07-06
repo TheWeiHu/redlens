@@ -1556,10 +1556,10 @@ _PAGE = r"""<!doctype html>
 
   <nav class="nav" id="nav">
     <a href="#/network" data-page="network">Network</a>
-    <a href="#/topics" data-page="topics">Topics</a>
     <a href="#/brands" data-page="brands">Brands</a>
     <a href="#/cohorts" data-page="cohorts">Cohorts</a>
     <a href="#/footprint" data-page="footprint">Footprint</a>
+    <a href="#/topics" data-page="topics">Topics</a>
   </nav>
 
   <div class="page active" data-page="network">
@@ -1579,8 +1579,11 @@ _PAGE = r"""<!doctype html>
   <div class="page" data-page="topics">
     <section class="card" id="listening-section" hidden>
       <h2>Topics <span class="count" id="topics-count"></span></h2>
-      <p class="sub">Share of tracked-topic volume — each topic's slice of all
-        matched posts. Click one for its accounts.</p>
+      <p class="sub">Brands &amp; keywords we chose to track. Each bar is that
+        topic's share of every post we matched across the tracked set — total
+        <em>public</em> volume (organic + network), not the network's own share.
+        A big bar with few crossings below = a genuinely organic topic the
+        network barely touches. Click one for the accounts active in it.</p>
       <div id="topics"></div>
       <h2>Crossings <span class="count" id="crossings-count"></span></h2>
       <p class="sub">Which accounts show up in which topics — dot size ~
