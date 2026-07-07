@@ -1559,10 +1559,12 @@ _PAGE = r"""<!doctype html>
   <div class="page" data-page="brands">
     <section class="card scatter" id="scatter-section" hidden>
       <h2>Seeded vs. camouflage</h2>
-      <p class="sub">Each dot is a brand: how many <b style="color:$ACCENT">network</b>
-        accounts push it (x) vs how many independent authors discuss it (y).
-        Bottom-right = <span style="color:#ff8ba0">seeded</span> (network speaks,
-        Reddit silent); upper band = <span style="color:#7fe6d8">camouflage</span>.</p>
+      <p class="sub">One dot per brand. <b>Right</b> = more of the network pushes it.
+        <b>Up</b> = more real (independent) users talk about it. So a dot low on
+        the floor is one <span style="color:#ff8ba0">the network manufactured</span>
+        — plenty of network accounts, almost no real discussion. Dots that ride
+        high are popular brands the network just
+        <span style="color:#7fe6d8">name-drops for cover</span>.</p>
       <div id="scatter"></div>
     </section>
 
@@ -2279,39 +2281,53 @@ const svgEsc = s => esc(s);
 
 // Seeded/camouflage quadrant: x = network accounts (sqrt), y = organic authors.
 function renderScatter(rows){
-  const pts = rows.filter(b => b.coord_authors >= 2);
-  if(!pts.length){ return; }
-  const W = 960, H = 380, ml = 46, mr = 16, mt = 16, mb = 40;
-  const maxX = Math.max(...pts.map(b => b.coord_authors));
-  const maxY = Math.max(6, ...pts.map(b => b.organic_authors));
-  const X = n => ml + Math.sqrt(n) / Math.sqrt(maxX) * (W - ml - mr);
-  const Y = n => H - mb - Math.min(n, maxY) / maxY * (H - mt - mb);
-  const col = b => b.verdict === 'seeded' ? 'var(--accent)'
-    : b.verdict === 'camouflage' ? '#2dd4bf' : '#6b7686';
-  let s = `<svg viewBox="0 0 ${W} ${H}">`;
-  // seeded zone (bottom strip)
-  s += `<rect x="${ml}" y="${Y(2)}" width="${W-ml-mr}" height="${H-mb-Y(2)}" fill="rgba(255,59,92,.05)"/>`;
-  for(let g=0; g<=maxY; g += Math.ceil(maxY/4)){
-    s += `<line x1="${ml}" y1="${Y(g)}" x2="${W-mr}" y2="${Y(g)}" stroke="#1a2029"/>`
-       + `<text class="lg" x="${ml-8}" y="${Y(g)+3}" text-anchor="end">${g}</text>`;
-  }
-  s += `<text class="lg" x="${ml}" y="${H-8}">network accounts pushing the brand →</text>`
-     + `<text class="lg" transform="rotate(-90 14 ${mt+130})" x="14" y="${mt+130}">independent authors →</text>`;
-  pts.sort((a,b) => (a.verdict==='seeded') - (b.verdict==='seeded'));
-  for(const b of pts){
-    const r = 3 + Math.sqrt(b.total)/4;
+  // Only the classified brands tell the story; the unlabelled majority is noise.
+  const pts = rows.filter(b => b.verdict);
+  if(pts.length < 2){ $('#scatter-section').hidden = true; return; }
+  const seed = pts.filter(b => b.verdict === 'seeded');
+  const camo = pts.filter(b => b.verdict === 'camouflage');
+  const W = 940, H = 320, ml = 52, mr = 18, mt = 22, mb = 48;
+  const iw = W - ml - mr, ih = H - mt - mb;
+  const maxX = Math.max(4, ...pts.map(b => b.coord_authors));
+  // cap Y at the 85th percentile so one very popular brand can't squash the rest
+  const ys = pts.map(b => b.organic_authors).sort((a, b) => a - b);
+  const capY = Math.max(10, ys[Math.floor(ys.length * 0.85)] || 10);
+  const X = n => ml + Math.sqrt(n) / Math.sqrt(maxX) * iw;
+  const Y = n => mt + ih - Math.min(n, capY) / capY * ih;
+  const SEED = 'var(--accent)', CAMO = '#2dd4bf';
+  let s = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
+  // seeded zone: bottom band (≤2 independent authors)
+  const bandTop = Y(2);
+  s += `<rect x="${ml}" y="${bandTop.toFixed(0)}" width="${iw}" height="${(mt+ih-bandTop).toFixed(0)}" fill="rgba(255,59,92,.07)"/>`;
+  s += `<text class="lg" x="${W-mr-6}" y="${(mt+ih-8).toFixed(0)}" text-anchor="end" fill="#a84a58">◂ seeded: network talks, ~no one else</text>`;
+  s += `<text class="lg" x="${W-mr-6}" y="${(mt+12).toFixed(0)}" text-anchor="end" fill="#3f8f83">camouflage: real discussion ▴</text>`;
+  // y grid + labels
+  const stepY = Math.max(1, Math.ceil(capY / 4));
+  for(let g = 0; g <= capY; g += stepY)
+    s += `<line x1="${ml}" y1="${Y(g).toFixed(0)}" x2="${W-mr}" y2="${Y(g).toFixed(0)}" stroke="#171c25"/>`
+       + `<text class="lg" x="${ml-8}" y="${(Y(g)+3).toFixed(0)}" text-anchor="end">${g}</text>`;
+  // x ticks
+  [...new Set([1, Math.round(maxX/4), Math.round(maxX/2), maxX])].forEach(v => {
+    if(v > 0) s += `<text class="lg" x="${X(v).toFixed(0)}" y="${(mt+ih+18).toFixed(0)}" text-anchor="middle">${v}</text>`;
+  });
+  s += `<text class="lg" x="${ml}" y="${H-6}">network accounts pushing it →</text>`;
+  // dots — camouflage first, seeded on top; clipped (very-organic) dots dimmed
+  [...camo, ...seed].forEach(b => {
+    const c = b.verdict === 'seeded' ? SEED : CAMO;
+    const r = Math.min(13, 4 + Math.sqrt(b.total) / 4);
+    const clipped = b.organic_authors > capY;
     s += `<circle cx="${X(b.coord_authors).toFixed(1)}" cy="${Y(b.organic_authors).toFixed(1)}" `
-      + `r="${Math.min(12,r).toFixed(1)}" fill="${col(b)}" fill-opacity=".55" stroke="${col(b)}" stroke-width=".7"><title>`
-      + `${svgEsc(b.term)} — ${b.coord_authors} network / ${b.organic_authors} organic</title></circle>`;
-  }
-  // label the strongest seeded dots
-  pts.filter(b => b.verdict==='seeded').sort((a,b)=>b.coord_authors-a.coord_authors)
-     .slice(0,6).forEach(b => {
-       s += `<text class="lg" x="${(X(b.coord_authors)+9).toFixed(0)}" y="${(Y(b.organic_authors)+3).toFixed(0)}" fill="#ff8ba0">${svgEsc(b.term.slice(0,16))}</text>`;
-     });
+      + `r="${r.toFixed(1)}" fill="${c}" fill-opacity="${clipped ? '.3' : '.62'}" stroke="${c}" stroke-width="1">`
+      + `<title>${svgEsc(b.term)} — ${b.coord_authors} network accounts vs ${b.organic_authors} `
+      + `independent authors (${b.coord_pct}% network)</title></circle>`;
+  });
   s += '</svg>';
+  const legend = `<div class="legendrow">`
+    + `<span><span class="cchip" style="background:${SEED}"></span>seeded (${seed.length})</span>`
+    + `<span><span class="cchip" style="background:${CAMO}"></span>camouflage (${camo.length})</span>`
+    + `<span style="color:var(--dim)">dot size = total mentions · hover a dot for the brand</span></div>`;
   $('#scatter-section').hidden = false;
-  $('#scatter').innerHTML = s;
+  $('#scatter').innerHTML = s + legend;
 }
 
 // Bipartite arc diagram of cross-cohort bridge accounts.
