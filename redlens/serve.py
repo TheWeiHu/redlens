@@ -699,6 +699,38 @@ class Network:
         return {"available": True, "window_days": window_days,
                 "rows": waves[:MAX_ROWS]}
 
+    def coordination_raster(self, top_brands: int = 12) -> dict[str, Any]:
+        """The coordination raster: one row per labeled account (y), time (x),
+        a dot each time an account *first* pushes one of the top brands, dot
+        colour = brand. A coordinated push shows as a vertical band — many
+        accounts, one colour, one narrow window. Limited to the widest-spread
+        brands so the colour legend stays legible.
+        """
+        if not self.multi_cohort or not self.roster:
+            return {"available": False, "accounts": [], "brands": [], "events": []}
+        first = self._labeled_first_seen()          # {brand: {account: first ts}}
+        ranked = sorted(((b, a) for b, a in first.items() if len(a) >= 3),
+                        key=lambda kv: -len(kv[1]))
+        brands = [b for b, _ in ranked[:top_brands]]
+        if not brands:
+            return {"available": False, "accounts": [], "brands": [], "events": []}
+        acct_first: dict[str, int] = {}
+        for b in brands:
+            for a, ts in first[b].items():
+                acct_first[a] = min(acct_first.get(a, ts), ts)
+        # order accounts by cohort, then by when they first appear (so the
+        # earliest pushers sit together and bands read top-to-bottom)
+        accounts = sorted(acct_first, key=lambda a: (
+            self._cohort_rank.get(self.cohorts.get(a, ""), 99), acct_first[a]))
+        aidx = {a: i for i, a in enumerate(accounts)}
+        bidx = {b: i for i, b in enumerate(brands)}
+        events = [{"a": aidx[a], "b": bidx[b], "ts": ts}
+                  for b in brands for a, ts in first[b].items()]
+        return {"available": True,
+                "accounts": [{"name": a, "cohort": self.cohorts.get(a, "")}
+                             for a in accounts],
+                "brands": brands, "events": events}
+
     def cohort_timeline(self) -> dict[str, Any]:
         """Monthly post+comment volume per cohort — the activity lifecycle."""
         if not self.multi_cohort:
@@ -1218,6 +1250,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.domain_catalogue())
             elif u.path == "/api/seeding-waves":
                 self._json(self.net.seeding_waves())
+            elif u.path == "/api/coordination-raster":
+                self._json(self.net.coordination_raster())
             elif u.path == "/api/profile":
                 self._json(self.net.profile(one("u")))
             elif u.path == "/api/ai-profile":
@@ -1593,6 +1627,15 @@ _PAGE = r"""<!doctype html>
   </div>
 
   <div class="page" data-page="cohorts">
+    <section class="card" id="raster-section" hidden>
+      <h2>Coordination raster</h2>
+      <p class="sub">One row per account, time along the x-axis, a dot each time an
+        account <b>first</b> pushes a brand (colour = brand). A coordinated push is
+        a <b>vertical band</b> — many accounts naming the same brand in the same
+        few days. Hover a dot for the account and brand.</p>
+      <div id="raster"></div>
+    </section>
+
     <section class="card" id="cmp-section" hidden>
       <h2>Brands by cohort <span class="count" id="cmp-count"></span></h2>
       <p class="sub">Which cohort pushes each brand — <b>shared</b> brands (two or
@@ -2399,32 +2442,90 @@ async function loadSeedingWaves(){
     }).join('');
 }
 
+const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const monthLabel = m => `${MON[+m.slice(5,7)-1]} '${m.slice(2,4)}`;  // 2026-04 -> Apr '26
+
 async function loadCohortTimeline(){
   const r = await getJSON('/api/cohort-timeline');
   if(!r.available || !r.months.length) return;
   assignCohortColors(r.cohorts);
-  // drop leading all-zero months so the chart focuses on the active period
-  let start = 0;
   const tot = r.months.map((_, i) => r.cohorts.reduce((s, c) => s + r.series[c][i], 0));
-  while(start < tot.length - 1 && tot[start] === 0) start++;
+  // Focus on the active window: keep the recent months that hold 97% of all
+  // volume (these accounts have years of sparse old history — drop that tail),
+  // and never show more than 30 months so labels stay readable.
+  const V = tot.reduce((a, b) => a + b, 0);
+  let start = 0, acc = 0;
+  for(let i = tot.length - 1; i >= 0; i--){ acc += tot[i]; if(acc >= 0.97 * V){ start = i; break; } }
+  start = Math.max(start, tot.length - 30);
   const months = r.months.slice(start), totals = tot.slice(start);
-  const max = Math.max(1, ...totals), H = 150, bw = Math.max(4, Math.min(28, 940 / months.length));
-  let svg = `<svg viewBox="0 0 ${Math.max(960, months.length*bw+60)} ${H+26}" width="100%" font-family="var(--mono,monospace)">`;
+  const max = Math.max(1, ...totals), H = 150, mb = 30, gap = 40;
+  const bw = Math.max(6, Math.min(30, 900 / months.length));
+  const Wd = gap + months.length * bw + 20;
+  let svg = `<svg viewBox="0 0 ${Wd} ${H+mb}" width="100%" font-family="var(--mono,monospace)">`;
+  const every = Math.ceil(months.length / 10);
   months.forEach((m, i) => {
     let y = H;
-    const x = 40 + i * bw;
+    const x = gap + i * bw;
     r.cohorts.forEach(c => {
       const v = r.series[c][start + i], h = (H - 10) * v / max;
-      if(h > 0){ svg += `<rect x="${x}" y="${y-h}" width="${bw*0.8}" height="${h}" fill="${cohortColor[c]}"/>`; y -= h; }
+      if(h > 0){ svg += `<rect x="${x}" y="${y-h}" width="${bw*0.82}" height="${h}" fill="${cohortColor[c]}"/>`; y -= h; }
     });
-    if(i % Math.ceil(months.length/12) === 0)
-      svg += `<text x="${x+bw*0.4}" y="${H+16}" text-anchor="middle" fill="#7d8797" font-size="9">${m.slice(2)}</text>`;
+    if(i % every === 0 || i === months.length - 1)
+      svg += `<text x="${x+bw*0.4}" y="${H+16}" text-anchor="middle" fill="#7d8797" font-size="9">${monthLabel(m)}</text>`;
   });
   svg += '</svg>';
-  const legend = r.cohorts.map(c =>
-    `<span class="cleg">${cohChip(c)}</span>`).join(' ');
+  const legend = r.cohorts.map(c => `<span class="cleg">${cohChip(c)}</span>`).join(' ');
   $('#timeline-section').hidden = false;
   $('#timeline').innerHTML = svg + `<div class="legendrow">${legend}</div>`;
+}
+
+// The coordination raster: y = account, x = time, dot colour = brand.
+const RASTER_COLORS = ['#ff3b5c','#4d8cff','#2dd4bf','#f5a524','#a855f7','#e879f9',
+  '#22c55e','#fb923c','#38bdf8','#facc15','#f472b6','#94a3b8'];
+async function loadCoordinationRaster(){
+  const r = await getJSON('/api/coordination-raster');
+  if(!r.available || !r.events.length) return;
+  const A = r.accounts.length, B = r.brands;
+  // Focus x on the active window: these accounts have years of sparse old
+  // history, so a few ancient first-mentions would squash everything. Clip the
+  // domain to the 3rd percentile of event times and clamp older dots to the edge.
+  const sorted = r.events.map(e => e.ts).sort((a, b) => a - b);
+  const t0 = sorted[Math.floor(sorted.length * 0.03)], t1 = sorted[sorted.length - 1];
+  const span = Math.max(1, t1 - t0);
+  const ml = 150, mr = 20, mt = 10, mb = 34, rowh = Math.max(4, Math.min(14, 620 / A));
+  const W = 960, iw = W - ml - mr, H = mt + A * rowh + mb;
+  const X = t => ml + (Math.max(t0, Math.min(t, t1)) - t0) / span * iw;
+  const Y = i => mt + i * rowh + rowh / 2;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" font-family="var(--mono,monospace)">`;
+  // cohort row labels down the left (grouped, so we mark cohort boundaries)
+  let lastCoh = null;
+  r.accounts.forEach((a, i) => {
+    if(a.cohort !== lastCoh){
+      svg += `<text x="6" y="${(Y(i)+3).toFixed(0)}" fill="#e8edf5" font-size="10">${esc(a.cohort||'—')}</text>`;
+      svg += `<line x1="${ml}" y1="${(Y(i)-rowh/2).toFixed(0)}" x2="${W-mr}" y2="${(Y(i)-rowh/2).toFixed(0)}" stroke="#1e2430"/>`;
+      lastCoh = a.cohort;
+    }
+  });
+  // month gridlines, labelled sparsely so they stay readable
+  const d0 = new Date(t0*1000), d1 = new Date(t1*1000);
+  const nMonths = (d1.getUTCFullYear()-d0.getUTCFullYear())*12 + d1.getUTCMonth()-d0.getUTCMonth() + 1;
+  const everyM = Math.ceil(nMonths / 12);
+  let mi = 0;
+  for(let d = new Date(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), 1)); d <= d1; d.setUTCMonth(d.getUTCMonth()+1), mi++){
+    const x = X(d.getTime()/1000);
+    svg += `<line x1="${x.toFixed(0)}" y1="${mt}" x2="${x.toFixed(0)}" y2="${H-mb}" stroke="#141922"/>`;
+    if(mi % everyM === 0)
+      svg += `<text x="${x.toFixed(0)}" y="${H-mb+16}" text-anchor="middle" fill="#7d8797" font-size="9">${MON[d.getUTCMonth()]} '${String(d.getUTCFullYear()).slice(2)}</text>`;
+  }
+  // event dots
+  for(const e of r.events)
+    svg += `<circle cx="${X(e.ts).toFixed(1)}" cy="${Y(e.a).toFixed(1)}" r="${Math.min(4,rowh/2).toFixed(1)}" `
+      + `fill="${RASTER_COLORS[e.b % RASTER_COLORS.length]}" fill-opacity=".85"><title>${svgEsc(r.accounts[e.a].name)} → ${svgEsc(B[e.b])}</title></circle>`;
+  svg += '</svg>';
+  const legend = B.map((b, i) =>
+    `<span><span class="cchip" style="background:${RASTER_COLORS[i%RASTER_COLORS.length]}"></span>${esc(b)}</span>`).join(' ');
+  $('#raster-section').hidden = false;
+  $('#raster').innerHTML = svg + `<div class="legendrow">${legend}</div>`;
 }
 
 async function loadCohortBridges(){
@@ -2499,7 +2600,7 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
       loadMentions(accounts),
       loadSubreddits(accounts), loadThreads(accounts),
       loadCohortComparison(), loadSeedingWaves(), loadCohortTimeline(),
-      loadCohortBridges(), loadCohortDomains()]);
+      loadCohortBridges(), loadCohortDomains(), loadCoordinationRaster()]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
     `<p class="warn">${esc(e.message)}</p>`); }
   updateNav();
