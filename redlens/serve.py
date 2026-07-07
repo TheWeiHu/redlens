@@ -1602,7 +1602,7 @@ _PAGE = r"""<!doctype html>
   </div>
 
   <div class="page" data-page="footprint">
-    <details class="card">
+    <details class="card" open>
       <summary><h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2></summary>
       <p class="sub">Subreddits where ≥2 accounts are active — where the network
         overlaps. Dot area ~ that account's posts + comments there; click a dot to
@@ -1610,7 +1610,7 @@ _PAGE = r"""<!doctype html>
       <div class="wrap" id="subreddits"></div>
     </details>
 
-    <details class="card">
+    <details class="card" open>
       <summary><h2>Co-commented threads <span class="count" id="thread-count"></span></h2></summary>
       <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
         co-activity signal. Dot area ~ comments in the thread; click a dot to
