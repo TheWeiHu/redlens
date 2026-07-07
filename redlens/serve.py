@@ -635,7 +635,7 @@ class Network:
         if not self.multi_cohort or not self.roster:
             return {"available": False, "cohorts": [], "rows": []}
         names = self._cohort_names()
-        rows = []
+        rows: list[dict[str, Any]] = []
         for brand, cells in self._roster_counts().items():
             by = {c: 0 for c in names}
             org = 0
@@ -664,12 +664,12 @@ class Network:
         if not self.multi_cohort or not self.roster:
             return {"available": False, "rows": []}
         span = window_days * 86400
-        waves = []
+        waves: list[dict[str, Any]] = []
         for brand, seen in self._labeled_first_seen().items():
             if len(seen) < 3:
                 continue
             pts = sorted(seen.items(), key=lambda x: x[1])
-            best = None
+            best: dict[str, Any] | None = None
             for i in range(len(pts)):
                 j = i
                 while j + 1 < len(pts) and pts[j + 1][1] - pts[i][1] <= span:
@@ -699,7 +699,7 @@ class Network:
                 c = self.cohorts.get(r["u"])
                 if c and r["ts"]:
                     ym = _dt.datetime.fromtimestamp(
-                        r["ts"], _dt.timezone.utc).strftime("%Y-%m")
+                        r["ts"], _dt.UTC).strftime("%Y-%m")
                     series[c][ym] += 1
         months = sorted({m for s in series.values() for m in s})
         return {"available": True, "cohorts": names, "months": months,
@@ -737,8 +737,8 @@ class Network:
                 if c:
                     sub_coh.setdefault(r["sub"], {})[c] = \
                         sub_coh.setdefault(r["sub"], {}).get(c, 0) + 1
-        shared_subs = [{"sub": s, "by": d} for s, d in sub_coh.items()
-                       if len(d) > 1]
+        shared_subs: list[dict[str, Any]] = [
+            {"sub": s, "by": d} for s, d in sub_coh.items() if len(d) > 1]
         shared_subs.sort(key=lambda r: -min(r["by"].values()))
         return {"available": True, "cohorts": self._cohort_names(),
                 "edges": edges[:MAX_ROWS], "shared_subs": shared_subs[:MAX_ROWS]}
@@ -767,7 +767,7 @@ class Network:
                 if d in _SKIP_DOMAINS:
                     continue
                 dom.setdefault(d, {n: set() for n in names})[c].add(r["u"])
-        rows_out = []
+        rows_out: list[dict[str, Any]] = []
         for d, by in dom.items():
             counts = {c: len(by[c]) for c in names}
             if sum(counts.values()) >= 2:
