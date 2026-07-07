@@ -492,13 +492,26 @@ class Network:
             total = sum(coord.values()) + sum(org.values())
             if not total:
                 continue
+            baseline = bool(org) or name.lower() in tracked
+            coord_pct = round(100 * sum(coord.values()) / total)
+            # Live verdict (no external data): with a real organic baseline, a
+            # brand the network overwhelmingly owns is SEEDED; one with healthy
+            # independent discussion it merely name-drops is CAMOUFLAGE. When
+            # Firecrawl/other verdicts are integrated they'd override this.
+            if baseline and len(coord) >= 3 and coord_pct >= 90 and len(org) <= 2:
+                verdict = "seeded"
+            elif baseline and len(org) >= 5 and coord_pct <= 60:
+                verdict = "camouflage"
+            else:
+                verdict = ""
             rows.append({
                 "term": name,
-                "baseline": bool(org) or name.lower() in tracked,
+                "baseline": baseline,
+                "verdict": verdict,
                 "total": total,
                 "coordinated": sum(coord.values()),
                 "organic": sum(org.values()),
-                "coord_pct": round(100 * sum(coord.values()) / total),
+                "coord_pct": coord_pct,
                 "coord_authors": len(coord),
                 "organic_authors": len(org),
                 "top_coordinated": [u for u, _ in coord.most_common(10)],
@@ -1450,6 +1463,10 @@ _PAGE = r"""<!doctype html>
                  background: rgba($ACCENT_RGB,.15);
                  border: 1px solid rgba($ACCENT_RGB,.36); border-radius: 4px;
                  padding: 0 5px; vertical-align: 1px; }
+  .tag.seed { color: #ff8ba0; background: rgba(255,59,92,.16); border-color: rgba(255,59,92,.4); }
+  .tag.camo { color: #7fe6d8; background: rgba(45,212,191,.14); border-color: rgba(45,212,191,.38); }
+  .scatter svg { width: 100%; height: auto; }
+  .scatter .lg { font: 11px var(--mono); fill: var(--muted); }
   /* share-of-voice / topics: accent fill vs muted-grey reference remainder */
   .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
             align-items: center; margin: .12rem 0; cursor: pointer;
@@ -1540,6 +1557,15 @@ _PAGE = r"""<!doctype html>
   </div>
 
   <div class="page" data-page="brands">
+    <section class="card scatter" id="scatter-section" hidden>
+      <h2>Seeded vs. camouflage</h2>
+      <p class="sub">Each dot is a brand: how many <b style="color:$ACCENT">network</b>
+        accounts push it (x) vs how many independent authors discuss it (y).
+        Bottom-right = <span style="color:#ff8ba0">seeded</span> (network speaks,
+        Reddit silent); upper band = <span style="color:#7fe6d8">camouflage</span>.</p>
+      <div id="scatter"></div>
+    </section>
+
     <section class="card" id="sov-section" hidden>
       <h2>Share of voice <span class="count" id="sov-count"></span></h2>
       <p class="sub">Per brand, how much came from the
@@ -1591,6 +1617,7 @@ _PAGE = r"""<!doctype html>
       <h2>Cross-cohort bridge accounts <span class="count" id="bridge-count"></span></h2>
       <p class="sub">Accounts from <i>different</i> cohorts co-active in the same
         threads — the links between operations. Click a name for its profile.</p>
+      <div id="bridge-arc"></div>
       <div class="wrap"><table id="bridges" class="plain"></table></div>
     </section>
 
@@ -1934,6 +1961,7 @@ async function loadShareOfVoice(){
   // the strongest coordination signal, so it leads the list (was hidden before).
   const rows = r.rows.slice().sort((a, b) =>
     b.coord_pct - a.coord_pct || b.total - a.total);
+  renderScatter(rows.filter(b => b.baseline));
   $('#sov-section').hidden = false;
   $('#sov-count').textContent = topOf(r.total, rows.length);
   const authorList = (label, us) => us.length
@@ -1945,8 +1973,10 @@ async function loadShareOfVoice(){
     (b.total ? 100 * b.coordinated / b.total : 0).toFixed(1)) + '%';
   $('#sov').innerHTML = rows.map((b, i) =>
     `<div class="sovrow" data-i="${i}">
-       <div class="lbl">${esc(b.term)}${b.baseline ? ''
-         : ' <span class="tag">network-only</span>'}</div>
+       <div class="lbl">${esc(b.term)}${
+         b.verdict === 'seeded' ? ' <span class="tag seed">seeded</span>'
+         : b.verdict === 'camouflage' ? ' <span class="tag camo">camouflage</span>'
+         : b.baseline ? '' : ' <span class="tag">network-only</span>'}</div>
        <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
          <div class="c" style="width:${b.coord_pct}%"></div>
          <div class="o" style="width:${100-b.coord_pct}%"></div></div>
@@ -2244,6 +2274,72 @@ function renderAiSection(u){
   };
 }
 
+// ---- inline SVG helpers (no libs) ----
+const svgEsc = s => esc(s);
+
+// Seeded/camouflage quadrant: x = network accounts (sqrt), y = organic authors.
+function renderScatter(rows){
+  const pts = rows.filter(b => b.coord_authors >= 2);
+  if(!pts.length){ return; }
+  const W = 960, H = 380, ml = 46, mr = 16, mt = 16, mb = 40;
+  const maxX = Math.max(...pts.map(b => b.coord_authors));
+  const maxY = Math.max(6, ...pts.map(b => b.organic_authors));
+  const X = n => ml + Math.sqrt(n) / Math.sqrt(maxX) * (W - ml - mr);
+  const Y = n => H - mb - Math.min(n, maxY) / maxY * (H - mt - mb);
+  const col = b => b.verdict === 'seeded' ? 'var(--accent)'
+    : b.verdict === 'camouflage' ? '#2dd4bf' : '#6b7686';
+  let s = `<svg viewBox="0 0 ${W} ${H}">`;
+  // seeded zone (bottom strip)
+  s += `<rect x="${ml}" y="${Y(2)}" width="${W-ml-mr}" height="${H-mb-Y(2)}" fill="rgba(255,59,92,.05)"/>`;
+  for(let g=0; g<=maxY; g += Math.ceil(maxY/4)){
+    s += `<line x1="${ml}" y1="${Y(g)}" x2="${W-mr}" y2="${Y(g)}" stroke="#1a2029"/>`
+       + `<text class="lg" x="${ml-8}" y="${Y(g)+3}" text-anchor="end">${g}</text>`;
+  }
+  s += `<text class="lg" x="${ml}" y="${H-8}">network accounts pushing the brand →</text>`
+     + `<text class="lg" transform="rotate(-90 14 ${mt+130})" x="14" y="${mt+130}">independent authors →</text>`;
+  pts.sort((a,b) => (a.verdict==='seeded') - (b.verdict==='seeded'));
+  for(const b of pts){
+    const r = 3 + Math.sqrt(b.total)/4;
+    s += `<circle cx="${X(b.coord_authors).toFixed(1)}" cy="${Y(b.organic_authors).toFixed(1)}" `
+      + `r="${Math.min(12,r).toFixed(1)}" fill="${col(b)}" fill-opacity=".55" stroke="${col(b)}" stroke-width=".7"><title>`
+      + `${svgEsc(b.term)} — ${b.coord_authors} network / ${b.organic_authors} organic</title></circle>`;
+  }
+  // label the strongest seeded dots
+  pts.filter(b => b.verdict==='seeded').sort((a,b)=>b.coord_authors-a.coord_authors)
+     .slice(0,6).forEach(b => {
+       s += `<text class="lg" x="${(X(b.coord_authors)+9).toFixed(0)}" y="${(Y(b.organic_authors)+3).toFixed(0)}" fill="#ff8ba0">${svgEsc(b.term.slice(0,16))}</text>`;
+     });
+  s += '</svg>';
+  $('#scatter-section').hidden = false;
+  $('#scatter').innerHTML = s;
+}
+
+// Bipartite arc diagram of cross-cohort bridge accounts.
+function bridgeArc(edges){
+  const top = edges.slice(0, 20);
+  if(!top.length) return '';
+  const wA = {}, wB = {};
+  top.forEach(e => { wA[e.a]=(wA[e.a]||0)+e.shared; wB[e.b]=(wB[e.b]||0)+e.shared; });
+  const A = Object.keys(wA).sort((x,y)=>wA[y]-wA[x]);
+  const B = Object.keys(wB).sort((x,y)=>wB[y]-wB[x]);
+  const rowh = 26, mt = 24, W = 960, xL = 300, xR = 660;
+  const H = mt + Math.max(A.length, B.length) * rowh + 12;
+  const yA = {}, yB = {};
+  A.forEach((a,i)=>yA[a]=mt+i*rowh); B.forEach((b,i)=>yB[b]=mt+i*rowh);
+  const mx = Math.max(...top.map(e=>e.shared));
+  let s = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
+  for(const e of top){
+    const y1=yA[e.a]+4, y2=yB[e.b]+4, cx=(xL+xR)/2;
+    s += `<path d="M${xL} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${xR} ${y2}" fill="none" `
+      + `stroke="${cohortColor[e.coh_a]||'#a855f7'}" stroke-width="${(0.6+4*e.shared/mx).toFixed(1)}" stroke-opacity="${(0.2+0.6*e.shared/mx).toFixed(2)}"/>`;
+  }
+  A.forEach(a => { s += `<circle cx="${xL}" cy="${yA[a]+4}" r="3.3" fill="${cohortColor[top.find(e=>e.a===a).coh_a]||'#4d8cff'}"/>`
+    + `<text class="lg" x="${xL-8}" y="${yA[a]+8}" text-anchor="end" fill="#cfe0ff">${svgEsc(a.slice(0,22))}</text>`; });
+  B.forEach(b => { s += `<circle cx="${xR}" cy="${yB[b]+4}" r="3.3" fill="${cohortColor[top.find(e=>e.b===b).coh_b]||'#a855f7'}"/>`
+    + `<text class="lg" x="${xR+8}" y="${yB[b]+8}" fill="#e6ccff">${svgEsc(b.slice(0,22))}</text>`; });
+  return s + '</svg>';
+}
+
 // ---- cohort comparison views (only populate with >1 cohort) ----
 // one colour per cohort, cool palette (coordinated keeps the accent red as the
 // semantic "primary operation" marker); reused across every cohort view.
@@ -2321,6 +2417,7 @@ async function loadCohortBridges(){
   assignCohortColors(r.cohorts);
   $('#bridge-section').hidden = false;
   $('#bridge-count').textContent = topOf(r.edges.length, r.edges.length);
+  $('#bridge-arc').innerHTML = bridgeArc(r.edges);
   const edges = r.edges.map(e =>
     `<tr><td class="u" onclick="location.hash='#/user/'+encodeURIComponent('${esc(e.a)}')">${esc(e.a)}</td>` +
     `<td>${cohChip(e.coh_a)}</td>` +
