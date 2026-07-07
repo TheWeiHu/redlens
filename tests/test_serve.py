@@ -364,6 +364,31 @@ def test_share_of_voice_splits_coordinated_vs_organic(tmp_path):
     assert g["coord_pct"] == 100     # only the seeder was archived
 
 
+def test_cohort_views_need_more_than_one_cohort(net):
+    one = Network(net.path, roster=[("Nord", ["nord"])],
+                  cohorts={"alice": "coordinated", "bob": "coordinated"})
+    assert one.multi_cohort is False
+    assert one.cohort_comparison()["available"] is False
+    assert one.cohort_bridges()["available"] is False
+    assert one.seeding_waves()["available"] is False
+
+
+def test_cohort_bridges_link_accounts_across_cohorts(net):
+    # alice (coordinated) and carol (smartiflix) both comment in thread p1 —
+    # a cross-cohort bridge; Nord is pushed only by alice's cohort.
+    two = Network(net.path, roster=[("Nord", ["nord"])],
+                  cohorts={"alice": "coordinated", "carol": "smartiflix"})
+    assert two.multi_cohort is True
+    edges = two.cohort_bridges()["edges"]
+    assert any({e["a"], e["b"]} == {"alice", "carol"}
+               and {e["coh_a"], e["coh_b"]} == {"coordinated", "smartiflix"}
+               for e in edges)
+    cc = two.cohort_comparison()
+    assert cc["available"] and set(cc["cohorts"]) == {"coordinated", "smartiflix"}
+    nord = next(r for r in cc["rows"] if r["brand"] == "Nord")
+    assert nord["by"]["coordinated"] == 1 and nord["shared"] is False
+
+
 def test_suggested_coordinated_flags_multi_brand_unlabeled_authors(tmp_path):
     path = str(tmp_path / "sus.db")
     engine = connect(path)

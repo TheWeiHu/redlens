@@ -41,6 +41,7 @@ slices.
 from __future__ import annotations
 
 import csv
+import datetime as _dt
 import html
 import json
 import re
@@ -78,6 +79,16 @@ _ACTIVITY = ("SELECT author_username u, subreddit_name sub FROM post "
 # Brand-ish term mining (the fallback brand proxy behind /api/mentions when
 # no roster file is given).
 _TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]{2,}\b")
+# outbound domains for the per-cohort catalogue view
+_DOMAIN_RE = re.compile(
+    r"\b([a-z0-9][a-z0-9\-]{1,30}\.(?:com|net|io|co|app|xyz|ai|org|tv|gg|me|"
+    r"shop|store|link|to|vip|club))\b", re.I)
+_SKIP_DOMAINS = frozenset({
+    "reddit.com", "google.com", "youtube.com", "youtu.be", "facebook.com",
+    "amazon.com", "twitter.com", "x.com", "instagram.com", "tiktok.com",
+    "medium.com", "whatsapp.com", "gmail.com", "chatgpt.com", "cloudfront.net",
+    "vercel.app", "redgifs.com", "imgur.com", "github.com", "apple.com",
+    "linkedin.com", "discord.gg", "t.me", "wikipedia.org"})
 _CAP_MIN_RATIO = 0.75  # a name is capitalized nearly every time it appears
 _SKIP_TERMS = frozenset(constants.data_lines("stopwords.txt")) | frozenset({
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
@@ -169,6 +180,9 @@ class Network:
         # roster scan is O(texts × brands); computed once here (the DB is
         # read-only) so those three don't each re-scan the whole DB per request.
         self._brand_counts: dict[str, Counter[str]] | None = None
+        # first-mention utc per (brand, labeled account), filled by the same
+        # scan as _brand_counts; powers seeding_waves at no extra cost.
+        self._first_seen: dict[str, dict[str, int]] = {}
 
     def _scope_clause(self, col: str) -> tuple[str, list[str]]:
         """``(" AND <col> IN (?, …)", params)`` restricting to the curated
@@ -391,12 +405,12 @@ class Network:
             }
 
     def _texts(self) -> list[sqlite3.Row]:
-        """Every account's text, one row per post/comment: ``(u, t)``."""
+        """Every account's text, one row per post/comment: ``(u, t, ts)``."""
         with closing(self._conn()) as con:
             return con.execute(
                 "SELECT author_username u, coalesce(title,'') || ' ' || "
-                "coalesce(selftext,'') t FROM post "
-                "UNION ALL SELECT author_username, coalesce(body,'') "
+                "coalesce(selftext,'') t, created_utc ts FROM post "
+                "UNION ALL SELECT author_username, coalesce(body,''), created_utc "
                 "FROM comment"
             ).fetchall()
 
@@ -404,17 +418,28 @@ class Network:
         """``{brand -> Counter(author -> # posts/comments mentioning it)}``,
         scanned once and memoized. One pass over the DB text testing every
         roster pattern, so ``mentions``/``share_of_voice``/
-        ``suggested_coordinated`` share the scan instead of each re-running it.
+        ``suggested_coordinated``/``seeding_waves`` share the scan instead of
+        each re-running it. The same pass also records the first time each
+        *labeled* account mentions a brand (``self._first_seen``), so the
+        seeding-wave view costs nothing extra.
         """
         if self._brand_counts is None:
             pats = [(name, _term_pattern(terms)) for name, terms in self.roster]
             counts: dict[str, Counter[str]] = {name: Counter() for name, _ in pats}
+            first: dict[str, dict[str, int]] = {name: {} for name, _ in pats}
+            labeled = set(self.cohorts)
             for r in self._texts():
-                u, text = r["u"], r["t"]
+                u, text, ts = r["u"], r["t"], r["ts"]
+                lab = u in labeled
                 for name, pat in pats:
                     if pat.search(text):
                         counts[name][u] += 1
+                        if lab and ts is not None:
+                            d = first[name]
+                            if u not in d or ts < d[u]:
+                                d[u] = ts
             self._brand_counts = counts
+            self._first_seen = first
         return self._brand_counts
 
     def mentions(self) -> dict[str, Any]:
@@ -467,13 +492,26 @@ class Network:
             total = sum(coord.values()) + sum(org.values())
             if not total:
                 continue
+            baseline = bool(org) or name.lower() in tracked
+            coord_pct = round(100 * sum(coord.values()) / total)
+            # Live verdict (no external data): with a real organic baseline, a
+            # brand the network overwhelmingly owns is SEEDED; one with healthy
+            # independent discussion it merely name-drops is CAMOUFLAGE. When
+            # Firecrawl/other verdicts are integrated they'd override this.
+            if baseline and len(coord) >= 3 and coord_pct >= 90 and len(org) <= 2:
+                verdict = "seeded"
+            elif baseline and len(org) >= 5 and coord_pct <= 60:
+                verdict = "camouflage"
+            else:
+                verdict = ""
             rows.append({
                 "term": name,
-                "baseline": bool(org) or name.lower() in tracked,
+                "baseline": baseline,
+                "verdict": verdict,
                 "total": total,
                 "coordinated": sum(coord.values()),
                 "organic": sum(org.values()),
-                "coord_pct": round(100 * sum(coord.values()) / total),
+                "coord_pct": coord_pct,
                 "coord_authors": len(coord),
                 "organic_authors": len(org),
                 "top_coordinated": [u for u, _ in coord.most_common(10)],
@@ -584,6 +622,204 @@ class Network:
             for r in con.execute(sql.format(ph=ph), [*keys, *(extra or [])]):
                 cells[r["k"]][r["u"]] = r["n"]
         return cells
+
+    # ---- cohort comparison views (only meaningful with >1 labeled cohort) ----
+
+    def _cohort_names(self) -> list[str]:
+        """Distinct cohort labels, in labels-file order."""
+        return sorted(set(self.cohorts.values()),
+                      key=lambda c: self._cohort_rank.get(c, 0))
+
+    @property
+    def multi_cohort(self) -> bool:
+        return len(self._cohort_names()) > 1
+
+    def _labeled_first_seen(self) -> dict[str, dict[str, int]]:
+        """``{brand -> {account -> first-mention utc}}`` for labeled accounts —
+        filled as a side effect of the shared roster scan (no extra pass)."""
+        self._roster_counts()
+        return self._first_seen
+
+    def cohort_comparison(self) -> dict[str, Any]:
+        """Per roster brand, how many accounts in each cohort mention it —
+        splitting brands into shared (pushed by ≥2 cohorts) vs cohort-specific.
+        The two-operation catalogue view.
+        """
+        if not self.multi_cohort or not self.roster:
+            return {"available": False, "cohorts": [], "rows": []}
+        names = self._cohort_names()
+        rows: list[dict[str, Any]] = []
+        for brand, cells in self._roster_counts().items():
+            by = {c: 0 for c in names}
+            org = 0
+            for u in cells:
+                c = self.cohorts.get(u)
+                if c in by:
+                    by[c] += 1
+                elif u not in self.cohorts:
+                    org += 1
+            present = [c for c in names if by[c]]
+            if not present:
+                continue
+            rows.append({"brand": brand, "by": by, "organic": org,
+                         "shared": len(present) > 1,
+                         "total": sum(by.values())})
+        rows.sort(key=lambda r: (not r["shared"], -r["total"], r["brand"].lower()))
+        return {"available": True, "cohorts": names,
+                "shared": sum(1 for r in rows if r["shared"]),
+                "rows": rows[:MAX_ROWS]}
+
+    def seeding_waves(self, window_days: int = 14) -> dict[str, Any]:
+        """Brands that arrive in a *wave* — ≥3 labeled accounts first mentioning
+        the brand within ``window_days`` of each other. Organic brands trickle;
+        seeded ones cascade.
+        """
+        if not self.multi_cohort or not self.roster:
+            return {"available": False, "rows": []}
+        span = window_days * 86400
+        waves: list[dict[str, Any]] = []
+        for brand, seen in self._labeled_first_seen().items():
+            if len(seen) < 3:
+                continue
+            pts = sorted(seen.items(), key=lambda x: x[1])
+            best: dict[str, Any] | None = None
+            for i in range(len(pts)):
+                j = i
+                while j + 1 < len(pts) and pts[j + 1][1] - pts[i][1] <= span:
+                    j += 1
+                if j - i + 1 >= 3 and (best is None or j - i + 1 > best["n"]):
+                    best = {"n": j - i + 1, "start": pts[i][1], "end": pts[j][1],
+                            "accounts": [a for a, _ in pts[i:j + 1]]}
+            if best:
+                best.update(brand=brand, total=len(pts),
+                            cohorts=sorted({self.cohorts[a] for a in best["accounts"]
+                                            if a in self.cohorts}))
+                waves.append(best)
+        waves.sort(key=lambda w: -w["n"])
+        return {"available": True, "window_days": window_days,
+                "rows": waves[:MAX_ROWS]}
+
+    def coordination_raster(self, top_brands: int = 12) -> dict[str, Any]:
+        """The coordination raster: one row per labeled account (y), time (x),
+        a dot each time an account *first* pushes one of the top brands, dot
+        colour = brand. A coordinated push shows as a vertical band — many
+        accounts, one colour, one narrow window. Limited to the widest-spread
+        brands so the colour legend stays legible.
+        """
+        if not self.multi_cohort or not self.roster:
+            return {"available": False, "accounts": [], "brands": [], "events": []}
+        first = self._labeled_first_seen()          # {brand: {account: first ts}}
+        ranked = sorted(((b, a) for b, a in first.items() if len(a) >= 3),
+                        key=lambda kv: -len(kv[1]))
+        brands = [b for b, _ in ranked[:top_brands]]
+        if not brands:
+            return {"available": False, "accounts": [], "brands": [], "events": []}
+        acct_first: dict[str, int] = {}
+        for b in brands:
+            for a, ts in first[b].items():
+                acct_first[a] = min(acct_first.get(a, ts), ts)
+        # order accounts by cohort, then by when they first appear (so the
+        # earliest pushers sit together and bands read top-to-bottom)
+        accounts = sorted(acct_first, key=lambda a: (
+            self._cohort_rank.get(self.cohorts.get(a, ""), 99), acct_first[a]))
+        aidx = {a: i for i, a in enumerate(accounts)}
+        bidx = {b: i for i, b in enumerate(brands)}
+        events = [{"a": aidx[a], "b": bidx[b], "ts": ts}
+                  for b in brands for a, ts in first[b].items()]
+        return {"available": True,
+                "accounts": [{"name": a, "cohort": self.cohorts.get(a, "")}
+                             for a in accounts],
+                "brands": brands, "events": events}
+
+    def cohort_timeline(self) -> dict[str, Any]:
+        """Monthly post+comment volume per cohort — the activity lifecycle."""
+        if not self.multi_cohort:
+            return {"available": False, "cohorts": [], "months": [], "series": {}}
+        names = self._cohort_names()
+        series: dict[str, Counter[str]] = {c: Counter() for c in names}
+        with closing(self._conn()) as con:
+            for r in con.execute(
+                "SELECT author_username u, created_utc ts FROM post "
+                "UNION ALL SELECT author_username, created_utc FROM comment"):
+                c = self.cohorts.get(r["u"])
+                if c and r["ts"]:
+                    ym = _dt.datetime.fromtimestamp(
+                        r["ts"], _dt.UTC).strftime("%Y-%m")
+                    series[c][ym] += 1
+        months = sorted({m for s in series.values() for m in s})
+        return {"available": True, "cohorts": names, "months": months,
+                "series": {c: [series[c].get(m, 0) for m in months]
+                           for c in names}}
+
+    def cohort_bridges(self) -> dict[str, Any]:
+        """Cross-cohort links: pairs of labeled accounts in *different* cohorts
+        that comment in the same threads — the accounts stitching two operations
+        together. Plus the subreddits both cohorts work.
+        """
+        if not self.multi_cohort:
+            return {"available": False, "edges": [], "shared_subs": []}
+        labeled = sorted(self.cohorts)
+        ph = ",".join("?" * len(labeled))
+        edges: list[dict[str, Any]] = []
+        with closing(self._conn()) as con:
+            for r in con.execute(
+                f"""WITH ut AS (SELECT DISTINCT author_username u, link_id t
+                               FROM comment WHERE author_username IN ({ph}))
+                    SELECT a.u ua, b.u ub, count(*) n
+                    FROM ut a JOIN ut b ON a.t = b.t AND a.u < b.u
+                    GROUP BY ua, ub""", labeled):
+                ca, cb = self.cohorts.get(r["ua"]), self.cohorts.get(r["ub"])
+                if ca != cb:
+                    edges.append({"a": r["ua"], "b": r["ub"],
+                                  "coh_a": ca, "coh_b": cb, "shared": r["n"]})
+            edges.sort(key=lambda e: -e["shared"])
+            # subreddits where >1 cohort is active
+            sub_coh: dict[str, dict[str, int]] = {}
+            for r in con.execute(
+                f"SELECT DISTINCT u, sub FROM ({_ACTIVITY}) WHERE u IN ({ph})",
+                labeled):
+                c = self.cohorts.get(r["u"])
+                if c:
+                    sub_coh.setdefault(r["sub"], {})[c] = \
+                        sub_coh.setdefault(r["sub"], {}).get(c, 0) + 1
+        shared_subs: list[dict[str, Any]] = [
+            {"sub": s, "by": d} for s, d in sub_coh.items() if len(d) > 1]
+        shared_subs.sort(key=lambda r: -min(r["by"].values()))
+        return {"available": True, "cohorts": self._cohort_names(),
+                "edges": edges[:MAX_ROWS], "shared_subs": shared_subs[:MAX_ROWS]}
+
+    def domain_catalogue(self) -> dict[str, Any]:
+        """Outbound domains each cohort links to — the products it pushes, by
+        cohort. Domains from post URLs and from links in text.
+        """
+        if not self.multi_cohort:
+            return {"available": False, "cohorts": [], "rows": []}
+        names = self._cohort_names()
+        labeled = set(self.cohorts)
+        dom: dict[str, dict[str, set[str]]] = {}
+        with closing(self._conn()) as con:
+            rows = con.execute(
+                "SELECT author_username u, coalesce(url,'') || ' ' || "
+                "coalesce(selftext,'') t FROM post "
+                "UNION ALL SELECT author_username, coalesce(body,'') FROM comment"
+            ).fetchall()
+        for r in rows:
+            c = self.cohorts.get(r["u"])
+            if r["u"] not in labeled or not c:
+                continue
+            for m in _DOMAIN_RE.finditer(r["t"]):
+                d = m.group(1).lower()
+                if d in _SKIP_DOMAINS:
+                    continue
+                dom.setdefault(d, {n: set() for n in names})[c].add(r["u"])
+        rows_out: list[dict[str, Any]] = []
+        for d, by in dom.items():
+            counts = {c: len(by[c]) for c in names}
+            if sum(counts.values()) >= 2:
+                rows_out.append({"domain": d, "by": counts,
+                                 "total": sum(counts.values())})
+        rows_out.sort(key=lambda r: -r["total"])
+        return {"available": True, "cohorts": names, "rows": rows_out[:MAX_ROWS]}
 
     def subreddits(self) -> dict[str, Any]:
         """Shared-subreddit footprint: subs where ≥2 accounts are active.
@@ -1004,6 +1240,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.net.listening())
             elif u.path == "/api/suggested-coordinated":
                 self._json(self.net.suggested_coordinated())
+            elif u.path == "/api/cohort-comparison":
+                self._json(self.net.cohort_comparison())
+            elif u.path == "/api/cohort-timeline":
+                self._json(self.net.cohort_timeline())
+            elif u.path == "/api/cohort-bridges":
+                self._json(self.net.cohort_bridges())
+            elif u.path == "/api/cohort-domains":
+                self._json(self.net.domain_catalogue())
+            elif u.path == "/api/seeding-waves":
+                self._json(self.net.seeding_waves())
+            elif u.path == "/api/coordination-raster":
+                self._json(self.net.coordination_raster())
             elif u.path == "/api/profile":
                 self._json(self.net.profile(one("u")))
             elif u.path == "/api/ai-profile":
@@ -1192,6 +1440,10 @@ _PAGE = r"""<!doctype html>
   #accounts th { cursor: pointer; user-select: none; }
   .u { color: var(--accent); cursor: pointer; }
   .bar { height: 3px; background: var(--accent); margin-top: 3px; }
+  .cchip { display:inline-block; width:9px; height:9px; border-radius:2px;
+    margin-right:5px; vertical-align:baseline; }
+  .legendrow { margin-top:8px; display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--muted); }
+  #timeline svg rect { shape-rendering: crispEdges; }
   .wrap { overflow-x: auto; }
   /* matrices — account columns, dot/heat cells */
   .matrix th.acct { writing-mode: vertical-rl; transform: rotate(180deg);
@@ -1245,6 +1497,10 @@ _PAGE = r"""<!doctype html>
                  background: rgba($ACCENT_RGB,.15);
                  border: 1px solid rgba($ACCENT_RGB,.36); border-radius: 4px;
                  padding: 0 5px; vertical-align: 1px; }
+  .tag.seed { color: #ff8ba0; background: rgba(255,59,92,.16); border-color: rgba(255,59,92,.4); }
+  .tag.camo { color: #7fe6d8; background: rgba(45,212,191,.14); border-color: rgba(45,212,191,.38); }
+  .scatter svg { width: 100%; height: auto; }
+  .scatter .lg { font: 11px var(--mono); fill: var(--muted); }
   /* share-of-voice / topics: accent fill vs muted-grey reference remainder */
   .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
             align-items: center; margin: .12rem 0; cursor: pointer;
@@ -1302,6 +1558,7 @@ _PAGE = r"""<!doctype html>
     <a href="#/network" data-page="network">Network</a>
     <a href="#/topics" data-page="topics">Topics</a>
     <a href="#/brands" data-page="brands">Brands</a>
+    <a href="#/cohorts" data-page="cohorts">Cohorts</a>
     <a href="#/footprint" data-page="footprint">Footprint</a>
   </nav>
 
@@ -1334,6 +1591,17 @@ _PAGE = r"""<!doctype html>
   </div>
 
   <div class="page" data-page="brands">
+    <section class="card scatter" id="scatter-section" hidden>
+      <h2>Seeded vs. camouflage</h2>
+      <p class="sub">One dot per brand. <b>Right</b> = more of the network pushes it.
+        <b>Up</b> = more real (independent) users talk about it. So a dot low on
+        the floor is one <span style="color:#ff8ba0">the network manufactured</span>
+        — plenty of network accounts, almost no real discussion. Dots that ride
+        high are popular brands the network just
+        <span style="color:#7fe6d8">name-drops for cover</span>.</p>
+      <div id="scatter"></div>
+    </section>
+
     <section class="card" id="sov-section" hidden>
       <h2>Share of voice <span class="count" id="sov-count"></span></h2>
       <p class="sub">Per brand, how much came from the
@@ -1358,8 +1626,55 @@ _PAGE = r"""<!doctype html>
     </details>
   </div>
 
+  <div class="page" data-page="cohorts">
+    <section class="card" id="raster-section" hidden>
+      <h2>Coordination raster</h2>
+      <p class="sub">One row per account, time along the x-axis, a dot each time an
+        account <b>first</b> pushes a brand (colour = brand). A coordinated push is
+        a <b>vertical band</b> — many accounts naming the same brand in the same
+        few days. Hover a dot for the account and brand.</p>
+      <div id="raster"></div>
+    </section>
+
+    <section class="card" id="cmp-section" hidden>
+      <h2>Brands by cohort <span class="count" id="cmp-count"></span></h2>
+      <p class="sub">Which cohort pushes each brand — <b>shared</b> brands (two or
+        more cohorts) first. Distinct catalogues that nonetheless overlap are the
+        sign of linked operations.</p>
+      <div class="wrap"><table id="cmp" class="plain"></table></div>
+    </section>
+
+    <section class="card" id="wave-section" hidden>
+      <h2>Seeding waves <span class="count" id="wave-count"></span></h2>
+      <p class="sub">Brands that arrive in a burst — ≥3 accounts first mentioning
+        them within days. Organic brands trickle in; seeded ones cascade.</p>
+      <div class="wrap"><table id="waves" class="plain"></table></div>
+    </section>
+
+    <section class="card" id="timeline-section" hidden>
+      <h2>Volume by cohort, over time</h2>
+      <p class="sub">Monthly posts + comments per cohort — when each operation was
+        active.</p>
+      <div id="timeline"></div>
+    </section>
+
+    <section class="card" id="bridge-section" hidden>
+      <h2>Cross-cohort bridge accounts <span class="count" id="bridge-count"></span></h2>
+      <p class="sub">Accounts from <i>different</i> cohorts co-active in the same
+        threads — the links between operations. Click a name for its profile.</p>
+      <div id="bridge-arc"></div>
+      <div class="wrap"><table id="bridges" class="plain"></table></div>
+    </section>
+
+    <section class="card" id="cdom-section" hidden>
+      <h2>Outbound domains by cohort <span class="count" id="cdom-count"></span></h2>
+      <p class="sub">The sites each cohort links to — its product catalogue.</p>
+      <div class="wrap"><table id="cdom" class="plain"></table></div>
+    </section>
+  </div>
+
   <div class="page" data-page="footprint">
-    <details class="card">
+    <details class="card" open>
       <summary><h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2></summary>
       <p class="sub">Subreddits where ≥2 accounts are active — where the network
         overlaps. Dot area ~ that account's posts + comments there; click a dot to
@@ -1367,7 +1682,7 @@ _PAGE = r"""<!doctype html>
       <div class="wrap" id="subreddits"></div>
     </details>
 
-    <details class="card">
+    <details class="card" open>
       <summary><h2>Co-commented threads <span class="count" id="thread-count"></span></h2></summary>
       <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
         co-activity signal. Dot area ~ comments in the thread; click a dot to
@@ -1691,6 +2006,7 @@ async function loadShareOfVoice(){
   // the strongest coordination signal, so it leads the list (was hidden before).
   const rows = r.rows.slice().sort((a, b) =>
     b.coord_pct - a.coord_pct || b.total - a.total);
+  renderScatter(rows.filter(b => b.baseline));
   $('#sov-section').hidden = false;
   $('#sov-count').textContent = topOf(r.total, rows.length);
   const authorList = (label, us) => us.length
@@ -1702,8 +2018,10 @@ async function loadShareOfVoice(){
     (b.total ? 100 * b.coordinated / b.total : 0).toFixed(1)) + '%';
   $('#sov').innerHTML = rows.map((b, i) =>
     `<div class="sovrow" data-i="${i}">
-       <div class="lbl">${esc(b.term)}${b.baseline ? ''
-         : ' <span class="tag">network-only</span>'}</div>
+       <div class="lbl">${esc(b.term)}${
+         b.verdict === 'seeded' ? ' <span class="tag seed">seeded</span>'
+         : b.verdict === 'camouflage' ? ' <span class="tag camo">camouflage</span>'
+         : b.baseline ? '' : ' <span class="tag">network-only</span>'}</div>
        <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
          <div class="c" style="width:${b.coord_pct}%"></div>
          <div class="o" style="width:${100-b.coord_pct}%"></div></div>
@@ -2001,8 +2319,246 @@ function renderAiSection(u){
   };
 }
 
+// ---- inline SVG helpers (no libs) ----
+const svgEsc = s => esc(s);
+
+// Seeded/camouflage quadrant: x = network accounts (sqrt), y = organic authors.
+function renderScatter(rows){
+  // Only the classified brands tell the story; the unlabelled majority is noise.
+  const pts = rows.filter(b => b.verdict);
+  if(pts.length < 2){ $('#scatter-section').hidden = true; return; }
+  const seed = pts.filter(b => b.verdict === 'seeded');
+  const camo = pts.filter(b => b.verdict === 'camouflage');
+  const W = 940, H = 320, ml = 52, mr = 18, mt = 22, mb = 48;
+  const iw = W - ml - mr, ih = H - mt - mb;
+  const maxX = Math.max(4, ...pts.map(b => b.coord_authors));
+  // cap Y at the 85th percentile so one very popular brand can't squash the rest
+  const ys = pts.map(b => b.organic_authors).sort((a, b) => a - b);
+  const capY = Math.max(10, ys[Math.floor(ys.length * 0.85)] || 10);
+  const X = n => ml + Math.sqrt(n) / Math.sqrt(maxX) * iw;
+  const Y = n => mt + ih - Math.min(n, capY) / capY * ih;
+  const SEED = 'var(--accent)', CAMO = '#2dd4bf';
+  let s = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
+  // seeded zone: bottom band (≤2 independent authors)
+  const bandTop = Y(2);
+  s += `<rect x="${ml}" y="${bandTop.toFixed(0)}" width="${iw}" height="${(mt+ih-bandTop).toFixed(0)}" fill="rgba(255,59,92,.07)"/>`;
+  s += `<text class="lg" x="${W-mr-6}" y="${(mt+ih-8).toFixed(0)}" text-anchor="end" fill="#a84a58">◂ seeded: network talks, ~no one else</text>`;
+  s += `<text class="lg" x="${W-mr-6}" y="${(mt+12).toFixed(0)}" text-anchor="end" fill="#3f8f83">camouflage: real discussion ▴</text>`;
+  // y grid + labels
+  const stepY = Math.max(1, Math.ceil(capY / 4));
+  for(let g = 0; g <= capY; g += stepY)
+    s += `<line x1="${ml}" y1="${Y(g).toFixed(0)}" x2="${W-mr}" y2="${Y(g).toFixed(0)}" stroke="#171c25"/>`
+       + `<text class="lg" x="${ml-8}" y="${(Y(g)+3).toFixed(0)}" text-anchor="end">${g}</text>`;
+  // x ticks
+  [...new Set([1, Math.round(maxX/4), Math.round(maxX/2), maxX])].forEach(v => {
+    if(v > 0) s += `<text class="lg" x="${X(v).toFixed(0)}" y="${(mt+ih+18).toFixed(0)}" text-anchor="middle">${v}</text>`;
+  });
+  s += `<text class="lg" x="${ml}" y="${H-6}">network accounts pushing it →</text>`;
+  // dots — camouflage first, seeded on top; clipped (very-organic) dots dimmed
+  [...camo, ...seed].forEach(b => {
+    const c = b.verdict === 'seeded' ? SEED : CAMO;
+    const r = Math.min(13, 4 + Math.sqrt(b.total) / 4);
+    const clipped = b.organic_authors > capY;
+    s += `<circle cx="${X(b.coord_authors).toFixed(1)}" cy="${Y(b.organic_authors).toFixed(1)}" `
+      + `r="${r.toFixed(1)}" fill="${c}" fill-opacity="${clipped ? '.3' : '.62'}" stroke="${c}" stroke-width="1">`
+      + `<title>${svgEsc(b.term)} — ${b.coord_authors} network accounts vs ${b.organic_authors} `
+      + `independent authors (${b.coord_pct}% network)</title></circle>`;
+  });
+  s += '</svg>';
+  const legend = `<div class="legendrow">`
+    + `<span><span class="cchip" style="background:${SEED}"></span>seeded (${seed.length})</span>`
+    + `<span><span class="cchip" style="background:${CAMO}"></span>camouflage (${camo.length})</span>`
+    + `<span style="color:var(--dim)">dot size = total mentions · hover a dot for the brand</span></div>`;
+  $('#scatter-section').hidden = false;
+  $('#scatter').innerHTML = s + legend;
+}
+
+// Bipartite arc diagram of cross-cohort bridge accounts.
+function bridgeArc(edges){
+  const top = edges.slice(0, 20);
+  if(!top.length) return '';
+  const wA = {}, wB = {};
+  top.forEach(e => { wA[e.a]=(wA[e.a]||0)+e.shared; wB[e.b]=(wB[e.b]||0)+e.shared; });
+  const A = Object.keys(wA).sort((x,y)=>wA[y]-wA[x]);
+  const B = Object.keys(wB).sort((x,y)=>wB[y]-wB[x]);
+  const rowh = 26, mt = 24, W = 960, xL = 300, xR = 660;
+  const H = mt + Math.max(A.length, B.length) * rowh + 12;
+  const yA = {}, yB = {};
+  A.forEach((a,i)=>yA[a]=mt+i*rowh); B.forEach((b,i)=>yB[b]=mt+i*rowh);
+  const mx = Math.max(...top.map(e=>e.shared));
+  let s = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
+  for(const e of top){
+    const y1=yA[e.a]+4, y2=yB[e.b]+4, cx=(xL+xR)/2;
+    s += `<path d="M${xL} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${xR} ${y2}" fill="none" `
+      + `stroke="${cohortColor[e.coh_a]||'#a855f7'}" stroke-width="${(0.6+4*e.shared/mx).toFixed(1)}" stroke-opacity="${(0.2+0.6*e.shared/mx).toFixed(2)}"/>`;
+  }
+  A.forEach(a => { s += `<circle cx="${xL}" cy="${yA[a]+4}" r="3.3" fill="${cohortColor[top.find(e=>e.a===a).coh_a]||'#4d8cff'}"/>`
+    + `<text class="lg" x="${xL-8}" y="${yA[a]+8}" text-anchor="end" fill="#cfe0ff">${svgEsc(a.slice(0,22))}</text>`; });
+  B.forEach(b => { s += `<circle cx="${xR}" cy="${yB[b]+4}" r="3.3" fill="${cohortColor[top.find(e=>e.b===b).coh_b]||'#a855f7'}"/>`
+    + `<text class="lg" x="${xR+8}" y="${yB[b]+8}" fill="#e6ccff">${svgEsc(b.slice(0,22))}</text>`; });
+  return s + '</svg>';
+}
+
+// ---- cohort comparison views (only populate with >1 cohort) ----
+// one colour per cohort, cool palette (coordinated keeps the accent red as the
+// semantic "primary operation" marker); reused across every cohort view.
+const COHORT_COLORS = ['var(--accent)', '#4d8cff', '#a855f7', '#f5a524', '#2dd4bf', '#e879f9'];
+let cohortColor = {};
+function assignCohortColors(names){
+  names.forEach((c, i) => { cohortColor[c] = COHORT_COLORS[i % COHORT_COLORS.length]; });
+}
+const cohChip = c =>
+  `<span class="cchip" style="background:${cohortColor[c]||'#555'}"></span>${esc(c)}`;
+
+async function loadCohortComparison(){
+  const r = await getJSON('/api/cohort-comparison');
+  if(!r.available || !r.rows.length) return;
+  assignCohortColors(r.cohorts);
+  $('#cmp-section').hidden = false;
+  $('#cmp-count').textContent = topOf(r.rows.length, r.rows.length) + ` · ${r.shared} shared`;
+  const head = `<tr><th>brand</th>` +
+    r.cohorts.map(c => `<th class="r">${cohChip(c)}</th>`).join('') +
+    `<th class="r">organic</th></tr>`;
+  const body = r.rows.map(b =>
+    `<tr><td>${esc(b.brand)}${b.shared ? ' <span class="tag">shared</span>' : ''}</td>` +
+    r.cohorts.map(c => `<td class="r">${b.by[c] ? fmt(b.by[c]) : '<span class="muted">·</span>'}</td>`).join('') +
+    `<td class="r muted">${fmt(b.organic)}</td></tr>`).join('');
+  $('#cmp').innerHTML = head + body;
+}
+
+async function loadSeedingWaves(){
+  const r = await getJSON('/api/seeding-waves');
+  if(!r.available || !r.rows.length) return;
+  $('#wave-section').hidden = false;
+  $('#wave-count').textContent = topOf(r.rows.length, r.rows.length);
+  $('#waves').innerHTML =
+    `<tr><th>brand</th><th class="r">accounts</th><th class="r">of total</th>` +
+    `<th class="r">span</th><th>cohorts</th></tr>` +
+    r.rows.map(w => {
+      const days = Math.round((w.end - w.start) / 86400);
+      return `<tr><td>${esc(w.brand)}</td><td class="r"><b>${w.n}</b></td>` +
+        `<td class="r muted">${w.total}</td><td class="r">${days}d</td>` +
+        `<td>${w.cohorts.map(cohChip).join(' ')}</td></tr>`;
+    }).join('');
+}
+
+const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const monthLabel = m => `${MON[+m.slice(5,7)-1]} '${m.slice(2,4)}`;  // 2026-04 -> Apr '26
+
+async function loadCohortTimeline(){
+  const r = await getJSON('/api/cohort-timeline');
+  if(!r.available || !r.months.length) return;
+  assignCohortColors(r.cohorts);
+  const tot = r.months.map((_, i) => r.cohorts.reduce((s, c) => s + r.series[c][i], 0));
+  // Focus on the active window: keep the recent months that hold 97% of all
+  // volume (these accounts have years of sparse old history — drop that tail),
+  // and never show more than 30 months so labels stay readable.
+  const V = tot.reduce((a, b) => a + b, 0);
+  let start = 0, acc = 0;
+  for(let i = tot.length - 1; i >= 0; i--){ acc += tot[i]; if(acc >= 0.97 * V){ start = i; break; } }
+  start = Math.max(start, tot.length - 30);
+  const months = r.months.slice(start), totals = tot.slice(start);
+  const max = Math.max(1, ...totals), H = 150, mb = 30, gap = 40;
+  const bw = Math.max(6, Math.min(30, 900 / months.length));
+  const Wd = gap + months.length * bw + 20;
+  let svg = `<svg viewBox="0 0 ${Wd} ${H+mb}" width="100%" font-family="var(--mono,monospace)">`;
+  const every = Math.ceil(months.length / 10);
+  months.forEach((m, i) => {
+    let y = H;
+    const x = gap + i * bw;
+    r.cohorts.forEach(c => {
+      const v = r.series[c][start + i], h = (H - 10) * v / max;
+      if(h > 0){ svg += `<rect x="${x}" y="${y-h}" width="${bw*0.82}" height="${h}" fill="${cohortColor[c]}"/>`; y -= h; }
+    });
+    if(i % every === 0 || i === months.length - 1)
+      svg += `<text x="${x+bw*0.4}" y="${H+16}" text-anchor="middle" fill="#7d8797" font-size="9">${monthLabel(m)}</text>`;
+  });
+  svg += '</svg>';
+  const legend = r.cohorts.map(c => `<span class="cleg">${cohChip(c)}</span>`).join(' ');
+  $('#timeline-section').hidden = false;
+  $('#timeline').innerHTML = svg + `<div class="legendrow">${legend}</div>`;
+}
+
+// The coordination raster: y = account, x = time, dot colour = brand.
+const RASTER_COLORS = ['#ff3b5c','#4d8cff','#2dd4bf','#f5a524','#a855f7','#e879f9',
+  '#22c55e','#fb923c','#38bdf8','#facc15','#f472b6','#94a3b8'];
+async function loadCoordinationRaster(){
+  const r = await getJSON('/api/coordination-raster');
+  if(!r.available || !r.events.length) return;
+  const A = r.accounts.length, B = r.brands;
+  // Focus x on the active window: these accounts have years of sparse old
+  // history, so a few ancient first-mentions would squash everything. Clip the
+  // domain to the 3rd percentile of event times and clamp older dots to the edge.
+  const sorted = r.events.map(e => e.ts).sort((a, b) => a - b);
+  const t0 = sorted[Math.floor(sorted.length * 0.03)], t1 = sorted[sorted.length - 1];
+  const span = Math.max(1, t1 - t0);
+  const ml = 150, mr = 20, mt = 10, mb = 34, rowh = Math.max(4, Math.min(14, 620 / A));
+  const W = 960, iw = W - ml - mr, H = mt + A * rowh + mb;
+  const X = t => ml + (Math.max(t0, Math.min(t, t1)) - t0) / span * iw;
+  const Y = i => mt + i * rowh + rowh / 2;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" font-family="var(--mono,monospace)">`;
+  // cohort row labels down the left (grouped, so we mark cohort boundaries)
+  let lastCoh = null;
+  r.accounts.forEach((a, i) => {
+    if(a.cohort !== lastCoh){
+      svg += `<text x="6" y="${(Y(i)+3).toFixed(0)}" fill="#e8edf5" font-size="10">${esc(a.cohort||'—')}</text>`;
+      svg += `<line x1="${ml}" y1="${(Y(i)-rowh/2).toFixed(0)}" x2="${W-mr}" y2="${(Y(i)-rowh/2).toFixed(0)}" stroke="#1e2430"/>`;
+      lastCoh = a.cohort;
+    }
+  });
+  // month gridlines, labelled sparsely so they stay readable
+  const d0 = new Date(t0*1000), d1 = new Date(t1*1000);
+  const nMonths = (d1.getUTCFullYear()-d0.getUTCFullYear())*12 + d1.getUTCMonth()-d0.getUTCMonth() + 1;
+  const everyM = Math.ceil(nMonths / 12);
+  let mi = 0;
+  for(let d = new Date(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), 1)); d <= d1; d.setUTCMonth(d.getUTCMonth()+1), mi++){
+    const x = X(d.getTime()/1000);
+    svg += `<line x1="${x.toFixed(0)}" y1="${mt}" x2="${x.toFixed(0)}" y2="${H-mb}" stroke="#141922"/>`;
+    if(mi % everyM === 0)
+      svg += `<text x="${x.toFixed(0)}" y="${H-mb+16}" text-anchor="middle" fill="#7d8797" font-size="9">${MON[d.getUTCMonth()]} '${String(d.getUTCFullYear()).slice(2)}</text>`;
+  }
+  // event dots
+  for(const e of r.events)
+    svg += `<circle cx="${X(e.ts).toFixed(1)}" cy="${Y(e.a).toFixed(1)}" r="${Math.min(4,rowh/2).toFixed(1)}" `
+      + `fill="${RASTER_COLORS[e.b % RASTER_COLORS.length]}" fill-opacity=".85"><title>${svgEsc(r.accounts[e.a].name)} → ${svgEsc(B[e.b])}</title></circle>`;
+  svg += '</svg>';
+  const legend = B.map((b, i) =>
+    `<span><span class="cchip" style="background:${RASTER_COLORS[i%RASTER_COLORS.length]}"></span>${esc(b)}</span>`).join(' ');
+  $('#raster-section').hidden = false;
+  $('#raster').innerHTML = svg + `<div class="legendrow">${legend}</div>`;
+}
+
+async function loadCohortBridges(){
+  const r = await getJSON('/api/cohort-bridges');
+  if(!r.available || (!r.edges.length && !r.shared_subs.length)) return;
+  assignCohortColors(r.cohorts);
+  $('#bridge-section').hidden = false;
+  $('#bridge-count').textContent = topOf(r.edges.length, r.edges.length);
+  $('#bridge-arc').innerHTML = bridgeArc(r.edges);
+  const edges = r.edges.map(e =>
+    `<tr><td class="u" onclick="location.hash='#/user/'+encodeURIComponent('${esc(e.a)}')">${esc(e.a)}</td>` +
+    `<td>${cohChip(e.coh_a)}</td>` +
+    `<td class="u" onclick="location.hash='#/user/'+encodeURIComponent('${esc(e.b)}')">${esc(e.b)}</td>` +
+    `<td>${cohChip(e.coh_b)}</td><td class="r"><b>${fmt(e.shared)}</b></td></tr>`).join('');
+  $('#bridges').innerHTML =
+    `<tr><th>account</th><th>cohort</th><th>account</th><th>cohort</th><th class="r">shared threads</th></tr>` + edges;
+}
+
+async function loadCohortDomains(){
+  const r = await getJSON('/api/cohort-domains');
+  if(!r.available || !r.rows.length) return;
+  assignCohortColors(r.cohorts);
+  $('#cdom-section').hidden = false;
+  $('#cdom-count').textContent = topOf(r.rows.length, r.rows.length);
+  $('#cdom').innerHTML =
+    `<tr><th>domain</th>` + r.cohorts.map(c => `<th class="r">${cohChip(c)}</th>`).join('') + `</tr>` +
+    r.rows.map(d => `<tr><td class="mono">${esc(d.domain)}</td>` +
+      r.cohorts.map(c => `<td class="r">${d.by[c] ? fmt(d.by[c]) : '<span class="muted">·</span>'}</td>`).join('') +
+      `</tr>`).join('');
+}
+
 // ---- routing (overview pages <-> profile) ----
-const PAGES = ['network', 'topics', 'brands', 'footprint'];
+const PAGES = ['network', 'topics', 'brands', 'cohorts', 'footprint'];
 const navTab = p => $(`#nav a[data-page="${p}"]`);
 // Hide a page's tab when every section on it is empty (e.g. no tracked topics),
 // so the nav only offers pages that have something to show.
@@ -2021,7 +2577,7 @@ function route(){
   $('#view-overview').hidden = !!m;
   $('#drawer').classList.remove('open');
   if(m){ showProfile(decodeURIComponent(m[1])); return; }
-  const want = (location.hash.match(/^#\/(network|topics|brands|footprint)$/) || [])[1];
+  const want = (location.hash.match(/^#\/(network|topics|brands|cohorts|footprint)$/) || [])[1];
   const page = (want && navTab(want) && !navTab(want).hidden) ? want : firstPage();
   document.querySelectorAll('.page').forEach(
     pg => pg.classList.toggle('active', pg.dataset.page === page));
@@ -2042,7 +2598,9 @@ document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('
     await Promise.all([
       loadAccounts(), loadListening(), loadShareOfVoice(), loadSuspects(),
       loadMentions(accounts),
-      loadSubreddits(accounts), loadThreads(accounts)]);
+      loadSubreddits(accounts), loadThreads(accounts),
+      loadCohortComparison(), loadSeedingWaves(), loadCohortTimeline(),
+      loadCohortBridges(), loadCohortDomains(), loadCoordinationRaster()]);
   } catch (e) { document.body.insertAdjacentHTML('afterbegin',
     `<p class="warn">${esc(e.message)}</p>`); }
   updateNav();
