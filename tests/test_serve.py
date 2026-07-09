@@ -293,6 +293,26 @@ def test_ai_profile_stays_keyless_without_a_key(net, monkeypatch):
         net.ai_profile("alice")
 
 
+def test_parse_ai_profile_coerces_and_defaults():
+    """Pure: a canned raw dict maps to the fixed shape; missing/off-type
+    fields degrade to neutral defaults rather than raising (no LLM, no Store)."""
+    from redlens.network.profiles import parse_ai_profile
+    out = parse_ai_profile(
+        {"persona": "a techie", "promotion": "none",
+         "coordinated": {"verdict": "organic", "confidence": "3", "reason": "r"}},
+        username="alice", model="gpt-x")
+    assert out == {
+        "username": "alice", "model": "gpt-x",
+        "persona": "a techie", "promotion": "none",
+        "coordinated": {"verdict": "organic", "confidence": 3, "reason": "r"},
+    }
+    # a bare/empty reply degrades to neutral defaults, never a KeyError
+    bare = parse_ai_profile({}, username="bob", model="gpt-x")
+    assert bare["persona"] == ""
+    assert bare["coordinated"] == {
+        "verdict": "uncertain", "confidence": 0, "reason": ""}
+
+
 def test_promoted_accounts_join_the_coordinated_cohort(net):
     # carol was unlabeled (organic pool); promoting her folds her into the
     # coordinated cohort so scoping + share-of-voice pick her up, and she's
