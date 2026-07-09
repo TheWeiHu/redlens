@@ -26,7 +26,7 @@ from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.models import MentionGroup, Profile, TopicAnalytics, TopicSummary
-from redlens.reporting import explore
+from redlens.reporting import explore, expose
 from redlens.reporting.page import (
     Renderers,
     Sections,
@@ -340,6 +340,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--title", default="coordinated network", metavar="NAME",
         help="dashboard heading — e.g. the client or brand name "
              "(default: 'coordinated network')")
+    rp = sub.add_parser(
+        "report", help="render the serve dashboard as one self-contained "
+        "static HTML file (shareable, no server)")
+    rp.add_argument(
+        "--brands", metavar="PATH",
+        help="brand-roster CSV (name, match terms…); default: brands.csv "
+             "next to the DB, if present")
+    rp.add_argument(
+        "--cohorts", metavar="PATH",
+        help="cohort-labels CSV (account, cohort); default: cohorts.csv "
+             "next to the DB, if present")
+    rp.add_argument("--promote", action="store_true",
+                    help="count promoted accounts in the cohort (parity with "
+                    "serve --promote)")
+    rp.add_argument("--title", default="coordinated network", metavar="NAME",
+                    help="dashboard heading (default: 'coordinated network')")
+    rp.add_argument("-o", "--out", metavar="PATH",
+                    help="output HTML file (default: ./report.html)")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -639,6 +657,27 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
         raise RedlensError("page: give a topic or pass --all")
 
 
+def _cmd_report(args: argparse.Namespace, db: str | Path) -> int:
+    """Render the serve dashboard as one self-contained static HTML file.
+
+    Resolves the brand/cohort sidecars exactly as ``serve`` does (an explicit
+    path must exist; otherwise the default next to the DB is picked up when
+    present), then hands off to ``expose.render_report`` — thin parse-and-call.
+    """
+    try:
+        brands = serve._sidecar(db, args.brands, "brands.csv")
+        cohorts = serve._sidecar(db, args.cohorts, "cohorts.csv")
+    except FileNotFoundError as e:
+        print(f"file not found: {e}", file=sys.stderr)
+        return 2
+    out = Path(args.out) if args.out else Path("report.html")
+    written = expose.render_report(
+        db, brands=brands, cohorts=cohorts, promote=args.promote,
+        title=args.title, out=out)
+    print(f"wrote {written} ({written.stat().st_size:,} bytes)")
+    return 0
+
+
 def _cmd_sync(args: argparse.Namespace, engine: Engine) -> None:
     r = sync_user(args.username, engine, full=args.full)
     print(f"u/{r.user.username}: "
@@ -823,6 +862,8 @@ def main(argv: list[str] | None = None) -> int:
                                open_browser=not args.no_browser,
                                brands=args.brands, cohorts=args.cohorts,
                                promote=args.promote, title=args.title)
+        if args.verb == "report":
+            return _cmd_report(args, db)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
