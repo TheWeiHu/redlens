@@ -50,8 +50,10 @@ import sys
 import threading
 import webbrowser
 from collections import Counter
+from collections.abc import Callable
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -1199,6 +1201,95 @@ class Network:
 # HTTP handler                                                                 #
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Route table                                                                  #
+#                                                                              #
+# Every ``/api/*`` path maps to a handler ``(net, query) -> payload`` in the   #
+# ``ENDPOINTS`` dict below; ``Handler.do_GET`` parses the URL, looks the path  #
+# up, calls the handler, and JSON-serializes the result. Parameterized routes  #
+# read from ``query`` (parsed ``parse_qs`` dict) via ``_one``; the rest ignore #
+# it, so a future static export can snapshot every parameterless entry by      #
+# iterating ``ENDPOINTS``. A handler returning a ``_Coded`` overrides the 200  #
+# status (used for the "unknown evidence type" 400, whose body differs from    #
+# the generic exception 400).                                                  #
+# --------------------------------------------------------------------------- #
+
+Query = dict[str, list[str]]
+
+
+class _Coded:
+    """A payload paired with a non-200 status a handler wants to force."""
+
+    def __init__(self, payload: Any, code: int) -> None:
+        self.payload = payload
+        self.code = code
+
+
+def _one(q: Query, k: str, d: str = "") -> str:
+    return q.get(k, [d])[0]
+
+
+def _overview(net: Network, q: Query) -> Any:
+    return {"db": net.path, **net.overview()}
+
+
+def _accounts(net: Network, q: Query) -> Any:
+    return {"accounts": net.accounts()}
+
+
+def _profile(net: Network, q: Query) -> Any:
+    return net.profile(_one(q, "u"))
+
+
+def _ai_profile(net: Network, q: Query) -> Any:
+    return net.ai_profile(_one(q, "u"))
+
+
+def _evidence(net: Network, q: Query) -> Any:
+    kind = _one(q, "type")
+    if kind == "pair":
+        return net.pair_evidence(_one(q, "a"), _one(q, "b"))
+    if kind == "sub":
+        return net.account_sub_items(_one(q, "u"), _one(q, "sub"))
+    if kind == "thread":
+        return net.account_thread_items(_one(q, "u"), _one(q, "link"))
+    if kind == "mention":
+        return net.account_term_items(_one(q, "u"), _one(q, "term"))
+    return _Coded({"error": "unknown evidence type"}, 400)
+
+
+def _content(net: Network, q: Query) -> Any:
+    return net.content(
+        _one(q, "u"),
+        _one(q, "kind", "posts"),
+        limit=int(_one(q, "limit", "50") or 50),
+        offset=int(_one(q, "offset", "0") or 0),
+    )
+
+
+ENDPOINTS: dict[str, Callable[[Network, Query], Any]] = {
+    "/api/overview": _overview,
+    "/api/accounts": _accounts,
+    "/api/pairs": lambda net, q: net.pairs(),
+    "/api/mentions": lambda net, q: net.mentions(),
+    "/api/share-of-voice": lambda net, q: net.share_of_voice(),
+    "/api/listening": lambda net, q: net.listening(),
+    "/api/suggested-coordinated": lambda net, q: net.suggested_coordinated(),
+    "/api/cohort-comparison": lambda net, q: net.cohort_comparison(),
+    "/api/cohort-timeline": lambda net, q: net.cohort_timeline(),
+    "/api/cohort-bridges": lambda net, q: net.cohort_bridges(),
+    "/api/cohort-domains": lambda net, q: net.domain_catalogue(),
+    "/api/seeding-waves": lambda net, q: net.seeding_waves(),
+    "/api/coordination-raster": lambda net, q: net.coordination_raster(),
+    "/api/profile": _profile,
+    "/api/ai-profile": _ai_profile,
+    "/api/evidence": _evidence,
+    "/api/subreddits": lambda net, q: net.subreddits(),
+    "/api/threads": lambda net, q: net.threads(),
+    "/api/content": _content,
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     net: Network  # injected on the server
     page_html: str  # the index HTML with the title baked in, injected per-serve
@@ -1218,73 +1309,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         u = urlparse(self.path)
-        q = parse_qs(u.query)
-
-        def one(k: str, d: str = "") -> str:
-            return q.get(k, [d])[0]
-
+        if u.path == "/":
+            self._send(200, self.page_html.encode(), "text/html; charset=utf-8")
+            return
+        handler = ENDPOINTS.get(u.path)
+        if handler is None:
+            self._json({"error": "not found"}, 404)
+            return
         try:
-            if u.path == "/":
-                self._send(200, self.page_html.encode(), "text/html; charset=utf-8")
-            elif u.path == "/api/overview":
-                self._json({"db": self.net.path, **self.net.overview()})
-            elif u.path == "/api/accounts":
-                self._json({"accounts": self.net.accounts()})
-            elif u.path == "/api/pairs":
-                self._json(self.net.pairs())
-            elif u.path == "/api/mentions":
-                self._json(self.net.mentions())
-            elif u.path == "/api/share-of-voice":
-                self._json(self.net.share_of_voice())
-            elif u.path == "/api/listening":
-                self._json(self.net.listening())
-            elif u.path == "/api/suggested-coordinated":
-                self._json(self.net.suggested_coordinated())
-            elif u.path == "/api/cohort-comparison":
-                self._json(self.net.cohort_comparison())
-            elif u.path == "/api/cohort-timeline":
-                self._json(self.net.cohort_timeline())
-            elif u.path == "/api/cohort-bridges":
-                self._json(self.net.cohort_bridges())
-            elif u.path == "/api/cohort-domains":
-                self._json(self.net.domain_catalogue())
-            elif u.path == "/api/seeding-waves":
-                self._json(self.net.seeding_waves())
-            elif u.path == "/api/coordination-raster":
-                self._json(self.net.coordination_raster())
-            elif u.path == "/api/profile":
-                self._json(self.net.profile(one("u")))
-            elif u.path == "/api/ai-profile":
-                self._json(self.net.ai_profile(one("u")))
-            elif u.path == "/api/evidence":
-                kind = one("type")
-                if kind == "pair":
-                    self._json(self.net.pair_evidence(one("a"), one("b")))
-                elif kind == "sub":
-                    self._json(self.net.account_sub_items(one("u"), one("sub")))
-                elif kind == "thread":
-                    self._json(
-                        self.net.account_thread_items(one("u"), one("link")))
-                elif kind == "mention":
-                    self._json(
-                        self.net.account_term_items(one("u"), one("term")))
-                else:
-                    self._json({"error": "unknown evidence type"}, 400)
-            elif u.path == "/api/subreddits":
-                self._json(self.net.subreddits())
-            elif u.path == "/api/threads":
-                self._json(self.net.threads())
-            elif u.path == "/api/content":
-                self._json(self.net.content(
-                    one("u"),
-                    one("kind", "posts"),
-                    limit=int(one("limit", "50") or 50),
-                    offset=int(one("offset", "0") or 0),
-                ))
-            else:
-                self._json({"error": "not found"}, 404)
+            result = handler(self.net, parse_qs(u.query))
         except Exception as e:  # noqa: BLE001
             self._json({"error": str(e)}, 400)
+            return
+        if isinstance(result, _Coded):
+            self._json(result.payload, result.code)
+        else:
+            self._json(result)
 
 
 # --------------------------------------------------------------------------- #
@@ -1357,1265 +1397,19 @@ def serve(db: str | Path, *, host: str = "127.0.0.1", port: int = 8000,
 # --------------------------------------------------------------------------- #
 # Frontend (single self-contained page, no external assets) — styled after    #
 # the redlens report (reporting/style.css): light, one red accent.            #
+#                                                                              #
+# The page ships as ``serve_assets/index.html`` and is loaded once at import   #
+# via importlib.resources (same pattern as reporting/style.css). The single    #
+# accent is injected from ``constants`` so the page can't drift from the       #
+# reports; ``$TITLE`` stays a placeholder, substituted per-serve in serve().   #
 # --------------------------------------------------------------------------- #
 
-_PAGE = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>$TITLE · redlens</title>
-<style>
-  /* Dark, card-based dashboard — the redlens red stays the one brand accent;
-     structure/hierarchy borrowed from the devbrain operator console. */
-  :root {
-    /* surfaces + semantic palette borrowed from the devbrain console — lighter
-       panels lift cards off the background; one saturated color per category. */
-    --bg:#1c1c1e; --panel:#2c2c2e; --panel2:#242426; --hover:#3a3a3c;
-    --line:#38383a; --line2:#2e2e30; --text:#f5f5f7; --muted:#98989d;
-    --accent:$ACCENT; --coord:$ACCENT;         /* coordinated = the brand red */
-    --ok:#30d158; --amber:#ff9f0a; --review:#bf5af2; --radius:10px;
-    --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,monospace;
-  }
-  * { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-         max-width: 1180px; margin: 0 auto; padding: 1.7rem 1.1rem 4rem;
-         background: var(--bg); color: var(--text); line-height: 1.45;
-         font-size: 13.5px; -webkit-font-smoothing: antialiased; }
-  h1 { text-align: center; font-weight: 650; font-size: 1.5rem;
-       letter-spacing: -.01em; margin: .1rem 0 .1rem; }
-  .db { text-align: center; color: var(--muted); font: 11px/1.4 var(--mono);
-        word-break: break-all; margin-bottom: 1.5rem; }
-  /* every section is a card — the main hierarchy device */
-  .card { background: var(--panel); border: 1px solid var(--line);
-          border-radius: var(--radius); padding: 15px 18px; margin: 13px 0; }
-  h2 { margin: 0 0 .2rem; font: 700 11px/1.3 var(--mono);
-       text-transform: uppercase; letter-spacing: .13em; color: var(--muted); }
-  /* primary section headers (direct card children) read brighter + carry an
-     accent tick; collapsed <details> summaries stay muted → clear hierarchy. */
-  .card > h2 { color: var(--text); }
-  .card > h2::before { content: ''; display: inline-block; width: 3px;
-       height: 11px; background: var(--accent); border-radius: 2px;
-       margin-right: 8px; vertical-align: -1px; }
-  h2 .count { color: var(--muted); font-weight: 500; letter-spacing: .05em;
-              font-size: 10.5px; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .muted { color: var(--muted); font-size: .82rem; }
-  .sub { color: var(--muted); font-size: .82rem; margin: .2rem 0 .95rem;
-         line-height: 1.5; }
-  /* stat cards */
-  .stats { display: flex; flex-wrap: wrap; gap: 9px; justify-content: center;
-           margin: 1.1rem 0 .2rem; }
-  .stat { background: var(--panel); border: 1px solid var(--line);
-          border-radius: 12px; padding: 9px 17px; text-align: center;
-          min-width: 76px; }
-  .stat b { display: block; font: 650 1.25rem/1.2 var(--mono); color: var(--text);
-            font-variant-numeric: tabular-nums; }
-  .stat span { font-size: 9.5px; color: var(--muted); text-transform: uppercase;
-               letter-spacing: .07em; }
-  /* page tabs — the overview is split into pages, not one long scroll */
-  .nav { display: flex; justify-content: center; gap: 4px; position: sticky;
-         top: 0; z-index: 5; margin: 1.2rem 0 .3rem; padding: 8px 0;
-         background: rgba(28,28,30,.82); backdrop-filter: saturate(160%) blur(14px);
-         border-bottom: 1px solid var(--line); }
-  .nav a { color: var(--muted); font: 600 11px/1 var(--mono);
-           text-transform: uppercase; letter-spacing: .09em; padding: 8px 14px;
-           border-radius: 8px; }
-  .nav a:hover { color: var(--text); background: var(--panel2);
-                 text-decoration: none; }
-  .nav a.on { color: #fff; background: var(--accent); }
-  .nav a[hidden] { display: none; }
-  .page { display: none; }
-  .page.active { display: block; }
-  table { border-collapse: collapse; width: 100%; font-size: .83rem; }
-  th, td { border-bottom: 1px solid var(--line2); padding: .38rem .55rem;
-           text-align: left; vertical-align: middle; }
-  th { color: var(--muted); font: 600 10px/1 var(--mono); text-transform: uppercase;
-       letter-spacing: .05em; white-space: nowrap; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
-                   white-space: nowrap; font-family: var(--mono); }
-  table.plain tbody tr:nth-child(even) { background: var(--panel2); }
-  table.plain tbody tr:hover { background: var(--hover); }
-  #accounts th { cursor: pointer; user-select: none; }
-  .u { color: var(--accent); cursor: pointer; }
-  .bar { height: 3px; background: var(--accent); margin-top: 3px; }
-  .cchip { display:inline-block; width:9px; height:9px; border-radius:2px;
-    margin-right:5px; vertical-align:baseline; }
-  .legendrow { margin-top:8px; display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--muted); }
-  #timeline svg rect { shape-rendering: crispEdges; }
-  .wrap { overflow-x: auto; }
-  /* matrices — account columns, dot/heat cells */
-  .matrix th.acct { writing-mode: vertical-rl; transform: rotate(180deg);
-                    font: 400 .72rem var(--mono); padding: .2rem .15rem;
-                    border-bottom: none; color: var(--muted); }
-  .matrix td.cell { text-align: center; padding: .1rem; min-width: 1.35rem;
-                    line-height: 1; }
-  .matrix td.lbl { max-width: 24rem; overflow: hidden; text-overflow: ellipsis;
-                   white-space: nowrap; }
-  .matrix tbody tr:hover td { background: var(--hover); }
-  .matrix tbody tr:hover td[style] { filter: brightness(1.28); }
-  .matrix td.click { cursor: pointer; }
-  .matrix td.click:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .dot { display: inline-block; border-radius: 50%; background: var(--accent);
-         vertical-align: middle; }
-  .heat td.cell { height: 1.35rem; }
-  .heat td.diag { background: var(--line2); }
-  /* cohort grouping — one saturated color per cohort */
-  .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
-          padding: 0 8px; font: 600 10.5px/1.7 var(--mono); color: var(--muted);
-          vertical-align: middle; white-space: nowrap; background: var(--panel2); }
-  .pill.hot { border-color: rgba($ACCENT_RGB,.5); color: var(--accent);
-              background: rgba($ACCENT_RGB,.16); }
-  .pill.ok { border-color: rgba(48,209,88,.5); color: var(--ok);
-             background: rgba(48,209,88,.15); }
-  .matrix th.cs, .matrix td.cs { border-left: 2px solid var(--line); }
-  .heat tr.rs td { border-top: 2px solid var(--line); }
-  /* collapsed sections — click a heading to expand */
-  details.card > summary { list-style: none; cursor: pointer; }
-  details.card > summary::-webkit-details-marker { display: none; }
-  summary h2::before { content: '▸ '; }
-  details[open] summary h2::before { content: '▾ '; }
-  /* profile view */
-  .back { font-size: .85rem; color: var(--muted); }
-  .brow { display: grid; grid-template-columns: 15rem 1fr 8rem; gap: .5rem;
-          align-items: center; margin: .15rem 0; cursor: pointer;
-          border-radius: 6px; padding: .1rem .3rem; }
-  .brow:hover { background: var(--hover); }
-  .brow .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-               font-size: .85rem; }
-  .brow .t { background: var(--panel2); height: .9rem; border-radius: 3px; }
-  .brow .f { background: var(--accent); height: 100%; border-radius: 3px; }
-  .brow .v { text-align: right; color: var(--muted); font-size: .8rem;
-             white-space: nowrap; font-variant-numeric: tabular-nums; }
-  /* [deleted]/[removed] suspect row — kept but separated to the bottom, muted */
-  #suspect tr.phantom td { border-top: 2px solid var(--line); color: var(--muted); }
-  #suspect tr.phantom .note { font: 400 10.5px/1.4 var(--mono); color: var(--muted); }
-  /* network-only tag on a 100%-coordinated (no organic baseline) share row */
-  .sovrow .tag { font: 600 8.5px/1.6 var(--mono); text-transform: uppercase;
-                 letter-spacing: .05em; color: var(--accent);
-                 background: rgba($ACCENT_RGB,.15);
-                 border: 1px solid rgba($ACCENT_RGB,.36); border-radius: 4px;
-                 padding: 0 5px; vertical-align: 1px; }
-  .tag.seed { color: #ff8ba0; background: rgba(255,59,92,.16); border-color: rgba(255,59,92,.4); }
-  .tag.camo { color: #7fe6d8; background: rgba(45,212,191,.14); border-color: rgba(45,212,191,.38); }
-  .scatter svg { width: 100%; height: auto; }
-  .scatter .lg { font: 11px var(--mono); fill: var(--muted); }
-  /* share-of-voice / topics: accent fill vs muted-grey reference remainder */
-  .sovrow { display: grid; grid-template-columns: 12rem 1fr 9rem; gap: .5rem;
-            align-items: center; margin: .12rem 0; cursor: pointer;
-            border-radius: 6px; padding: .12rem .3rem; }
-  .sovrow:hover { background: var(--hover); }
-  .sovrow .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-                 font-size: .85rem; }
-  .sovbar { display: flex; height: 1rem; background: var(--panel2);
-            border-radius: 4px; overflow: hidden; }
-  .sovbar .c { background: var(--accent); height: 100%; }  /* coordinated */
-  .sovbar .o { background: #2f6b45; height: 100%; }         /* organic = green */
-  .sovrow .v { text-align: right; color: var(--muted); font-size: .8rem;
-               white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .tabs { display: flex; gap: 4px; margin: .4rem 0 .6rem; }
-  .tab { padding: 3px 11px; border: 1px solid var(--line); border-radius: 7px;
-         cursor: pointer; color: var(--muted); font-size: .85rem;
-         background: var(--panel2); }
-  .tab.active { color: #fff; border-color: var(--accent); background: var(--accent); }
-  /* account drill-down drawer */
-  .drawer { position: fixed; top: 0; right: 0; width: min(680px, 92vw);
-            height: 100vh; background: var(--panel); border-left: 1px solid var(--line);
-            transform: translateX(100%); transition: transform .15s ease;
-            overflow-y: auto; box-shadow: -14px 0 40px rgba(0,0,0,.5); }
-  .drawer.open { transform: translateX(0); }
-  .drawer .dh { position: sticky; top: 0; background: var(--panel);
-                padding: 14px 20px; border-bottom: 1px solid var(--line);
-                display: flex; align-items: center; justify-content: space-between;
-                gap: 12px; }
-  .drawer .dh h3 { margin: 0; font-size: 1rem; font-weight: 600; }
-  .drawer h4 { margin: 1.1rem 0 .3rem; font: 700 10.5px/1 var(--mono);
-               color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
-  .drawer .close { cursor: pointer; color: var(--muted); font-size: 18px;
-                   border: none; background: none; }
-  .drawer .body { padding: 12px 20px 40px; }
-  .item { border-bottom: 1px solid var(--line2); padding: 10px 0; font-size: .85rem; }
-  .item .meta { color: var(--muted); font-size: .8rem; margin-bottom: 3px; }
-  .item .meta b { color: var(--text); }
-  .item .txt { white-space: pre-wrap; word-break: break-word; }
-  .item .title { font-weight: 600; }
-  .pager { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
-  .pager button { background: var(--panel2); color: var(--accent);
-                  border: 1px solid var(--line); border-radius: 7px;
-                  padding: 4px 12px; cursor: pointer; font: inherit; }
-  .pager button:disabled { opacity: .35; cursor: default; }
-  .warn { color: var(--coord); }
-</style>
-</head>
-<body>
-<div id="view-overview">
-  <h1>$TITLE</h1>
-  <div class="db" id="db">…</div>
-  <div class="stats" id="stats"></div>
-
-  <nav class="nav" id="nav">
-    <a href="#/network" data-page="network">Network</a>
-    <a href="#/brands" data-page="brands">Brands</a>
-    <a href="#/cohorts" data-page="cohorts">Cohorts</a>
-    <a href="#/footprint" data-page="footprint">Footprint</a>
-    <a href="#/topics" data-page="topics">Topics</a>
-  </nav>
-
-  <div class="page active" data-page="network">
-    <section class="card">
-      <h2>Network matrix</h2>
-      <p class="sub">Pairwise co-activity — darker = more shared subreddits and
-        threads; click a cell for the evidence. <span id="pairs-note"></span></p>
-      <div class="wrap" id="heat"></div>
-    </section>
-    <section class="card">
-      <h2 id="accounts-h">Accounts <span class="count" id="accounts-note"></span></h2>
-      <p class="sub" id="accounts-sub">Click a name for its full profile.</p>
-      <div class="wrap"><table id="accounts" class="plain"></table></div>
-    </section>
-  </div>
-
-  <div class="page" data-page="topics">
-    <section class="card" id="listening-section" hidden>
-      <h2>Topics <span class="count" id="topics-count"></span></h2>
-      <p class="sub">Brands &amp; keywords we chose to track. Each bar is that
-        topic's share of every post we matched across the tracked set — total
-        <em>public</em> volume (organic + network), not the network's own share.
-        A big bar with few crossings below = a genuinely organic topic the
-        network barely touches. Click one for the accounts active in it.</p>
-      <div id="topics"></div>
-      <h2>Crossings <span class="count" id="crossings-count"></span></h2>
-      <p class="sub">Which accounts show up in which topics — dot size ~
-        mentions. A busy row is one account spanning many topics; click its name
-        for the profile.</p>
-      <div class="wrap"><table id="crossings" class="matrix"></table></div>
-    </section>
-  </div>
-
-  <div class="page" data-page="brands">
-    <section class="card scatter" id="scatter-section" hidden>
-      <h2>Seeded vs. camouflage</h2>
-      <p class="sub">One dot per brand. <b>Right</b> = more of the network pushes it.
-        <b>Up</b> = more real (independent) users talk about it. So a dot low on
-        the floor is one <span style="color:#ff8ba0">the network manufactured</span>
-        — plenty of network accounts, almost no real discussion. Dots that ride
-        high are popular brands the network just
-        <span style="color:#7fe6d8">name-drops for cover</span>.</p>
-      <div id="scatter"></div>
-    </section>
-
-    <section class="card" id="sov-section" hidden>
-      <h2>Share of voice <span class="count" id="sov-count"></span></h2>
-      <p class="sub">Per brand, how much came from the
-        <b style="color:$ACCENT">coordinated network</b> vs
-        <span class="muted">real users</span> — most-dominated first; click a row
-        for the accounts.</p>
-      <div id="sov"></div>
-    </section>
-
-    <section class="card" id="suspect-section" hidden>
-      <h2>Suspected undetected seeders <span class="count" id="suspect-count"></span></h2>
-      <p class="sub">Unlabeled accounts pushing several distinct roster brands —
-        review each from its profile, then add confirmed ones to
-        <code>cohorts.csv</code>.</p>
-      <div class="wrap"><table id="suspect" class="plain"></table></div>
-    </section>
-
-    <details class="card">
-      <summary><h2>Brand mentions <span class="count" id="mention-count"></span></h2></summary>
-      <p class="sub" id="mention-sub"></p>
-      <div class="wrap" id="mentions"></div>
-    </details>
-  </div>
-
-  <div class="page" data-page="cohorts">
-    <section class="card" id="raster-section" hidden>
-      <h2>Coordination raster</h2>
-      <p class="sub">One row per account, time along the x-axis, a dot each time an
-        account <b>first</b> pushes a brand (colour = brand). A coordinated push is
-        a <b>vertical band</b> — many accounts naming the same brand in the same
-        few days. Hover a dot for the account and brand.</p>
-      <div id="raster"></div>
-    </section>
-
-    <section class="card" id="cmp-section" hidden>
-      <h2>Brands by cohort <span class="count" id="cmp-count"></span></h2>
-      <p class="sub">Which cohort pushes each brand — <b>shared</b> brands (two or
-        more cohorts) first. Distinct catalogues that nonetheless overlap are the
-        sign of linked operations.</p>
-      <div class="wrap"><table id="cmp" class="plain"></table></div>
-    </section>
-
-    <section class="card" id="wave-section" hidden>
-      <h2>Seeding waves <span class="count" id="wave-count"></span></h2>
-      <p class="sub">Brands that arrive in a burst — ≥3 accounts first mentioning
-        them within days. Organic brands trickle in; seeded ones cascade.</p>
-      <div class="wrap"><table id="waves" class="plain"></table></div>
-    </section>
-
-    <section class="card" id="timeline-section" hidden>
-      <h2>Volume by cohort, over time</h2>
-      <p class="sub">Monthly posts + comments per cohort — when each operation was
-        active.</p>
-      <div id="timeline"></div>
-    </section>
-
-    <section class="card" id="bridge-section" hidden>
-      <h2>Cross-cohort bridge accounts <span class="count" id="bridge-count"></span></h2>
-      <p class="sub">Accounts from <i>different</i> cohorts co-active in the same
-        threads — the links between operations. Click a name for its profile.</p>
-      <div id="bridge-arc"></div>
-      <div class="wrap"><table id="bridges" class="plain"></table></div>
-    </section>
-
-    <section class="card" id="cdom-section" hidden>
-      <h2>Outbound domains by cohort <span class="count" id="cdom-count"></span></h2>
-      <p class="sub">The sites each cohort links to — its product catalogue.</p>
-      <div class="wrap"><table id="cdom" class="plain"></table></div>
-    </section>
-  </div>
-
-  <div class="page" data-page="footprint">
-    <details class="card" open>
-      <summary><h2>Shared subreddit footprint <span class="count" id="sub-count"></span></h2></summary>
-      <p class="sub">Subreddits where ≥2 accounts are active — where the network
-        overlaps. Dot area ~ that account's posts + comments there; click a dot to
-        read them.</p>
-      <div class="wrap" id="subreddits"></div>
-    </details>
-
-    <details class="card" open>
-      <summary><h2>Co-commented threads <span class="count" id="thread-count"></span></h2></summary>
-      <p class="sub">Threads touched by ≥2 accounts — the strongest cheap
-        co-activity signal. Dot area ~ comments in the thread; click a dot to
-        read them.</p>
-      <div class="wrap" id="threads"></div>
-    </details>
-  </div>
-</div>
-
-<div id="view-profile" hidden>
-  <p><a href="#/" class="back">← network</a></p>
-  <h1 id="p-name"></h1>
-  <div class="db" id="p-link"></div>
-  <div class="stats" id="p-stats"></div>
-  <div id="p-warn"></div>
-
-  <section class="card">
-    <h2>Top subreddits <span class="count" id="p-subs-count"></span></h2>
-    <p class="sub">where this account is active — click a row to read the
-      activity behind it</p>
-    <div id="p-subs"></div>
-  </section>
-
-  <section class="card">
-    <h2>Top co-actors</h2>
-    <p class="sub">the accounts this one shares subreddits and threads with —
-      click a name for its profile, or the shared counts for the evidence</p>
-    <div class="wrap"><table id="p-co" class="plain"></table></div>
-  </section>
-
-  <section class="card">
-    <h2>Brand mentions</h2>
-    <p class="sub">brands &amp; names this account mentions — click a row to read
-      the mentions</p>
-    <div id="p-brands"></div>
-  </section>
-
-  <section class="card">
-    <h2>AI profile</h2>
-    <p class="sub">The LLM reads a sample of this account's posts/comments plus
-      the deterministic network signals above and returns a persona, a
-      promotional-behavior read, and a <b>coordinated?</b> verdict. One call per
-      account per server run; needs an LLM key (<code>redlens setup</code>).</p>
-    <div id="p-ai"></div>
-  </section>
-
-  <section class="card">
-    <h2>Activity</h2>
-    <div class="tabs">
-      <div class="tab active" id="ptab-posts">posts</div>
-      <div class="tab" id="ptab-comments">comments</div>
-    </div>
-    <div id="p-content"></div>
-  </section>
-</div>
-
-<div class="drawer" id="drawer">
-  <div class="dh">
-    <h3 id="d-user"></h3>
-    <button class="close" id="d-close">✕</button>
-  </div>
-  <div class="body" id="d-body"></div>
-</div>
-
-<script>
-const $ = s => document.querySelector(s);
-const fmt = n => (n ?? 0).toLocaleString();
-const esc = s => String(s).replace(/[&<>"]/g,
-  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const day = t => t ? new Date(t*1000).toISOString().slice(0,10) : '—';
-const plural = (n, w) => `${fmt(n)} ${w}${n===1?'':'s'}`;
-
-async function getJSON(url){ const r = await fetch(url); const j = await r.json();
-  if(!r.ok || j.error) throw new Error(j.error || r.statusText); return j; }
-
-// ---- overview ----
-async function loadOverview(){
-  const o = await getJSON('/api/overview');
-  $('#db').textContent = o.db.split('/').pop();   // filename; full path on hover
-  $('#db').title = o.db;
-  const stats = [
-    ['accounts', o.accounts], ['posts', o.posts], ['comments', o.comments],
-    ['subreddits', o.subreddits],
-  ];
-  if(o.brands) stats.push(['brands', o.brands]);
-  if(o.organic_authors) stats.push(['organic authors', o.organic_authors]);
-  // The date range is context, not a headline — fold it into one span-range
-  // card instead of two, so the strip leads with counts.
-  $('#stats').innerHTML = stats
-    .map(([k,v]) => `<div class="stat"><b>${fmt(v)}</b><span>${k}</span></div>`).join('')
-    + (o.cohorts || []).map(c => {
-        const col = c.cohort === 'coordinated' ? 'var(--accent)'
-          : c.cohort === 'organic' ? 'var(--ok)' : 'var(--text)';
-        return `<div class="stat"><b style="color:${col}">${fmt(c.accounts)}</b>`
-          + `<span>${esc(c.cohort)}</span></div>`;
-      }).join('')
-    + (o.promoted ? `<div class="stat"><b style="color:var(--amber)">${fmt(o.promoted)}</b><span>promoted</span></div>` : '')
-    + `<div class="stat"><b>${day(o.first_utc)}–${day(o.last_utc)}</b>`
-    + `<span>date range</span></div>`;
-  // once organic discussion is in the DB the network view is scoped to the
-  // labeled cohort; say so on the Accounts heading.
-  if(o.organic_authors){
-    $('#accounts-note').textContent = `${fmt(o.accounts)} labeled`;
-    $('#accounts-sub').innerHTML = `The curated cohort — ${fmt(o.organic_authors)} `
-      + `organic authors are reachable by drilling a share-of-voice row. `
-      + `Click a name for its profile.`;
-  }
-}
-
-// ---- shared matrix helpers ----
-const userCell = u =>
-  `<a class="u" href="#/user/${encodeURIComponent(u)}">${esc(u)}</a>`;
-let cohortOf = {};  // account -> cohort label (from /api/pairs)
-let cohortsMixed = false;  // >1 distinct cohort — else the pill is pure noise
-// Only tag a cohort when the DB actually has more than one: when every account
-// is 'coordinated', a 'coordinated' pill on every row says nothing.
-const pill = c => (c && cohortsMixed) ?
-  `<span class="pill${c === 'coordinated' ? ' hot' : c === 'organic' ? ' ok' : ''}">${esc(c)}</span>` : '';
-// A cohort boundary between column i-1 and i gets a separator line.
-const boundary = (accounts, i) => i > 0 &&
-  (cohortOf[accounts[i]] || '~') !== (cohortOf[accounts[i-1]] || '~');
-// One vertical account-label header row, shared by every matrix so the same
-// column always means the same account.
-const acctHead = accounts =>
-  accounts.map((u, i) =>
-    `<th class="acct${boundary(accounts, i) ? ' cs' : ''}"` +
-    (cohortOf[u] ? ` title="${esc(cohortOf[u])}"` : '') +
-    `>${userCell(u)}</th>`).join('');
-function dotCell(n, peak, tip, ri, ci, cs){
-  if(!n) return `<td class="cell${cs}"></td>`;
-  const d = (4 + 14 * Math.sqrt(n / peak)).toFixed(1);
-  return `<td class="cell click${cs}" data-r="${ri}" data-c="${ci}" title="${tip}">` +
-         `<span class="dot" style="width:${d}px;height:${d}px"></span></td>`;
-}
-function topOf(total, shown){
-  return total > shown ? `top ${fmt(shown)} of ${fmt(total)}` : `${fmt(total)}`;
-}
-
-// ---- network matrix (account × account heatmap) ----
-async function loadPairs(){
-  const p = await getJSON('/api/pairs');
-  const A = p.accounts;
-  cohortOf = p.cohorts || {};
-  cohortsMixed = new Set(Object.values(cohortOf)).size > 1;
-  const notes = [];
-  if(Object.keys(cohortOf).length) notes.push('Grouped by cohort.');
-  if(p.total_accounts > A.length)
-    notes.push(`Columns: the ${fmt(A.length)} most active of ${fmt(p.total_accounts)} accounts.`);
-  $('#pairs-note').textContent = notes.join(' ');
-  if(A.length < 2){
-    $('#heat').innerHTML = '<p class="muted">Need ≥2 accounts to relate.</p>';
-    return A;
-  }
-  const val = {};
-  p.pairs.forEach(x => { val[x.a+'|'+x.b] = x; });
-  const get = (a,b) => val[a+'|'+b] || val[b+'|'+a] || {subs:0, threads:0};
-  const peak = Math.max(1, ...p.pairs.map(x => x.subs + x.threads));
-  const cell = (a,b,ri,ci) => {
-    const cs = boundary(A, ci) ? ' cs' : '';
-    if(a === b) return `<td class="cell diag${cs}"></td>`;
-    const v = get(a,b), t = v.subs + v.threads;
-    if(!t) return `<td class="cell${cs}"></td>`;
-    const alpha = (.12 + .78 * t / peak).toFixed(2);
-    return `<td class="cell click${cs}" data-r="${ri}" data-c="${ci}" ` +
-           `style="background:rgba($ACCENT_RGB,${alpha})" ` +
-           `title="${esc(a)} × ${esc(b)} — ${plural(v.subs,'shared subreddit')}` +
-           ` · ${plural(v.threads,'co-commented thread')}"></td>`;
-  };
-  $('#heat').innerHTML =
-    `<table class="matrix heat"><thead><tr><th></th>${acctHead(A)}</tr></thead><tbody>` +
-    A.map((a,ri) => `<tr${boundary(A, ri) ? ' class="rs"' : ''}>` +
-               `<td class="lbl">${userCell(a)}${cohortOf[a] ? ' ' + pill(cohortOf[a]) : ''}</td>` +
-               A.map((b,ci) => cell(a,b,ri,ci)).join('') + '</tr>').join('') +
-    '</tbody></table>';
-  $('#heat').querySelectorAll('td.click').forEach(td => td.onclick =
-    () => openPair(A[+td.dataset.r], A[+td.dataset.c]));
-  return A;
-}
-
-// ---- accounts ----
-function sortable(table, rows, cols, render){
-  let sort = cols.find(c => c.def) || cols[0], asc = false;
-  const draw = () => {
-    const data = [...rows].sort((a,b) => {
-      const x=a[sort.key], y=b[sort.key];
-      const c = (x<y?-1:x>y?1:0); return asc ? c : -c;
-    });
-    table.innerHTML =
-      '<thead><tr>' + cols.map(c =>
-        `<th class="${c.num?'num':''}" data-k="${c.key}">${c.label}` +
-        (c.key===sort.key ? (asc?' ▲':' ▼') : '') + '</th>').join('') + '</tr></thead>' +
-      '<tbody>' + data.map(render).join('') + '</tbody>';
-    table.querySelectorAll('th').forEach(th => th.onclick = () => {
-      const k = th.dataset.k;
-      if(sort.key===k) asc=!asc; else { sort=cols.find(c=>c.key===k); asc=false; }
-      draw();
-    });
-  };
-  draw();
-}
-
-async function loadAccounts(){
-  const { accounts } = await getJSON('/api/accounts');
-  const max = Math.max(1, ...accounts.map(a => a.total));
-  const hasCohorts = accounts.some(a => a.cohort);
-  sortable($('#accounts'), accounts, [
-    {key:'username', label:'account'},
-    ...(hasCohorts ? [{key:'cohort', label:'cohort'}] : []),
-    {key:'total', label:'total', num:true, def:true},
-    {key:'posts', label:'posts', num:true},
-    {key:'comments', label:'comments', num:true},
-    {key:'subreddits', label:'subs', num:true},
-    {key:'post_karma', label:'post karma', num:true},
-    {key:'comment_karma', label:'cmt karma', num:true},
-    {key:'first_utc', label:'first'},
-    {key:'last_utc', label:'last'},
-    {key:'top_subreddit', label:'top sub'},
-  ], a => `<tr>
-    <td>${userCell(a.username)}</td>
-    ${hasCohorts ? `<td>${pill(a.cohort)}${a.promoted ? ' <span class="pill">promoted</span>' : ''}</td>` : ''}
-    <td class="num">${fmt(a.total)}<div class="bar" style="width:${100*a.total/max}%"></div></td>
-    <td class="num">${fmt(a.posts)}</td>
-    <td class="num">${fmt(a.comments)}</td>
-    <td class="num">${fmt(a.subreddits)}</td>
-    <td class="num">${a.post_karma==null?'—':fmt(a.post_karma)}</td>
-    <td class="num">${a.comment_karma==null?'—':fmt(a.comment_karma)}</td>
-    <td class="muted">${day(a.first_utc)}</td>
-    <td class="muted">${day(a.last_utc)}</td>
-    <td><a href="https://reddit.com/r/${esc(a.top_subreddit)}" target="_blank">${esc(a.top_subreddit)}</a></td>
-  </tr>`);
-}
-
-// ---- row × account dot matrices (brands, shared subs, threads) ----
-// onCell(row, account) opens the evidence behind a clicked dot.
-function dotMatrix(el, rows, accounts, cols, tipFn, onCell){
-  if(!rows.length) return;
-  const peak = Math.max(1, ...rows.flatMap(
-    r => accounts.map(u => r.cells[u] || 0)));
-  el.innerHTML =
-    `<table class="matrix"><thead><tr>` +
-    cols.map(c => `<th class="${c.num?'num':''}">${c.label}</th>`).join('') +
-    `${acctHead(accounts)}</tr></thead><tbody>` +
-    rows.map((r, ri) =>
-      '<tr>' + cols.map(c => c.cell(r)).join('') +
-      accounts.map((u, ci) =>
-        dotCell(r.cells[u] || 0, peak, tipFn(r, u), ri, ci,
-                boundary(accounts, ci) ? ' cs' : '')).join('') +
-      '</tr>').join('') +
-    '</tbody></table>';
-  el.querySelectorAll('td.click').forEach(td => td.onclick =
-    () => onCell(rows[+td.dataset.r], accounts[+td.dataset.c]));
-}
-
-// ---- topics + crossings (the tracked-topic layer over the network) ----
-async function loadListening(){
-  const r = await getJSON('/api/listening');
-  if(!r.topics.length) return;   // network-only DB (no tracked topics)
-  $('#listening-section').hidden = false;
-  $('#topics-count').textContent = fmt(r.topics.length);
-  const peak = Math.max(1, ...r.topics.map(t => t.matched));
-  $('#topics').innerHTML = r.topics.map((t, i) =>
-    `<div class="sovrow" data-i="${i}">
-       <div class="lbl">${esc(t.name)}</div>
-       <div class="sovbar"><div class="c" style="width:${100 * t.matched / peak}%"></div></div>
-       <div class="v"><b>${t.share}%</b> of ${fmt(t.matched)}</div>
-     </div>`).join('');
-  const byTopic = {};
-  r.crossings.forEach(c => (byTopic[c.topic] = byTopic[c.topic] || []).push(c));
-  $('#topics').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
-    const t = r.topics[+el.dataset.i], cs = byTopic[t.name] || [];
-    openDrawer(`${t.name} · accounts`);
-    $('#d-body').innerHTML = cs.length
-      ? '<p>' + cs.map(c => `${userCell(c.account)} (${fmt(c.n)})`).join(', ') + '</p>'
-      : '<p class="muted">No tracked account appears in this topic.</p>';
-  });
-  // Crossings as an account × topic matrix (reusing the network-matrix look):
-  // one row per account, one column per topic, dot size ~ mentions. Far more
-  // scannable than a flat list — a busy row is an account spanning many topics.
-  const x = $('#crossings');
-  if(!r.crossings.length){
-    x.className = 'plain';
-    x.innerHTML = '<tbody><tr><td class="muted">No account appears in a '
-      + 'tracked topic yet.</td></tr></tbody>';
-    return;
-  }
-  const topicNames = r.topics.map(t => t.name);
-  const total = {};
-  r.crossings.forEach(c => { total[c.account] = (total[c.account] || 0) + c.n; });
-  const accts = Object.keys(total).sort((a, b) => total[b] - total[a]
-    || a.localeCompare(b));
-  const val = {};
-  r.crossings.forEach(c => { val[c.account + '|' + c.topic] = c.n; });
-  const xpeak = Math.max(1, ...r.crossings.map(c => c.n));
-  $('#crossings-count').textContent = topOf(accts.length, accts.length);
-  x.className = 'matrix';
-  x.innerHTML =
-    '<thead><tr><th></th>'
-    + topicNames.map(t => `<th class="acct">${esc(t)}</th>`).join('')
-    + '</tr></thead><tbody>'
-    + accts.map(a => `<tr><td class="lbl">${userCell(a)}</td>`
-        + topicNames.map(t => {
-            const n = val[a + '|' + t] || 0;
-            if(!n) return '<td class="cell"></td>';
-            const d = (5 + 13 * Math.sqrt(n / xpeak)).toFixed(1);
-            return `<td class="cell" title="${esc(a)} × ${esc(t)}: `
-              + `${fmt(n)}"><span class="dot" style="width:${d}px;height:${d}px">`
-              + '</span></td>';
-          }).join('') + '</tr>').join('')
-    + '</tbody>';
-}
-
-// ---- share of voice (coordinated cohort's share of each brand) ----
-async function loadShareOfVoice(){
-  const r = await getJSON('/api/share-of-voice');
-  if(!r.available || !r.rows.length) return;   // no roster/labels, or no data
-  // A bar is only honest for brands whose ORGANIC conversation is in the DB.
-  // The rest would read "100% coordinated" purely because only the seeders
-  // were archived — list them as not-yet-tracked instead.
-  // All brands, most-coordinated first. A brand at 100% is network-exclusive:
-  // the organic pool IS in the DB, yet not one unaffiliated user mentions it —
-  // the strongest coordination signal, so it leads the list (was hidden before).
-  const rows = r.rows.slice().sort((a, b) =>
-    b.coord_pct - a.coord_pct || b.total - a.total);
-  renderScatter(rows.filter(b => b.baseline));
-  $('#sov-section').hidden = false;
-  $('#sov-count').textContent = topOf(r.total, rows.length);
-  const authorList = (label, us) => us.length
-    ? `<h4>${label} (${fmt(us.length)} shown)</h4><p>` +
-      us.map(userCell).join(', ') + '</p>' : '';
-  // one-decimal precision so a brand dwarfed by organic talk (7OH: 0.5%) isn't
-  // rounded away to 0%; trailing .0 dropped so 100% / 95% stay clean integers.
-  const pctLabel = b => parseFloat(
-    (b.total ? 100 * b.coordinated / b.total : 0).toFixed(1)) + '%';
-  $('#sov').innerHTML = rows.map((b, i) =>
-    `<div class="sovrow" data-i="${i}">
-       <div class="lbl">${esc(b.term)}${
-         b.verdict === 'seeded' ? ' <span class="tag seed">seeded</span>'
-         : b.verdict === 'camouflage' ? ' <span class="tag camo">camouflage</span>'
-         : b.baseline ? '' : ' <span class="tag">network-only</span>'}</div>
-       <div class="sovbar" title="${fmt(b.coordinated)} coordinated · ${fmt(b.organic)} organic">
-         <div class="c" style="width:${b.coord_pct}%"></div>
-         <div class="o" style="width:${100-b.coord_pct}%"></div></div>
-       <div class="v"><b>${pctLabel(b)}</b> of ${fmt(b.total)}</div>
-     </div>`).join('');
-  $('#sov').querySelectorAll('.sovrow').forEach(el => el.onclick = () => {
-    const b = rows[+el.dataset.i];
-    openDrawer(`${b.term} · share of voice`);
-    $('#d-body').innerHTML =
-      `<p><b>${pctLabel(b)}</b> of ${plural(b.total, 'mention')} are the `
-      + `coordinated cohort — ${plural(b.coordinated, 'mention')} from `
-      + `${plural(b.coord_authors, 'account')} vs ${plural(b.organic, 'mention')} `
-      + `from ${plural(b.organic_authors, 'organic author')}.</p>`
-      + authorList('Coordinated accounts', b.top_coordinated)
-      + authorList('Top organic authors', b.top_organic);
-  });
-}
-
-// ---- suspected undetected seeders (brand-breadth over the organic pool) ----
-async function loadSuspects(){
-  const r = await getJSON('/api/suggested-coordinated');
-  if(!r.available || !r.rows.length) return;
-  $('#suspect-section').hidden = false;
-  $('#suspect-count').textContent = topOf(r.total, r.rows.length);
-  $('#suspect').innerHTML =
-    '<thead><tr><th>account</th><th class="num">roster brands</th>' +
-    '<th class="num">mentions</th><th>brands pushed</th></tr></thead><tbody>' +
-    r.rows.map(s => `<tr${s.placeholder ? ' class="phantom"' : ''}>
-      <td>${s.placeholder
-        ? `${esc(s.account)} <span class="note">aggregate of many deleted accounts — not one seeder</span>`
-        : userCell(s.account)}</td>
-      <td class="num">${fmt(s.brand_count)}</td>
-      <td class="num">${fmt(s.mentions)}</td>
-      <td class="members">${s.brands.map(esc).join(', ')}</td>
-    </tr>`).join('') + '</tbody>';
-}
-
-let mentionsCache = { source: 'mined', rows: [] };  // reused by profiles
-async function loadMentions(accounts){
-  mentionsCache = await getJSON('/api/mentions');
-  const { source, total, rows } = mentionsCache;
-  $('#mention-sub').textContent = source === 'roster'
-    ? 'Roster brands (brands.csv next to the DB, or --brands), matched ' +
-      'case-insensitively as whole words. Dot area ~ that account’s ' +
-      'posts + comments mentioning the brand; click a dot to read them.'
-    : 'No brand roster found (add brands.csv next to the DB, or --brands) ' +
-      '— falling back to mined proper names: terms capitalized nearly ' +
-      'every time they appear mid-sentence, used by ≥2 accounts. ' +
-      'Click a dot to read the mentions.';
-  $('#mention-count').textContent = rows.length ? topOf(total, rows.length) : '';
-  if(!rows.length){
-    $('#mentions').innerHTML = source === 'roster'
-      ? '<p class="muted">No roster brand is mentioned in this database.</p>'
-      : '<p class="muted">No name is mentioned by ≥2 accounts.</p>';
-    return;
-  }
-  dotMatrix($('#mentions'), rows, accounts, [
-    {label:'brand / name', cell: r => `<td class="lbl">${esc(r.term)}</td>`},
-    {label:'accounts', num:true, cell: r => `<td class="num">${fmt(r.accounts)}</td>`},
-    {label:'mentions', num:true, cell: r => `<td class="num">${fmt(r.uses)}</td>`},
-  ], (r, u) => `${esc(u)} — ${plural(r.cells[u], 'mention')} of ${esc(r.term)}`,
-  (r, u) => openEvidence(`${u} · ${r.term}`,
-    `/api/evidence?type=mention&u=${encodeURIComponent(u)}&term=${encodeURIComponent(r.term)}`,
-    itemsHtml));
-}
-
-async function loadSubreddits(accounts){
-  const { total, rows } = await getJSON('/api/subreddits');
-  $('#sub-count').textContent = rows.length ? topOf(total, rows.length) : '';
-  if(!rows.length){
-    $('#subreddits').innerHTML =
-      '<p class="muted">No subreddit is shared by ≥2 accounts.</p>';
-    return;
-  }
-  dotMatrix($('#subreddits'), rows, accounts, [
-    {label:'subreddit', cell: r => `<td class="lbl">` +
-      `<a href="https://reddit.com/r/${esc(r.subreddit)}" target="_blank">r/${esc(r.subreddit)}</a></td>`},
-    {label:'accounts', num:true, cell: r => `<td class="num">${fmt(r.accounts)}</td>`},
-    {label:'posts', num:true, cell: r => `<td class="num">${fmt(r.posts)}</td>`},
-    {label:'comments', num:true, cell: r => `<td class="num">${fmt(r.comments)}</td>`},
-  ], (r, u) => `${esc(u)} in r/${esc(r.subreddit)} — ` +
-               plural(r.cells[u], 'post/comment'),
-  (r, u) => openEvidence(`${u} · r/${r.subreddit}`,
-    `/api/evidence?type=sub&u=${encodeURIComponent(u)}&sub=${encodeURIComponent(r.subreddit)}`,
-    itemsHtml));
-}
-
-async function loadThreads(accounts){
-  const { total, rows } = await getJSON('/api/threads');
-  $('#thread-count').textContent = rows.length ? topOf(total, rows.length) : '';
-  if(!rows.length){
-    $('#threads').innerHTML =
-      '<p class="muted">No thread is shared by ≥2 accounts.</p>';
-    return;
-  }
-  dotMatrix($('#threads'), rows, accounts, [
-    {label:'thread', cell: t => `<td class="lbl">` +
-      `<a href="https://redd.it/${esc(t.link_id)}" target="_blank" ` +
-      `title="${esc(t.title)}">${esc(t.title) || t.link_id}</a></td>`},
-    {label:'subreddit', cell: t =>
-      `<td><a href="https://reddit.com/r/${esc(t.subreddit)}" target="_blank">r/${esc(t.subreddit)}</a></td>`},
-    {label:'accounts', num:true, cell: t => `<td class="num">${fmt(t.accounts)}</td>`},
-    {label:'comments', num:true, cell: t => `<td class="num">${fmt(t.comments)}</td>`},
-  ], (t, u) => `${esc(u)} — ${plural(t.cells[u], 'comment')} in this thread`,
-  (t, u) => openEvidence(`${u} · in thread`,
-    `/api/evidence?type=thread&u=${encodeURIComponent(u)}&link=${encodeURIComponent(t.link_id)}`,
-    r => (r.title ? `<p class="muted">${esc(r.title)}</p>` : '') + itemsHtml(r)));
-}
-
-// ---- drawer (cell evidence only; accounts open a full profile view) ----
-function openDrawer(title){
-  $('#d-user').textContent = title;
-  $('#drawer').classList.add('open');
-}
-$('#d-close').onclick = () => $('#drawer').classList.remove('open');
-
-// ---- cell evidence ----
-function renderEvidenceItem(it){
-  const head = `<div class="meta">r/${esc(it.subreddit)} · <b>${fmt(it.score)}</b> pts · ${day(it.created_utc)} · ${esc(it.kind)}</div>`;
-  return `<div class="item">${head}
-    ${it.title ? `<div class="title">${esc(it.title)}</div>` : ''}
-    ${it.selftext ? `<div class="txt">${esc(it.selftext)}</div>` : ''}
-    ${it.url ? `<div><a href="${esc(it.url)}" target="_blank">${esc(it.url)}</a></div>` : ''}</div>`;
-}
-const itemsHtml = r =>
-  (r.items.map(renderEvidenceItem).join('') ||
-    '<p class="muted">Nothing here.</p>') +
-  (r.total > r.items.length
-    ? `<p class="muted">first ${fmt(r.items.length)} of ${fmt(r.total)}</p>` : '');
-
-async function openEvidence(title, url, render){
-  openDrawer(title);
-  $('#d-body').innerHTML = '<p class="muted">loading…</p>';
-  try { const r = await getJSON(url); $('#d-body').innerHTML = render(r); }
-  catch(e){ $('#d-body').innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
-}
-
-function openPair(a, b){
-  openEvidence(`${a} × ${b}`,
-    `/api/evidence?type=pair&a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`,
-    r => {
-      const head = `<thead><tr><th></th><th class="num">${esc(a)}</th><th class="num">${esc(b)}</th></tr></thead>`;
-      const subs = r.subs.map(s =>
-        `<tr><td><a href="https://reddit.com/r/${esc(s.subreddit)}" target="_blank">r/${esc(s.subreddit)}</a></td>
-         <td class="num">${fmt(s.a_n)}</td><td class="num">${fmt(s.b_n)}</td></tr>`).join('');
-      const threads = r.threads.map(t =>
-        `<tr><td><a href="https://redd.it/${esc(t.link_id)}" target="_blank">${esc(t.title) || t.link_id}</a>
-         <div class="muted">r/${esc(t.subreddit)}</div></td>
-         <td class="num">${fmt(t.a_n)}</td><td class="num">${fmt(t.b_n)}</td></tr>`).join('');
-      return `<h4>Shared subreddits (${fmt(r.subs.length)})</h4>
-        <p class="muted">posts + comments by each account</p>
-        <table class="plain">${head}<tbody>${subs ||
-          '<tr><td class="muted">none</td></tr>'}</tbody></table>
-        <h4>Co-commented threads (${fmt(r.threads.length)})</h4>
-        <p class="muted">comments by each account</p>
-        <table class="plain">${head}<tbody>${threads ||
-          '<tr><td class="muted">none</td></tr>'}</tbody></table>`;
-    });
-}
-// ---- profile view (#/user/<name>) ----
-const statsHtml = pairs => pairs.map(([k, v]) =>
-  `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
-
-// Clickable label/bar/value rows (the report's bar idiom), folded past
-// `cap` rows — tucked away until asked for.
-function barRows(el, items, onRow, cap = 12){
-  if(!items.length){
-    el.innerHTML = '<p class="muted">nothing here</p>'; return;
-  }
-  const peak = Math.max(1, ...items.map(i => i.n));
-  const draw = all => {
-    const shown = all ? items : items.slice(0, cap);
-    el.innerHTML = shown.map((it, i) =>
-      `<div class="brow" data-i="${i}"><div class="lbl">${it.label}</div>
-       <div class="t"><div class="f" style="width:${(100*it.n/peak).toFixed(0)}%"></div></div>
-       <div class="v">${it.value}</div></div>`).join('') +
-      (all || items.length <= cap ? '' :
-        `<p><span class="u brow-more">show all ${fmt(items.length)} …</span></p>`);
-    el.querySelectorAll('.brow').forEach(d =>
-      d.onclick = () => onRow(items[+d.dataset.i]));
-    const more = el.querySelector('.brow-more');
-    if(more) more.onclick = () => draw(true);
-  };
-  draw(false);
-}
-
-let cur = { user:null, kind:'posts', offset:0, limit:25 };
-function setTab(kind){
-  cur.kind = kind; cur.offset = 0;
-  $('#ptab-posts').classList.toggle('active', kind==='posts');
-  $('#ptab-comments').classList.toggle('active', kind==='comments');
-}
-$('#ptab-posts').onclick = () => { setTab('posts'); loadContent(); };
-$('#ptab-comments').onclick = () => { setTab('comments'); loadContent(); };
-
-function renderItem(kind, it){
-  const head = `<div class="meta">r/${esc(it.subreddit)} · <b>${fmt(it.score)}</b> pts · ${day(it.created_utc)}</div>`;
-  if(kind==='comments')
-    return `<div class="item">${head}<div class="txt">${esc(it.body||'')}</div></div>`;
-  return `<div class="item">${head}
-    <div class="title">${esc(it.title||'(link)')}</div>
-    ${it.selftext ? `<div class="txt">${esc(it.selftext)}</div>` : ''}
-    ${it.url ? `<div><a href="${esc(it.url)}" target="_blank">${esc(it.url)}</a></div>` : ''}</div>`;
-}
-
-async function loadContent(){
-  const q = `/api/content?u=${encodeURIComponent(cur.user)}&kind=${cur.kind}&limit=${cur.limit}&offset=${cur.offset}`;
-  const r = await getJSON(q);
-  const from = r.total ? r.offset+1 : 0, to = Math.min(r.offset+r.limit, r.total);
-  $('#p-content').innerHTML =
-    (r.items.map(it => renderItem(r.kind, it)).join('') ||
-      '<p class="muted">Nothing here.</p>') +
-    `<div class="pager">
-       <button id="pg-prev" ${r.offset<=0?'disabled':''}>‹ prev</button>
-       <button id="pg-next" ${to>=r.total?'disabled':''}>next ›</button>
-       <span class="muted">${from}–${to} of ${fmt(r.total)}</span></div>`;
-  $('#pg-prev').onclick = () => { cur.offset=Math.max(0,cur.offset-cur.limit); loadContent(); };
-  $('#pg-next').onclick = () => { cur.offset+=cur.limit; loadContent(); };
-}
-
-async function showProfile(u){
-  window.scrollTo(0, 0);
-  $('#p-name').textContent = u;
-  $('#p-link').innerHTML =
-    `<a href="https://reddit.com/user/${esc(u)}" target="_blank">reddit.com/user/${esc(u)}</a>`;
-  $('#p-warn').innerHTML = '';
-  ['#p-stats', '#p-subs', '#p-brands'].forEach(s => $(s).innerHTML = '');
-  $('#p-co').innerHTML = '';
-  try {
-    const p = await getJSON('/api/profile?u=' + encodeURIComponent(u));
-    if(p.cohort) $('#p-link').innerHTML += ' · ' + pill(p.cohort);
-    $('#p-stats').innerHTML = statsHtml([
-      ['posts', fmt(p.posts)], ['comments', fmt(p.comments)],
-      ['subreddits', fmt(p.subreddits)],
-      ['post karma', p.post_karma == null ? '—' : fmt(p.post_karma)],
-      ['cmt karma', p.comment_karma == null ? '—' : fmt(p.comment_karma)],
-      ['first seen', day(p.first_utc)], ['last seen', day(p.last_utc)],
-    ]);
-    $('#p-subs-count').textContent =
-      p.subreddits > p.top_subreddits.length
-        ? `top ${fmt(p.top_subreddits.length)} of ${fmt(p.subreddits)}` : '';
-    barRows($('#p-subs'), p.top_subreddits.map(s => ({
-      label: `r/${esc(s.subreddit)}`, n: s.posts + s.comments,
-      value: `${fmt(s.posts)} posts · ${fmt(s.comments)} cmts`,
-      sub: s.subreddit,
-    })), it => openEvidence(`${u} · r/${it.sub}`,
-      `/api/evidence?type=sub&u=${encodeURIComponent(u)}&sub=${encodeURIComponent(it.sub)}`,
-      itemsHtml));
-    const co = p.coactors;
-    $('#p-co').innerHTML = co.length
-      ? '<thead><tr><th>account</th><th class="num">shared subs</th>' +
-        '<th class="num">co-threads</th><th></th></tr></thead><tbody>' +
-        co.map((c, i) => `<tr><td>${userCell(c.account)}</td>
-          <td class="num">${fmt(c.subs)}</td><td class="num">${fmt(c.threads)}</td>
-          <td><span class="u" data-i="${i}">evidence</span></td></tr>`).join('') +
-        '</tbody>'
-      : '<tbody><tr><td class="muted">no co-activity with any other account</td></tr></tbody>';
-    $('#p-co').querySelectorAll('[data-i]').forEach(el =>
-      el.onclick = () => openPair(u, co[+el.dataset.i].account));
-  } catch (e) {
-    $('#p-warn').innerHTML = `<p class="warn">${esc(e.message)}</p>`;
-  }
-  barRows($('#p-brands'), mentionsCache.rows
-    .filter(r => r.cells[u])
-    .map(r => ({label: esc(r.term), n: r.cells[u],
-                value: plural(r.cells[u], 'mention'), term: r.term})),
-    it => openEvidence(`${u} · ${it.term}`,
-      `/api/evidence?type=mention&u=${encodeURIComponent(u)}&term=${encodeURIComponent(it.term)}`,
-      itemsHtml));
-  renderAiSection(u);
-  cur = { user: u, kind: 'posts', offset: 0, limit: 25 };
-  setTab('posts');
-  loadContent();
-}
-
-// ---- AI profile (explicit click = explicit LLM cost) ----
-function renderAiSection(u){
-  $('#p-ai').innerHTML =
-    '<div class="pager"><button id="ai-go">analyze this account</button></div>';
-  $('#ai-go').onclick = async () => {
-    $('#p-ai').innerHTML = '<p class="muted">analyzing…</p>';
-    try {
-      const r = await getJSON('/api/ai-profile?u=' + encodeURIComponent(u));
-      const v = r.coordinated;
-      const hot = v.verdict === 'coordinated';
-      $('#p-ai').innerHTML = `
-        <p><span class="pill${hot ? ' hot' : ''}">${esc(v.verdict)}</span>
-           <b>${fmt(v.confidence)}%</b> — ${esc(v.reason)}</p>
-        <p><b>Persona</b> — ${esc(r.persona)}</p>
-        <p><b>Promotion</b> — ${esc(r.promotion)}</p>
-        <p class="muted">${esc(r.model)} · cached for this server run</p>`;
-    } catch (e) {
-      $('#p-ai').innerHTML = `<p class="muted">${esc(e.message)}</p>`;
-    }
-  };
-}
-
-// ---- inline SVG helpers (no libs) ----
-const svgEsc = s => esc(s);
-
-// Seeded/camouflage quadrant: x = network accounts (sqrt), y = organic authors.
-function renderScatter(rows){
-  // Only the classified brands tell the story; the unlabelled majority is noise.
-  const pts = rows.filter(b => b.verdict);
-  if(pts.length < 2){ $('#scatter-section').hidden = true; return; }
-  const seed = pts.filter(b => b.verdict === 'seeded');
-  const camo = pts.filter(b => b.verdict === 'camouflage');
-  const W = 940, H = 320, ml = 52, mr = 18, mt = 22, mb = 48;
-  const iw = W - ml - mr, ih = H - mt - mb;
-  const maxX = Math.max(4, ...pts.map(b => b.coord_authors));
-  // cap Y at the 85th percentile so one very popular brand can't squash the rest
-  const ys = pts.map(b => b.organic_authors).sort((a, b) => a - b);
-  const capY = Math.max(10, ys[Math.floor(ys.length * 0.85)] || 10);
-  const X = n => ml + Math.sqrt(n) / Math.sqrt(maxX) * iw;
-  const Y = n => mt + ih - Math.min(n, capY) / capY * ih;
-  const SEED = 'var(--accent)', CAMO = '#2dd4bf';
-  let s = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
-  // seeded zone: bottom band (≤2 independent authors)
-  const bandTop = Y(2);
-  s += `<rect x="${ml}" y="${bandTop.toFixed(0)}" width="${iw}" height="${(mt+ih-bandTop).toFixed(0)}" fill="rgba(255,59,92,.07)"/>`;
-  s += `<text class="lg" x="${W-mr-6}" y="${(mt+ih-8).toFixed(0)}" text-anchor="end" fill="#a84a58">◂ seeded: network talks, ~no one else</text>`;
-  s += `<text class="lg" x="${W-mr-6}" y="${(mt+12).toFixed(0)}" text-anchor="end" fill="#3f8f83">camouflage: real discussion ▴</text>`;
-  // y grid + labels
-  const stepY = Math.max(1, Math.ceil(capY / 4));
-  for(let g = 0; g <= capY; g += stepY)
-    s += `<line x1="${ml}" y1="${Y(g).toFixed(0)}" x2="${W-mr}" y2="${Y(g).toFixed(0)}" stroke="#171c25"/>`
-       + `<text class="lg" x="${ml-8}" y="${(Y(g)+3).toFixed(0)}" text-anchor="end">${g}</text>`;
-  // x ticks
-  [...new Set([1, Math.round(maxX/4), Math.round(maxX/2), maxX])].forEach(v => {
-    if(v > 0) s += `<text class="lg" x="${X(v).toFixed(0)}" y="${(mt+ih+18).toFixed(0)}" text-anchor="middle">${v}</text>`;
-  });
-  s += `<text class="lg" x="${ml}" y="${H-6}">network accounts pushing it →</text>`;
-  // dots — camouflage first, seeded on top; clipped (very-organic) dots dimmed
-  [...camo, ...seed].forEach(b => {
-    const c = b.verdict === 'seeded' ? SEED : CAMO;
-    const r = Math.min(13, 4 + Math.sqrt(b.total) / 4);
-    const clipped = b.organic_authors > capY;
-    s += `<circle cx="${X(b.coord_authors).toFixed(1)}" cy="${Y(b.organic_authors).toFixed(1)}" `
-      + `r="${r.toFixed(1)}" fill="${c}" fill-opacity="${clipped ? '.3' : '.62'}" stroke="${c}" stroke-width="1">`
-      + `<title>${svgEsc(b.term)} — ${b.coord_authors} network accounts vs ${b.organic_authors} `
-      + `independent authors (${b.coord_pct}% network)</title></circle>`;
-  });
-  s += '</svg>';
-  const legend = `<div class="legendrow">`
-    + `<span><span class="cchip" style="background:${SEED}"></span>seeded (${seed.length})</span>`
-    + `<span><span class="cchip" style="background:${CAMO}"></span>camouflage (${camo.length})</span>`
-    + `<span style="color:var(--dim)">dot size = total mentions · hover a dot for the brand</span></div>`;
-  $('#scatter-section').hidden = false;
-  $('#scatter').innerHTML = s + legend;
-}
-
-// Bipartite arc diagram of cross-cohort bridge accounts.
-function bridgeArc(edges){
-  const top = edges.slice(0, 20);
-  if(!top.length) return '';
-  const wA = {}, wB = {};
-  top.forEach(e => { wA[e.a]=(wA[e.a]||0)+e.shared; wB[e.b]=(wB[e.b]||0)+e.shared; });
-  const A = Object.keys(wA).sort((x,y)=>wA[y]-wA[x]);
-  const B = Object.keys(wB).sort((x,y)=>wB[y]-wB[x]);
-  const rowh = 26, mt = 24, W = 960, xL = 300, xR = 660;
-  const H = mt + Math.max(A.length, B.length) * rowh + 12;
-  const yA = {}, yB = {};
-  A.forEach((a,i)=>yA[a]=mt+i*rowh); B.forEach((b,i)=>yB[b]=mt+i*rowh);
-  const mx = Math.max(...top.map(e=>e.shared));
-  let s = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
-  for(const e of top){
-    const y1=yA[e.a]+4, y2=yB[e.b]+4, cx=(xL+xR)/2;
-    s += `<path d="M${xL} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${xR} ${y2}" fill="none" `
-      + `stroke="${cohortColor[e.coh_a]||'#a855f7'}" stroke-width="${(0.6+4*e.shared/mx).toFixed(1)}" stroke-opacity="${(0.2+0.6*e.shared/mx).toFixed(2)}"/>`;
-  }
-  A.forEach(a => { s += `<circle cx="${xL}" cy="${yA[a]+4}" r="3.3" fill="${cohortColor[top.find(e=>e.a===a).coh_a]||'#4d8cff'}"/>`
-    + `<text class="lg" x="${xL-8}" y="${yA[a]+8}" text-anchor="end" fill="#cfe0ff">${svgEsc(a.slice(0,22))}</text>`; });
-  B.forEach(b => { s += `<circle cx="${xR}" cy="${yB[b]+4}" r="3.3" fill="${cohortColor[top.find(e=>e.b===b).coh_b]||'#a855f7'}"/>`
-    + `<text class="lg" x="${xR+8}" y="${yB[b]+8}" fill="#e6ccff">${svgEsc(b.slice(0,22))}</text>`; });
-  return s + '</svg>';
-}
-
-// ---- cohort comparison views (only populate with >1 cohort) ----
-// one colour per cohort, cool palette (coordinated keeps the accent red as the
-// semantic "primary operation" marker); reused across every cohort view.
-const COHORT_COLORS = ['var(--accent)', '#4d8cff', '#a855f7', '#f5a524', '#2dd4bf', '#e879f9'];
-let cohortColor = {};
-function assignCohortColors(names){
-  names.forEach((c, i) => { cohortColor[c] = COHORT_COLORS[i % COHORT_COLORS.length]; });
-}
-const cohChip = c =>
-  `<span class="cchip" style="background:${cohortColor[c]||'#555'}"></span>${esc(c)}`;
-
-async function loadCohortComparison(){
-  const r = await getJSON('/api/cohort-comparison');
-  if(!r.available || !r.rows.length) return;
-  assignCohortColors(r.cohorts);
-  $('#cmp-section').hidden = false;
-  $('#cmp-count').textContent = topOf(r.rows.length, r.rows.length) + ` · ${r.shared} shared`;
-  const head = `<tr><th>brand</th>` +
-    r.cohorts.map(c => `<th class="r">${cohChip(c)}</th>`).join('') +
-    `<th class="r">organic</th></tr>`;
-  const body = r.rows.map(b =>
-    `<tr><td>${esc(b.brand)}${b.shared ? ' <span class="tag">shared</span>' : ''}</td>` +
-    r.cohorts.map(c => `<td class="r">${b.by[c] ? fmt(b.by[c]) : '<span class="muted">·</span>'}</td>`).join('') +
-    `<td class="r muted">${fmt(b.organic)}</td></tr>`).join('');
-  $('#cmp').innerHTML = head + body;
-}
-
-async function loadSeedingWaves(){
-  const r = await getJSON('/api/seeding-waves');
-  if(!r.available || !r.rows.length) return;
-  $('#wave-section').hidden = false;
-  $('#wave-count').textContent = topOf(r.rows.length, r.rows.length);
-  $('#waves').innerHTML =
-    `<tr><th>brand</th><th class="r">accounts</th><th class="r">of total</th>` +
-    `<th class="r">span</th><th>cohorts</th></tr>` +
-    r.rows.map(w => {
-      const days = Math.round((w.end - w.start) / 86400);
-      return `<tr><td>${esc(w.brand)}</td><td class="r"><b>${w.n}</b></td>` +
-        `<td class="r muted">${w.total}</td><td class="r">${days}d</td>` +
-        `<td>${w.cohorts.map(cohChip).join(' ')}</td></tr>`;
-    }).join('');
-}
-
-const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-const monthLabel = m => `${MON[+m.slice(5,7)-1]} '${m.slice(2,4)}`;  // 2026-04 -> Apr '26
-
-async function loadCohortTimeline(){
-  const r = await getJSON('/api/cohort-timeline');
-  if(!r.available || !r.months.length) return;
-  assignCohortColors(r.cohorts);
-  const tot = r.months.map((_, i) => r.cohorts.reduce((s, c) => s + r.series[c][i], 0));
-  // Focus on the active window: keep the recent months that hold 97% of all
-  // volume (these accounts have years of sparse old history — drop that tail),
-  // and never show more than 30 months so labels stay readable.
-  const V = tot.reduce((a, b) => a + b, 0);
-  let start = 0, acc = 0;
-  for(let i = tot.length - 1; i >= 0; i--){ acc += tot[i]; if(acc >= 0.97 * V){ start = i; break; } }
-  start = Math.max(start, tot.length - 30);
-  const months = r.months.slice(start), totals = tot.slice(start);
-  const max = Math.max(1, ...totals), H = 150, mb = 30, gap = 40;
-  const bw = Math.max(6, Math.min(30, 900 / months.length));
-  const Wd = gap + months.length * bw + 20;
-  let svg = `<svg viewBox="0 0 ${Wd} ${H+mb}" width="100%" font-family="var(--mono,monospace)">`;
-  const every = Math.ceil(months.length / 10);
-  months.forEach((m, i) => {
-    let y = H;
-    const x = gap + i * bw;
-    r.cohorts.forEach(c => {
-      const v = r.series[c][start + i], h = (H - 10) * v / max;
-      if(h > 0){ svg += `<rect x="${x}" y="${y-h}" width="${bw*0.82}" height="${h}" fill="${cohortColor[c]}"/>`; y -= h; }
-    });
-    if(i % every === 0 || i === months.length - 1)
-      svg += `<text x="${x+bw*0.4}" y="${H+16}" text-anchor="middle" fill="#7d8797" font-size="9">${monthLabel(m)}</text>`;
-  });
-  svg += '</svg>';
-  const legend = r.cohorts.map(c => `<span class="cleg">${cohChip(c)}</span>`).join(' ');
-  $('#timeline-section').hidden = false;
-  $('#timeline').innerHTML = svg + `<div class="legendrow">${legend}</div>`;
-}
-
-// The coordination raster: y = account, x = time, dot colour = brand.
-const RASTER_COLORS = ['#ff3b5c','#4d8cff','#2dd4bf','#f5a524','#a855f7','#e879f9',
-  '#22c55e','#fb923c','#38bdf8','#facc15','#f472b6','#94a3b8'];
-async function loadCoordinationRaster(){
-  const r = await getJSON('/api/coordination-raster');
-  if(!r.available || !r.events.length) return;
-  const A = r.accounts.length, B = r.brands;
-  // Focus x on the active window: these accounts have years of sparse old
-  // history, so a few ancient first-mentions would squash everything. Clip the
-  // domain to the 3rd percentile of event times and clamp older dots to the edge.
-  const sorted = r.events.map(e => e.ts).sort((a, b) => a - b);
-  const t0 = sorted[Math.floor(sorted.length * 0.03)], t1 = sorted[sorted.length - 1];
-  const span = Math.max(1, t1 - t0);
-  const ml = 150, mr = 20, mt = 10, mb = 34, rowh = Math.max(4, Math.min(14, 620 / A));
-  const W = 960, iw = W - ml - mr, H = mt + A * rowh + mb;
-  const X = t => ml + (Math.max(t0, Math.min(t, t1)) - t0) / span * iw;
-  const Y = i => mt + i * rowh + rowh / 2;
-  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" font-family="var(--mono,monospace)">`;
-  // cohort row labels down the left (grouped, so we mark cohort boundaries)
-  let lastCoh = null;
-  r.accounts.forEach((a, i) => {
-    if(a.cohort !== lastCoh){
-      svg += `<text x="6" y="${(Y(i)+3).toFixed(0)}" fill="#e8edf5" font-size="10">${esc(a.cohort||'—')}</text>`;
-      svg += `<line x1="${ml}" y1="${(Y(i)-rowh/2).toFixed(0)}" x2="${W-mr}" y2="${(Y(i)-rowh/2).toFixed(0)}" stroke="#1e2430"/>`;
-      lastCoh = a.cohort;
-    }
-  });
-  // month gridlines, labelled sparsely so they stay readable
-  const d0 = new Date(t0*1000), d1 = new Date(t1*1000);
-  const nMonths = (d1.getUTCFullYear()-d0.getUTCFullYear())*12 + d1.getUTCMonth()-d0.getUTCMonth() + 1;
-  const everyM = Math.ceil(nMonths / 12);
-  let mi = 0;
-  for(let d = new Date(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), 1)); d <= d1; d.setUTCMonth(d.getUTCMonth()+1), mi++){
-    const x = X(d.getTime()/1000);
-    svg += `<line x1="${x.toFixed(0)}" y1="${mt}" x2="${x.toFixed(0)}" y2="${H-mb}" stroke="#141922"/>`;
-    if(mi % everyM === 0)
-      svg += `<text x="${x.toFixed(0)}" y="${H-mb+16}" text-anchor="middle" fill="#7d8797" font-size="9">${MON[d.getUTCMonth()]} '${String(d.getUTCFullYear()).slice(2)}</text>`;
-  }
-  // event dots
-  for(const e of r.events)
-    svg += `<circle cx="${X(e.ts).toFixed(1)}" cy="${Y(e.a).toFixed(1)}" r="${Math.min(4,rowh/2).toFixed(1)}" `
-      + `fill="${RASTER_COLORS[e.b % RASTER_COLORS.length]}" fill-opacity=".85"><title>${svgEsc(r.accounts[e.a].name)} → ${svgEsc(B[e.b])}</title></circle>`;
-  svg += '</svg>';
-  const legend = B.map((b, i) =>
-    `<span><span class="cchip" style="background:${RASTER_COLORS[i%RASTER_COLORS.length]}"></span>${esc(b)}</span>`).join(' ');
-  $('#raster-section').hidden = false;
-  $('#raster').innerHTML = svg + `<div class="legendrow">${legend}</div>`;
-}
-
-async function loadCohortBridges(){
-  const r = await getJSON('/api/cohort-bridges');
-  if(!r.available || (!r.edges.length && !r.shared_subs.length)) return;
-  assignCohortColors(r.cohorts);
-  $('#bridge-section').hidden = false;
-  $('#bridge-count').textContent = topOf(r.edges.length, r.edges.length);
-  $('#bridge-arc').innerHTML = bridgeArc(r.edges);
-  const edges = r.edges.map(e =>
-    `<tr><td class="u" onclick="location.hash='#/user/'+encodeURIComponent('${esc(e.a)}')">${esc(e.a)}</td>` +
-    `<td>${cohChip(e.coh_a)}</td>` +
-    `<td class="u" onclick="location.hash='#/user/'+encodeURIComponent('${esc(e.b)}')">${esc(e.b)}</td>` +
-    `<td>${cohChip(e.coh_b)}</td><td class="r"><b>${fmt(e.shared)}</b></td></tr>`).join('');
-  $('#bridges').innerHTML =
-    `<tr><th>account</th><th>cohort</th><th>account</th><th>cohort</th><th class="r">shared threads</th></tr>` + edges;
-}
-
-async function loadCohortDomains(){
-  const r = await getJSON('/api/cohort-domains');
-  if(!r.available || !r.rows.length) return;
-  assignCohortColors(r.cohorts);
-  $('#cdom-section').hidden = false;
-  $('#cdom-count').textContent = topOf(r.rows.length, r.rows.length);
-  $('#cdom').innerHTML =
-    `<tr><th>domain</th>` + r.cohorts.map(c => `<th class="r">${cohChip(c)}</th>`).join('') + `</tr>` +
-    r.rows.map(d => `<tr><td class="mono">${esc(d.domain)}</td>` +
-      r.cohorts.map(c => `<td class="r">${d.by[c] ? fmt(d.by[c]) : '<span class="muted">·</span>'}</td>`).join('') +
-      `</tr>`).join('');
-}
-
-// ---- routing (overview pages <-> profile) ----
-const PAGES = ['network', 'topics', 'brands', 'cohorts', 'footprint'];
-const navTab = p => $(`#nav a[data-page="${p}"]`);
-// Hide a page's tab when every section on it is empty (e.g. no tracked topics),
-// so the nav only offers pages that have something to show.
-function updateNav(){
-  document.querySelectorAll('.page').forEach(pg => {
-    const has = [...pg.children].some(c => !c.hidden);
-    const tab = navTab(pg.dataset.page);
-    if(tab) tab.hidden = !has;
-  });
-  route();
-}
-const firstPage = () => PAGES.find(p => navTab(p) && !navTab(p).hidden) || 'network';
-function route(){
-  const m = location.hash.match(/^#\/user\/(.+)$/);
-  $('#view-profile').hidden = !m;
-  $('#view-overview').hidden = !!m;
-  $('#drawer').classList.remove('open');
-  if(m){ showProfile(decodeURIComponent(m[1])); return; }
-  const want = (location.hash.match(/^#\/(network|topics|brands|cohorts|footprint)$/) || [])[1];
-  const page = (want && navTab(want) && !navTab(want).hidden) ? want : firstPage();
-  document.querySelectorAll('.page').forEach(
-    pg => pg.classList.toggle('active', pg.dataset.page === page));
-  document.querySelectorAll('#nav a').forEach(
-    a => a.classList.toggle('on', a.dataset.page === page));
-}
-window.addEventListener('hashchange', route);
-document.onkeydown = e => { if(e.key==='Escape') $('#drawer').classList.remove('open'); };
-
-// ---- boot ----
-(async () => {
-  $('#heat').innerHTML = '<p class="muted">loading…</p>';
-  try {
-    // Overview and pairs don't depend on each other — run them together so the
-    // stats strip and the (slower) co-activity matrix don't paint in series.
-    // pairs sets the account column order every other matrix reuses.
-    const [, accounts] = await Promise.all([loadOverview(), loadPairs()]);
-    await Promise.all([
-      loadAccounts(), loadListening(), loadShareOfVoice(), loadSuspects(),
-      loadMentions(accounts),
-      loadSubreddits(accounts), loadThreads(accounts),
-      loadCohortComparison(), loadSeedingWaves(), loadCohortTimeline(),
-      loadCohortBridges(), loadCohortDomains(), loadCoordinationRaster()]);
-  } catch (e) { document.body.insertAdjacentHTML('afterbegin',
-    `<p class="warn">${esc(e.message)}</p>`); }
-  updateNav();
-})();
-</script>
-</body>
-</html>
-"""
-
-# The page carries the same single accent as every redlens report; injected
-# from constants so the two can't drift.
+# ``$ACCENT_RGB`` before ``$ACCENT`` — the former is a prefix of the latter.
 _ACCENT_RGB = ",".join(
     str(int(constants.ACCENT[i:i + 2], 16)) for i in (1, 3, 5))
-INDEX_HTML = _PAGE.replace("$ACCENT_RGB", _ACCENT_RGB).replace(
-    "$ACCENT", constants.ACCENT)
+INDEX_HTML = (
+    files("redlens.serve_assets").joinpath("index.html")
+    .read_text(encoding="utf-8")
+    .replace("$ACCENT_RGB", _ACCENT_RGB)
+    .replace("$ACCENT", constants.ACCENT)
+)

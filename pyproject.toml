@@ -48,6 +48,7 @@ exclude = ["tests*"]
 [tool.setuptools.package-data]
 redlens = ["data/*.txt", "prompts/*.txt"]
 "redlens.reporting" = ["*.css"]
+"redlens.serve_assets" = ["*.html"]
 
 [tool.ruff]
 line-length = 100
