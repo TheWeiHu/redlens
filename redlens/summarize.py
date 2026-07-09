@@ -22,7 +22,7 @@ import hashlib
 import json
 from collections import Counter, defaultdict
 from datetime import date, timedelta
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import ValidationError
 from sqlalchemy import func
@@ -60,6 +60,106 @@ def _engagement_score(post: Post) -> int:
     return max(post.score, 0) + constants.COMMENT_WEIGHT * post.num_comments
 
 
+def parse_profile(data: dict[str, Any], *, username: str, model: str,
+                  depth: str) -> Profile:
+    """Validate one raw profile-completion dict into a :class:`Profile`.
+
+    Pure (no LLM call): stamps the caller-supplied metadata and defers the shape
+    check to pydantic, re-raising a mismatch as :class:`RedlensError`."""
+    try:
+        return Profile.model_validate(
+            {"username": username, "model": model, "depth": depth, **data})
+    except ValidationError as exc:
+        raise RedlensError(
+            f"LLM profile didn't match the expected shape: {exc}") from exc
+
+
+def parse_topic_summary(data: dict[str, Any], *, topic: str, model: str,
+                        depth: str) -> TopicSummary:
+    """Validate one raw topic-summary completion dict into a
+    :class:`TopicSummary`. Pure counterpart of :func:`parse_profile`."""
+    try:
+        return TopicSummary.model_validate(
+            {"topic": topic, "model": model, "depth": depth, **data})
+    except ValidationError as exc:
+        raise RedlensError(
+            f"LLM topic summary didn't match the expected shape: {exc}") from exc
+
+
+def parse_day_scores(data: dict[str, Any],
+                     active_days: set[str]) -> dict[str, float]:
+    """Map day -> normalized sentiment mean in [-1, 1] from one parsed reply.
+
+    Pure: takes each ``{"day", "score"}`` row, keeps only days that are real
+    activity (``active_days``), coerces the -100..+100 score to [-1, 1], and
+    silently drops anything malformed (keep-when-unsure)."""
+    rows = data.get("days")
+    scores: dict[str, float] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        dy = str(row.get("day", ""))
+        val = row.get("score")
+        if (dy in active_days and isinstance(val, (int, float))
+                and not isinstance(val, bool)):
+            scores[dy] = max(-1.0, min(1.0, float(val) / 100.0))
+    return scores
+
+
+def parse_theme_labels(data: dict[str, Any],
+                       themes: list[list[str]]) -> list[str]:
+    """One label per input theme, in order, from a parsed ``{"labels": [...]}``.
+
+    Pure: any label the model skipped, blanked, or returned as a non-string
+    falls back to that theme's joined keywords, so the result stays aligned to
+    ``themes`` and non-empty."""
+    given = data.get("labels")
+    given = given if isinstance(given, list) else []
+    out: list[str] = []
+    for i, words in enumerate(themes):
+        label = given[i].strip() if i < len(given) and isinstance(given[i], str) else ""
+        out.append(label or ", ".join(words[:4]))
+    return out
+
+
+def parse_labeled_terms(data: dict[str, Any], *,
+                        terms_key: str) -> list[tuple[str, list[str]]]:
+    """(name, terms) pairs from a brands/complaints/use-cases reply.
+
+    Pure: ``brands.txt`` returns ``{"brands": [...]}`` and
+    complaints/use_cases ``{"categories": [...]}`` — accept whichever list the
+    object carries. Drops blank names, defaults an empty term list to
+    ``[name]`` so every group is countable, and merges near-duplicate names
+    (whitespace + case folded) so they don't render as two bars."""
+    # brands.txt returns {"brands": [...]}; complaints/use_cases return
+    # {"categories": [...]} — accept whichever list the object carries.
+    rows = data.get("categories")
+    if not isinstance(rows, list):
+        rows = data.get("brands")
+    out: list[tuple[str, list[str]]] = []
+    seen: dict[str, int] = {}   # normalized name -> index in out (first wins)
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("name", "")).strip()
+        if not label:
+            continue
+        raw_terms = row.get(terms_key)
+        terms = [str(t).strip() for t in raw_terms
+                 if isinstance(t, str) and str(t).strip()
+                 ] if isinstance(raw_terms, list) else []
+        # Merge near-duplicate model output ("ExpressVPN" / "Express VPN") so it
+        # doesn't render as two near-identical bars; whitespace + case folded.
+        norm = "".join(label.split()).casefold()
+        if norm in seen:
+            kept = out[seen[norm]][1]
+            kept.extend(t for t in (terms or [label]) if t not in kept)
+            continue
+        seen[norm] = len(out)
+        out.append((label, terms or [label]))
+    return out
+
+
 def summarize_user(session: Session, username: str, *,
                    depth: str | None = None) -> Profile:
     """Infer a profile for ``username`` from their archived activity.
@@ -81,13 +181,8 @@ def summarize_user(session: Session, username: str, *,
     key = require_llm_key()
     prompt = _build_prompt(session, canon, resolved_depth)
     data = llm.complete_json(prompt, key)
-    try:
-        return Profile.model_validate(
-            {"username": canon, "model": llm.model_name(),
-             "depth": resolved_depth, **data})
-    except ValidationError as exc:
-        raise RedlensError(
-            f"LLM profile didn't match the expected shape: {exc}") from exc
+    return parse_profile(data, username=canon, model=llm.model_name(),
+                         depth=resolved_depth)
 
 
 def summarize_topic(session: Session, name: str, *,
@@ -115,13 +210,8 @@ def summarize_topic(session: Session, name: str, *,
     key = require_llm_key()
     prompt = _build_topic_prompt(session, topic, resolved_depth)
     data = llm.complete_json(prompt, key)
-    try:
-        summary = TopicSummary.model_validate(
-            {"topic": topic.name, "model": llm.model_name(),
-             "depth": resolved_depth, **data})
-    except ValidationError as exc:
-        raise RedlensError(
-            f"LLM topic summary didn't match the expected shape: {exc}") from exc
+    summary = parse_topic_summary(data, topic=topic.name, model=llm.model_name(),
+                                  depth=resolved_depth)
     cache.put(session, topic.id, "summary", resolved_depth, version,
               summary.model_dump_json(), summary.model)
     return summary
@@ -207,17 +297,7 @@ def daily_topic_sentiment(session: Session, name: str,
         keywords=", ".join(topic.keyword_list) or topic.name,
         days="\n\n".join(blocks))
     data = llm.complete_json(prompt, key)
-
-    rows = data.get("days")
-    scores: dict[str, float] = {}
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        dy = str(row.get("day", ""))
-        val = row.get("score")
-        if (dy in active_days and isinstance(val, (int, float))
-                and not isinstance(val, bool)):
-            scores[dy] = max(-1.0, min(1.0, float(val) / 100.0))
+    scores = parse_day_scores(data, active_days)
 
     # mean is None for any day the model didn't score (or a true gap): distinct
     # from a real 0.0 neutral, so the chart skips it instead of inventing one.
@@ -264,12 +344,7 @@ def label_themes(topic: str, themes: list[list[str]], *,
                        for i, words in enumerate(themes))
     prompt = prompts.render("theme_labels", topic=topic, themes=listed)
     data = llm.complete_json(prompt, key)
-    given = data.get("labels")
-    given = given if isinstance(given, list) else []
-    out: list[str] = []
-    for i, words in enumerate(themes):
-        label = given[i].strip() if i < len(given) and isinstance(given[i], str) else ""
-        out.append(label or ", ".join(words[:4]))
+    out = parse_theme_labels(data, themes)
     if session is not None and topic_id is not None:
         cache.put(session, topic_id, "themes", "", version,
                   json.dumps(out), llm.model_name())
@@ -365,33 +440,7 @@ def _extract_labeled_terms(
     prompt = prompts.render(prompt_name, topic=topic.name, about=about_line,
                             sample="\n".join(lines))
     data = llm.complete_json(prompt, key)
-
-    # brands.txt returns {"brands": [...]}; complaints/use_cases return
-    # {"categories": [...]} — accept whichever list the object carries.
-    rows = data.get("categories")
-    if not isinstance(rows, list):
-        rows = data.get("brands")
-    out: list[tuple[str, list[str]]] = []
-    seen: dict[str, int] = {}   # normalized name -> index in out (first wins)
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        label = str(row.get("name", "")).strip()
-        if not label:
-            continue
-        raw_terms = row.get(terms_key)
-        terms = [str(t).strip() for t in raw_terms
-                 if isinstance(t, str) and str(t).strip()
-                 ] if isinstance(raw_terms, list) else []
-        # Merge near-duplicate model output ("ExpressVPN" / "Express VPN") so it
-        # doesn't render as two near-identical bars; whitespace + case folded.
-        norm = "".join(label.split()).casefold()
-        if norm in seen:
-            kept = out[seen[norm]][1]
-            kept.extend(t for t in (terms or [label]) if t not in kept)
-            continue
-        seen[norm] = len(out)
-        out.append((label, terms or [label]))
+    out = parse_labeled_terms(data, terms_key=terms_key)
     # The cache payload stays a (name, terms) pair list — the shape older rows
     # already hold — so the read path above keeps working across versions.
     cache.put(session, topic.id, prompt_name, "", version,

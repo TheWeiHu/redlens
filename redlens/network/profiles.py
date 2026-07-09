@@ -157,18 +157,17 @@ def _ai_prompt(store: Store, username: str) -> str:
     )
 
 
-def ai_profile(store: Store, username: str) -> dict[str, Any]:
-    """LLM persona + promotional-behavior read + ``coordinated?`` verdict
-    for one account, cached per server run. Raises ``MissingKey`` when no
-    LLM key is configured (the report stays fully keyless without it)."""
-    if username in store._ai_cache:
-        return store._ai_cache[username]
-    key = config.require_llm_key()
-    data = llm.complete_json(_ai_prompt(store, username), key)
+def parse_ai_profile(data: dict[str, Any], *, username: str,
+                     model: str) -> dict[str, Any]:
+    """Coerce one raw coordination-completion dict into the fixed AI-profile
+    shape (persona / promotion / ``coordinated`` verdict).
+
+    Pure (no LLM call): every field is defensively defaulted so a missing or
+    off-type key degrades to a neutral value rather than raising."""
     verdict = data.get("coordinated") or {}
-    out = {
+    return {
         "username": username,
-        "model": llm.model_name(),
+        "model": model,
         "persona": str(data.get("persona", "")),
         "promotion": str(data.get("promotion", "")),
         "coordinated": {
@@ -177,6 +176,17 @@ def ai_profile(store: Store, username: str) -> dict[str, Any]:
             "reason": str(verdict.get("reason", "")),
         },
     }
+
+
+def ai_profile(store: Store, username: str) -> dict[str, Any]:
+    """LLM persona + promotional-behavior read + ``coordinated?`` verdict
+    for one account, cached per server run. Raises ``MissingKey`` when no
+    LLM key is configured (the report stays fully keyless without it)."""
+    if username in store._ai_cache:
+        return store._ai_cache[username]
+    key = config.require_llm_key()
+    data = llm.complete_json(_ai_prompt(store, username), key)
+    out = parse_ai_profile(data, username=username, model=llm.model_name())
     store._ai_cache[username] = out
     return out
 
