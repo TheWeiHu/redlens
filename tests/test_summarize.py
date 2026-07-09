@@ -623,3 +623,72 @@ def test_extract_categories_parses_complaints(topic_db, monkeypatch):
     assert cats[0].terms == ["too expensive", "price hike"]
     assert cats[1].terms == ["Outages"]
     assert "PROBLEMS" in seen["prompt"]   # the complaints prompt was used
+
+
+# --- Pure parse_* units (no LLM, no DB): feed a canned raw dict, assert output.
+
+def test_parse_profile_stamps_metadata_and_validates():
+    from redlens.summarize import parse_profile
+    prof = parse_profile(
+        {"interests": "cycling", "tone": "wry"},
+        username="Alice", model="gpt-x", depth="standard")
+    assert prof.username == "Alice"
+    assert prof.model == "gpt-x"
+    assert prof.depth == "standard"
+    assert prof.interests == "cycling"
+
+
+def test_parse_profile_bad_shape_raises_redlens_error():
+    from redlens.summarize import parse_profile
+    with pytest.raises(RedlensError, match="didn't match the expected shape"):
+        parse_profile({"big_five": "not-a-dict"},
+                      username="Alice", model="gpt-x", depth="standard")
+
+
+def test_parse_topic_summary_stamps_metadata():
+    from redlens.summarize import parse_topic_summary
+    summ = parse_topic_summary(
+        {"overview": "about EVs", "themes": [{"title": "range"}]},
+        topic="cars", model="gpt-x", depth="deep")
+    assert summ.topic == "cars"
+    assert summ.depth == "deep"
+    assert summ.overview == "about EVs"
+    assert summ.themes[0].title == "range"
+
+
+def test_parse_day_scores_normalizes_and_filters():
+    from redlens.summarize import parse_day_scores
+    data = {"days": [
+        {"day": "2026-01-01", "score": 50},     # -> 0.5
+        {"day": "2026-01-02", "score": -200},   # clamped to -1.0
+        {"day": "2026-01-09", "score": 10},     # not an active day -> dropped
+        {"day": "2026-01-03", "score": "bad"},  # non-numeric -> dropped
+        {"day": "2026-01-04", "score": True},   # bool -> dropped
+        "junk",                                  # non-dict -> skipped
+    ]}
+    active = {"2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"}
+    assert parse_day_scores(data, active) == {
+        "2026-01-01": 0.5, "2026-01-02": -1.0}
+
+
+def test_parse_theme_labels_aligns_and_falls_back():
+    from redlens.summarize import parse_theme_labels
+    themes = [["range", "battery"], ["price", "cost"], ["charging"]]
+    data = {"labels": ["Range anxiety", "", 7]}   # blank + non-str fall back
+    assert parse_theme_labels(data, themes) == [
+        "Range anxiety", "price, cost", "charging"]
+
+
+def test_parse_labeled_terms_merges_and_defaults():
+    from redlens.summarize import parse_labeled_terms
+    data = {"brands": [
+        {"name": "AcmeVPN", "aliases": ["Acme VPN"]},
+        {"name": "Acme VPN", "aliases": ["acmevpn.com"]},  # dup -> merged
+        {"name": "Zephyr", "aliases": []},                 # empty -> [name]
+        {"name": "", "aliases": ["ignored"]},              # blank -> dropped
+    ]}
+    out = parse_labeled_terms(data, terms_key="aliases")
+    assert out == [
+        ("AcmeVPN", ["Acme VPN", "acmevpn.com"]),
+        ("Zephyr", ["Zephyr"]),
+    ]
