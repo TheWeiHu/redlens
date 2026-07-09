@@ -27,9 +27,11 @@ keyword set is incremental via ``Topic.newest_seen_utc``.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
+import sys
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -39,7 +41,7 @@ from sqlalchemy import ColumnElement, delete, func, or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
-from redlens import arctic, cache
+from redlens import arctic, cache, discovery
 from redlens.config import llm_api_key
 from redlens.constants import (
     COMMIT_BATCH,
@@ -160,6 +162,79 @@ def search_subreddits(topic: str, limit: int = 15) -> list[SubredditCandidate]:
             )
     ranked = sorted(by_name.values(), key=lambda c: -c.subscribers)
     return ranked[:limit]
+
+
+def default_source_keys() -> list[str]:
+    """The discovery sources that run when no --sources is given and a human
+    accepts the picker defaults — the on-by-default entries of the registry."""
+    return [s.key for s in discovery.SOURCES if s.default]
+
+
+def resolve_source_names(sources_arg: str) -> tuple[list[str], list[str]]:
+    """Split an explicit ``--sources`` string into ``(valid, unknown)`` keys,
+    validated against the :data:`~redlens.discovery.SOURCES` registry and kept in
+    the user's given order. Callers report the unknowns and decide what an empty
+    valid list means (the CLI raises)."""
+    valid = {s.key for s in discovery.SOURCES}
+    chosen: list[str] = []
+    unknown: list[str] = []
+    for tok in (t.strip() for t in sources_arg.split(",")):
+        if not tok:
+            continue
+        (chosen if tok in valid else unknown).append(tok)
+    return chosen, unknown
+
+
+def gather_candidates(
+    terms: list[str],
+    sources: list[str],
+    *,
+    name_search: Callable[[str], list[SubredditCandidate]] = search_subreddits,
+) -> tuple[list[SubredditCandidate], list[str]]:
+    """Run the chosen discovery sources, fanned across all query terms.
+
+    Returns (candidates for the picker, net additions that bypass it —
+    the popular-subreddits cast is all-or-nothing, not row-by-row).
+
+    ``name_search`` is the keyless name matcher (defaults to
+    :func:`search_subreddits`); the CLI injects its own binding so tests can stub
+    the network out.
+    """
+    merged: dict[str, SubredditCandidate] = {}
+
+    def add(candidates: list[SubredditCandidate]) -> None:
+        for c in candidates:
+            existing = merged.get(c.name.lower())
+            if existing:
+                if c.source not in existing.source:
+                    merged[c.name.lower()] = dataclasses.replace(
+                        existing, source=f"{existing.source}+{c.source}")
+            else:
+                merged[c.name.lower()] = c
+
+    if "name" in sources:
+        for term in terms:
+            add(name_search(term))
+    for src in discovery.SOURCES:
+        if src.fetch is None or src.key not in sources:
+            continue
+        names: list[str] = []
+        try:
+            if src.key == "llm":  # one call covers every term
+                names = src.fetch(", ".join(terms))
+            else:
+                for term in terms:
+                    names += src.fetch(term)
+        except RedlensError as exc:
+            print(f"warning: {src.key} discovery failed: {exc}", file=sys.stderr)
+        if not names:
+            print(f"note: {src.key} search found no subreddits", file=sys.stderr)
+        add([SubredditCandidate(name=n, subscribers=0, description="",
+                                over_18=False, source=src.key)
+             for n in names])
+
+    popular = list(discovery.POPULAR_SUBREDDITS) if "popular" in sources else []
+    return list(merged.values()), popular
 
 
 def get_topic(session: Session, name: str) -> Topic | None:

@@ -25,6 +25,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
 from redlens import constants
+from redlens.errors import RedlensError
 from redlens.models import (
     Comment,
     MentionGroup,
@@ -480,6 +481,24 @@ def render_index(results: list[PageResult]) -> str:
             f'<p class="muted">{len(written):,} '
             f'report{"" if len(written) == 1 else "s"}</p>\n{table}\n{skip_note}')
     return _html_shell("tracked topics", body)
+
+
+def check_doc_limit(engine: Engine, name: str, doc_limit: int | None) -> None:
+    """The single-topic render OOM preflight: raise :class:`RedlensError` when
+    ``name``'s posts + comments exceed ``doc_limit`` (the renderer holds the whole
+    topic in RAM). No-op when ``doc_limit`` is falsy. Run before spending any LLM
+    section calls, mirroring the per-topic skip :func:`render_all` does."""
+    if not doc_limit:
+        return
+    with Session(engine) as session:
+        docs = topic_doc_count(session, name)
+    if docs > doc_limit:
+        raise RedlensError(
+            f"topic {name!r} would render {docs:,} posts + "
+            f"comments, over the --limit cap of {doc_limit:,}. The "
+            "renderer holds the whole topic in RAM (a 419 MB box "
+            "OOM-killed at ~182k docs) — raise --limit or pass "
+            "--force to render anyway.")
 
 
 def render_topic_page(engine: Engine, name: str,

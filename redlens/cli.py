@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import os
 import sys
@@ -31,6 +30,7 @@ from redlens.reporting import explore
 from redlens.reporting.page import (
     Renderers,
     Sections,
+    check_doc_limit,
     render_all,
     render_topic_page,
     slug,
@@ -47,28 +47,19 @@ from redlens.summarize import (
 )
 from redlens.topics import (
     SubredditCandidate,
+    default_source_keys,
+    gather_candidates,
     get_topic,
     list_topics,
     pull_topic_comments,
     query_terms,
+    resolve_source_names,
     search_subreddits,
-    topic_doc_count,
     track_topic,
     untrack_topic,
 )
 
 _T = TypeVar("_T")
-
-# Discovery sources for a topic's subreddit net, in display order.
-# (key, label, on by default)
-SOURCES = (
-    ("name", "subreddits whose name matches (keyless, via arctic)", True),
-    ("global", "subreddits with matching posts (keyless, via PullPush)", True),
-    ("web", "web search (DuckDuckGo; may hit bot walls)", False),
-    ("popular", f"cast over the {len(discovery.POPULAR_SUBREDDITS)} most "
-                "popular subreddits", False),
-    ("llm", "LLM suggestions", False),
-)
 
 
 def _ts(s: int | None) -> str:
@@ -166,20 +157,15 @@ def _resolve_sources(sources_arg: str | None, *, assume_yes: bool) -> list[str]:
         return _choose_sources(assume_yes=assume_yes)
     if sources_arg.strip().lower() in ("none", "skip", ""):
         return []
-    valid = {key for key, _, _ in SOURCES}
-    chosen: list[str] = []
-    unknown: list[str] = []
-    for tok in (t.strip() for t in sources_arg.split(",")):
-        if not tok:
-            continue
-        (chosen if tok in valid else unknown).append(tok)
+    valid_keys = ", ".join(s.key for s in discovery.SOURCES)
+    chosen, unknown = resolve_source_names(sources_arg)
     if unknown:
         print(f"warning: ignoring unknown --sources: {', '.join(unknown)} "
-              f"(valid: {', '.join(k for k, _, _ in SOURCES)})", file=sys.stderr)
+              f"(valid: {valid_keys})", file=sys.stderr)
     if not chosen:
         raise RedlensError(
             f"--sources {sources_arg!r} has no valid source "
-            f"(valid: {', '.join(k for k, _, _ in SOURCES)})")
+            f"(valid: {valid_keys})")
     return chosen
 
 
@@ -195,11 +181,11 @@ def _choose_sources(*, assume_yes: bool) -> list[str]:
 
     llm_ready = llm_api_key() is not None
     print("how should redlens find subreddits?", file=sys.stderr)
-    for i, (key, label, default) in enumerate(SOURCES, 1):
-        mark = " *" if default else ""
-        note = "" if key != "llm" or llm_ready else \
+    for i, src in enumerate(discovery.SOURCES, 1):
+        mark = " *" if src.default else ""
+        note = "" if src.key != "llm" or llm_ready else \
             "  (needs an LLM API key — not configured)"
-        print(f"  [{i}] {label}{mark}{note}", file=sys.stderr)
+        print(f"  [{i}] {src.label}{mark}{note}", file=sys.stderr)
     print('sources ("1 2 4"), Enter for defaults (*), "s" skips discovery',
           file=sys.stderr)
     print("> ", end="", file=sys.stderr, flush=True)
@@ -208,62 +194,15 @@ def _choose_sources(*, assume_yes: bool) -> list[str]:
     if line == "s":
         return []
     if not line:
-        chosen = [key for key, _, default in SOURCES if default]
+        chosen = default_source_keys()
     else:
-        chosen = [SOURCES[int(tok) - 1][0] for tok in line.split()
-                  if tok.isdigit() and 1 <= int(tok) <= len(SOURCES)]
+        chosen = [discovery.SOURCES[int(tok) - 1].key for tok in line.split()
+                  if tok.isdigit() and 1 <= int(tok) <= len(discovery.SOURCES)]
     if "llm" in chosen and not llm_ready:
         print("  skipping llm: set OPENAI_API_KEY/REDLENS_LLM_API_KEY or "
               "[llm] api_key in config.toml", file=sys.stderr)
         chosen.remove("llm")
     return chosen
-
-
-def _gather_candidates(
-    terms: list[str], sources: list[str]
-) -> tuple[list[SubredditCandidate], list[str]]:
-    """Run the chosen discovery sources, fanned across all query terms.
-
-    Returns (candidates for the picker, net additions that bypass it —
-    the popular-subreddits cast is all-or-nothing, not row-by-row).
-    """
-    merged: dict[str, SubredditCandidate] = {}
-
-    def add(candidates: list[SubredditCandidate]) -> None:
-        for c in candidates:
-            existing = merged.get(c.name.lower())
-            if existing:
-                if c.source not in existing.source:
-                    merged[c.name.lower()] = dataclasses.replace(
-                        existing, source=f"{existing.source}+{c.source}")
-            else:
-                merged[c.name.lower()] = c
-
-    if "name" in sources:
-        for term in terms:
-            add(search_subreddits(term))
-    for key, fetch in (("global", discovery.search_global),
-                       ("web", discovery.search_web),
-                       ("llm", discovery.suggest_llm)):
-        if key not in sources:
-            continue
-        names: list[str] = []
-        try:
-            if key == "llm":  # one call covers every term
-                names = fetch(", ".join(terms))
-            else:
-                for term in terms:
-                    names += fetch(term)
-        except RedlensError as exc:
-            print(f"warning: {key} discovery failed: {exc}", file=sys.stderr)
-        if not names:
-            print(f"note: {key} search found no subreddits", file=sys.stderr)
-        add([SubredditCandidate(name=n, subscribers=0, description="",
-                                over_18=False, source=key)
-             for n in names])
-
-    popular = list(discovery.POPULAR_SUBREDDITS) if "popular" in sources else []
-    return list(merged.values()), popular
 
 
 def _pick_subreddits(
@@ -522,7 +461,8 @@ def _cmd_track(args: argparse.Namespace, engine: Engine) -> None:
     if not (existing and existing.subreddit_list):
         sources = _resolve_sources(args.sources, assume_yes=args.yes)
         terms = query_terms(args.query) if args.query else [args.topic]
-        found, popular = _gather_candidates(terms, sources)
+        found, popular = gather_candidates(
+            terms, sources, name_search=search_subreddits)
         if found:
             subs = (subs or []) + _pick_subreddits(
                 found, assume_yes=args.yes)
@@ -678,16 +618,7 @@ def _cmd_page(args: argparse.Namespace, engine: Engine) -> None:
         if args.open and not args.no_browser:
             webbrowser.open(index.resolve().as_uri())
     elif args.topic:
-        if doc_limit:
-            with session(engine) as s:
-                docs = topic_doc_count(s, args.topic)
-            if docs > doc_limit:
-                raise RedlensError(
-                    f"topic '{args.topic}' would render {docs:,} posts + "
-                    f"comments, over the --limit cap of {doc_limit:,}. The "
-                    "renderer holds the whole topic in RAM (a 419 MB box "
-                    "OOM-killed at ~182k docs) — raise --limit or pass "
-                    "--force to render anyway.")
+        check_doc_limit(engine, args.topic, doc_limit or None)
         html_doc = render_topic_page(
             engine, args.topic,
             Sections(
