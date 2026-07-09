@@ -397,7 +397,20 @@ const esc = s => String(s).replace(/[&<>"]/g,
 const day = t => t ? new Date(t*1000).toISOString().slice(0,10) : '—';
 const plural = (n, w) => `${fmt(n)} ${w}${n===1?'':'s'}`;
 
-async function getJSON(url){ const r = await fetch(url); const j = await r.json();
+// Every dashboard fetch funnels through here. The static export (`redlens
+// report`) injects a `SNAPSHOT` object mapping the exact request URLs to their
+// pre-computed payloads and this resolves against it instead of the network —
+// no server, one self-contained file. Unbaked URLs (ai-profile, deep
+// pagination) fall through to SNAPSHOT's `_miss` marker rather than throwing,
+// so those sections degrade gracefully. `serve` never defines SNAPSHOT, so it
+// keeps hitting the live endpoints.
+async function getJSON(url){
+  if(typeof SNAPSHOT !== 'undefined'){
+    const j = (url in SNAPSHOT) ? SNAPSHOT[url] : SNAPSHOT['_miss'];
+    if(j && j.error) throw new Error(j.error);
+    return Promise.resolve(j);
+  }
+  const r = await fetch(url); const j = await r.json();
   if(!r.ok || j.error) throw new Error(j.error || r.statusText); return j; }
 
 // ---- overview ----
