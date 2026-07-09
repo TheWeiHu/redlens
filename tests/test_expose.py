@@ -116,6 +116,14 @@ def test_pair_evidence_is_prebaked(seeded):
     assert "/api/evidence?type=pair&a=alice&b=bob" in txt
 
 
+def test_key_encoding_matches_encodeuricomponent():
+    # The baked key must be byte-identical to the URL the SPA builds with
+    # encodeURIComponent, which leaves !'()*-._~ unescaped (Python's quote
+    # would percent-encode !'()* by default → a lookup miss).
+    assert expose._enc("a!'()*-._~b") == "a!'()*-._~b"
+    assert expose._enc("a b/c") == "a%20b%2Fc"
+
+
 def test_script_close_in_account_name_is_neutralized(tmp_path):
     db = str(tmp_path / "evil.db")
     engine = connect(db)
