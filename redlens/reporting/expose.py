@@ -62,29 +62,38 @@ def _parameterless_snapshot(net: Network) -> dict[str, Any]:
     return snap
 
 
+# The extra chars JS ``encodeURIComponent`` leaves unescaped that Python's
+# ``quote`` would percent-encode by default; matching them keeps a baked key
+# byte-identical to the URL the SPA builds (else the lookup misses → ``_miss``).
+_ENC_SAFE = "!'()*-._~"
+
+
+def _enc(v: str) -> str:
+    return quote(v, safe=_ENC_SAFE)
+
+
 def _pair_key(a: str, b: str) -> str:
-    """The exact URL ``openPair`` builds — ``encodeURIComponent`` matches
-    ``urllib.parse.quote`` with an empty ``safe`` set."""
-    return (f"/api/evidence?type=pair&a={quote(a, safe='')}"
-            f"&b={quote(b, safe='')}")
+    """The exact URL ``openPair`` builds via ``encodeURIComponent``."""
+    return f"/api/evidence?type=pair&a={_enc(a)}&b={_enc(b)}"
 
 
 def _profile_key(u: str) -> str:
-    return f"/api/profile?u={quote(u, safe='')}"
+    return f"/api/profile?u={_enc(u)}"
 
 
 def _prebaked(net: Network) -> dict[str, Any]:
     """The bounded parameterized calls: top-K pair evidence + labeled-account
     profiles, keyed by the same URL the SPA would request."""
     snap: dict[str, Any] = {}
-    pairs = net.pairs().get("pairs", [])
-    top = sorted(pairs, key=lambda p: p["subs"] + p["threads"],
+    pairs_res = net.pairs()
+    top = sorted(pairs_res.get("pairs", []),
+                 key=lambda p: p["subs"] + p["threads"],
                  reverse=True)[:TOP_PAIRS]
     for p in top:
         snap[_pair_key(p["a"], p["b"])] = net.pair_evidence(p["a"], p["b"])
     # Only the labeled (cohort) accounts — the network the report is about.
     # Unlabeled DBs have no cohorts, so fall back to the matrix accounts.
-    labeled = list(net.cohorts) or net.pairs().get("accounts", [])
+    labeled = list(net.cohorts) or pairs_res.get("accounts", [])
     for u in labeled:
         snap[_profile_key(u)] = net.profile(u)
     return snap
@@ -131,6 +140,10 @@ def render_report(db: str | Path, *, brands: str | Path | None = None,
     # defined by the time getJSON (and the boot IIFE) run. The shim in getJSON
     # picks it up; serve never injects this, so it keeps fetching live.
     marker = "<script>\nconst $ = s => document.querySelector(s);"
+    if marker not in page:  # index.html's app-script preamble was reshaped
+        raise RuntimeError(
+            "expose: snapshot injection point not found in index.html "
+            "(the app <script> preamble changed) — the shim seam must move")
     page = page.replace(marker, inject + marker, 1)
 
     out_path = Path(out)
