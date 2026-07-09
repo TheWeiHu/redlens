@@ -28,6 +28,8 @@ import re
 import urllib.parse
 import urllib.request
 from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from redlens import arctic, config, constants, llm, prompts
 from redlens.constants import MAX_LLM_RESULTS, MAX_WEB_RESULTS
@@ -108,3 +110,38 @@ def suggest_llm(topic: str) -> list[str]:
         if name and _VALID_NAME_RE.match(name):
             names.append(name)
     return names[:MAX_LLM_RESULTS]
+
+
+@dataclass(frozen=True)
+class Source:
+    """One discovery source in the flat :data:`SOURCES` registry: its
+    ``--sources`` key, the picker label, whether it's on by default, and a
+    per-term name fetcher.
+
+    ``fetch`` returns bare subreddit names for a query term and is ``None`` for
+    the two structurally different sources: ``name`` (arctic's keyless search,
+    which returns rich :class:`~redlens.topics.SubredditCandidate` rows and lives
+    in :mod:`redlens.topics`) and ``popular`` (the static wholesale cast over
+    :data:`POPULAR_SUBREDDITS`, which bypasses the per-row picker)."""
+    key: str
+    label: str
+    default: bool
+    fetch: Callable[[str], list[str]] | None = None
+
+
+# The discovery sources for a topic's subreddit net, in display order. A flat
+# registry (no class hierarchy): the CLI resolves --sources names against it and
+# topics.gather_candidates runs the selected fetchers. Keep the keys and default
+# set stable — they're the CLI's --sources contract.
+SOURCES: list[Source] = [
+    Source("name", "subreddits whose name matches (keyless, via arctic)",
+           default=True),
+    Source("global", "subreddits with matching posts (keyless, via PullPush)",
+           default=True, fetch=search_global),
+    Source("web", "web search (DuckDuckGo; may hit bot walls)",
+           default=False, fetch=search_web),
+    Source("popular",
+           f"cast over the {len(POPULAR_SUBREDDITS)} most popular subreddits",
+           default=False),
+    Source("llm", "LLM suggestions", default=False, fetch=suggest_llm),
+]
