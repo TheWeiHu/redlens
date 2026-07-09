@@ -27,7 +27,8 @@ from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.models import MentionGroup, Profile, TopicAnalytics, TopicSummary
-from redlens.network import build_network, leads
+from redlens.network import build_network, leads, load_brands
+from redlens.network.brands import extract_brand_roster
 from redlens.reporting import explore, expose
 from redlens.reporting.page import (
     Renderers,
@@ -382,6 +383,21 @@ def build_parser() -> argparse.ArgumentParser:
                     "≥ --min-score; feed it back to serve/report --promote")
     ld.add_argument("--json", action="store_true",
                     help="dump the ranked verdicts as JSON instead of a table")
+    br = sub.add_parser(
+        "brands", help="mine the coordinated cohort's brand roster and merge "
+        "it into a brand-roster CSV (LLM-canonicalized when a key is set)")
+    br.add_argument(
+        "--cohorts", metavar="PATH",
+        help="cohort-labels CSV (account, cohort); default: cohorts.csv "
+             "next to the DB, if present")
+    br.add_argument(
+        "--extend", metavar="PATH",
+        help="existing brand-roster CSV to merge into (curated rows win); "
+             "default: brands.csv next to the DB, if present, else empty")
+    br.add_argument("-o", "--out", metavar="PATH",
+                    help="write the merged roster CSV (default: ./brands.csv)")
+    br.add_argument("--json", action="store_true",
+                    help="dump the merged roster as JSON instead of a note")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -748,6 +764,47 @@ def _cmd_leads(args: argparse.Namespace, db: str | Path) -> int:
     return 0
 
 
+def _write_brands_csv(out: Path, roster: list[tuple[str, list[str]]]) -> None:
+    """Write a brand roster as the CSV ``load_brands`` reads: one brand per row,
+    the display name then its match terms. Round-trips exactly — a name whose
+    only term is itself is written name-only (``load_brands`` re-derives it)."""
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        for name, terms in roster:
+            row = [name] if terms == [name] else [name, *terms]
+            w.writerow(row)
+
+
+def _cmd_brands(args: argparse.Namespace, db: str | Path) -> int:
+    """Mine + merge the coordinated cohort's brand roster — thin parse →
+    build_network → extract_brand_roster → CSV. ``--extend`` (default: brands.csv
+    next to the DB) is the roster to merge into; curated rows win. Runs keyless
+    (mined-only) when no LLM key is set, noting the skipped classification."""
+    try:
+        cohorts = serve._sidecar(db, args.cohorts, "cohorts.csv")
+        extend = serve._sidecar(db, args.extend, "brands.csv")
+    except FileNotFoundError as e:
+        print(f"file not found: {e}", file=sys.stderr)
+        return 2
+    existing = load_brands(extend) if extend else []
+    net = build_network(db, brands=None, cohorts=cohorts, promote=None)
+    key = llm_api_key()
+    roster = extract_brand_roster(net._store, key=key, existing=existing)
+    out = Path(args.out) if args.out else Path("brands.csv")
+    _write_brands_csv(out, roster)
+    if args.json:
+        print(json.dumps([{"name": n, "terms": t} for n, t in roster],
+                         indent=2))
+    else:
+        added = len(roster) - len(existing)
+        print(f"wrote {out} ({len(roster)} brands, +{added} new)")
+        if key is None:
+            print("note: no LLM key — mined candidates only, classification "
+                  "skipped (set [llm] api_key to canonicalize)",
+                  file=sys.stderr)
+    return 0
+
+
 def _cmd_sync(args: argparse.Namespace, engine: Engine) -> None:
     r = sync_user(args.username, engine, full=args.full)
     print(f"u/{r.user.username}: "
@@ -936,6 +993,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_report(args, db)
         if args.verb == "leads":
             return _cmd_leads(args, db)
+        if args.verb == "brands":
+            return _cmd_brands(args, db)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
