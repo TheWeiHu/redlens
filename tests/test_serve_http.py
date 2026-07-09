@@ -14,6 +14,7 @@ Quirks pinned on purpose (current behavior, not necessarily desired):
 - a non-numeric ``limit`` on ``/api/content`` is a 400 (``int()`` blows up).
 """
 import json
+import socketserver
 import threading
 import time
 from urllib.error import HTTPError
@@ -95,18 +96,32 @@ def server(tmp_path_factory):
             super().__init__(*a, **kw)
             captured["httpd"] = self
 
+        def server_bind(self):
+            # skip BaseHTTPServer's getfqdn(): reverse DNS stalls >10s on
+            # macOS CI runners, and these tests only ever dial 127.0.0.1
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = str(host)
+            self.server_port = int(port)
+
     mp.setattr(serve_mod, "ThreadingHTTPServer", _Capture)
     rc: dict = {}
-    t = threading.Thread(
-        target=lambda: rc.setdefault("code", serve_mod.serve(
-            db, port=0, open_browser=False, brands=brands, cohorts=cohorts,
-            title="net & ops")),
-        daemon=True)
+
+    def _run() -> None:
+        try:
+            rc["code"] = serve_mod.serve(
+                db, port=0, open_browser=False, brands=brands,
+                cohorts=cohorts, title="net & ops")
+        except BaseException as exc:  # surface thread death in the fixture
+            rc["exc"] = exc
+            raise
+
+    t = threading.Thread(target=_run, daemon=True)
     t.start()
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
     while "httpd" not in captured and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert "httpd" in captured, "server never started"
+    assert "httpd" in captured, f"server never started (exc={rc.get('exc')!r})"
     port = captured["httpd"].server_address[1]
     assert port != 0
     try:
