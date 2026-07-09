@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -26,6 +27,7 @@ from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.models import MentionGroup, Profile, TopicAnalytics, TopicSummary
+from redlens.network import build_network, leads
 from redlens.reporting import explore, expose
 from redlens.reporting.page import (
     Renderers,
@@ -358,6 +360,28 @@ def build_parser() -> argparse.ArgumentParser:
                     help="dashboard heading (default: 'coordinated network')")
     rp.add_argument("-o", "--out", metavar="PATH",
                     help="output HTML file (default: ./report.html)")
+    ld = sub.add_parser(
+        "leads", help="score candidate accounts for coordinated-cohort "
+        "membership from deterministic signals (no LLM); emits a "
+        "--promote-ready CSV")
+    ld.add_argument(
+        "--brands", metavar="PATH",
+        help="brand-roster CSV (name, match terms…); default: brands.csv "
+             "next to the DB, if present")
+    ld.add_argument(
+        "--cohorts", metavar="PATH",
+        help="cohort-labels CSV (account, cohort); default: cohorts.csv "
+             "next to the DB, if present")
+    ld.add_argument("--min-score", type=float, default=leads.VERIFY_MIN_SCORE,
+                    metavar="0-1",
+                    help="score at/above which a lead is written as "
+                    f"'coordinated' in --out (default: {leads.VERIFY_MIN_SCORE})")
+    ld.add_argument("-o", "--out", metavar="PATH",
+                    help="write a promote-ready cohorts CSV "
+                    "(account, cohort, score, evidence) for leads scoring "
+                    "≥ --min-score; feed it back to serve/report --promote")
+    ld.add_argument("--json", action="store_true",
+                    help="dump the ranked verdicts as JSON instead of a table")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -678,6 +702,52 @@ def _cmd_report(args: argparse.Namespace, db: str | Path) -> int:
     return 0
 
 
+def _write_leads_csv(out: Path, verdicts: list[leads.LeadVerdict],
+                     min_score: float) -> int:
+    """Write a promote-ready cohorts CSV — ``account, cohort, score, evidence``
+    for every verdict scoring ≥ ``min_score`` (cohort fixed to ``coordinated``).
+    The extra columns are ignored by ``load_cohorts`` (which reads only the
+    first two cells), so the file drops straight into ``--cohorts`` / ``--promote``.
+    Returns the number of rows written."""
+    rows = [v for v in verdicts if v.score >= min_score]
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["account", "cohort", "score", "evidence"])
+        for v in rows:
+            w.writerow([v.account, "coordinated", v.score, v.evidence])
+    return len(rows)
+
+
+def _cmd_leads(args: argparse.Namespace, db: str | Path) -> int:
+    """Score candidate accounts for coordinated-cohort membership — thin
+    parse → build_network → verify_leads → format. Resolves the brand/cohort
+    sidecars exactly as ``report``/``serve`` do."""
+    try:
+        brands = serve._sidecar(db, args.brands, "brands.csv")
+        cohorts = serve._sidecar(db, args.cohorts, "cohorts.csv")
+    except FileNotFoundError as e:
+        print(f"file not found: {e}", file=sys.stderr)
+        return 2
+    net = build_network(db, brands=brands, cohorts=cohorts, promote=None)
+    verdicts = leads.verify_leads(net._store, min_score=args.min_score)
+    if args.json:
+        print(json.dumps([v.as_dict() for v in verdicts], indent=2))
+    elif not verdicts:
+        print("no candidate leads — needs a brand roster and a 'coordinated' "
+              "cohort (see --brands/--cohorts)", file=sys.stderr)
+    else:
+        print(f"{'account':<24} {'score':>6} {'brands':>6}  evidence")
+        for v in verdicts:
+            print(f"{v.account:<24} {v.score:>6.3f} {v.roster_brands:>6}  "
+                  f"{v.evidence}")
+    if args.out:
+        out = Path(args.out)
+        n = _write_leads_csv(out, verdicts, args.min_score)
+        print(f"wrote {out} ({n} lead{'' if n == 1 else 's'} ≥ "
+              f"{args.min_score:g}, feed to --promote)", file=sys.stderr)
+    return 0
+
+
 def _cmd_sync(args: argparse.Namespace, engine: Engine) -> None:
     r = sync_user(args.username, engine, full=args.full)
     print(f"u/{r.user.username}: "
@@ -864,6 +934,8 @@ def main(argv: list[str] | None = None) -> int:
                                promote=args.promote, title=args.title)
         if args.verb == "report":
             return _cmd_report(args, db)
+        if args.verb == "leads":
+            return _cmd_leads(args, db)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
