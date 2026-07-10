@@ -27,7 +27,7 @@ from redlens.doctor import run_doctor
 from redlens.errors import MissingKey, NotFound, RedlensError
 from redlens.ingest import sync_user
 from redlens.models import MentionGroup, Profile, TopicAnalytics, TopicSummary
-from redlens.network import build_network, leads, load_brands
+from redlens.network import build_network, leads, load_brands, seeding
 from redlens.network.brands import extract_brand_roster
 from redlens.reporting import explore, expose
 from redlens.reporting.page import (
@@ -398,6 +398,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="write the merged roster CSV (default: ./brands.csv)")
     br.add_argument("--json", action="store_true",
                     help="dump the merged roster as JSON instead of a note")
+    sd = sub.add_parser(
+        "seeding", help="judge each roster brand SEEDED (pushed first by the "
+        "coordinated network) vs adopted ORGANICALLY, from deterministic "
+        "signals (no LLM); needs ≥2 labeled cohorts")
+    sd.add_argument(
+        "--brands", metavar="PATH",
+        help="brand-roster CSV (name, match terms…); default: brands.csv "
+             "next to the DB, if present")
+    sd.add_argument(
+        "--cohorts", metavar="PATH",
+        help="cohort-labels CSV (account, cohort); default: cohorts.csv "
+             "next to the DB, if present")
+    sd.add_argument("--json", action="store_true",
+                    help="dump the per-brand verdicts as JSON instead of a table")
     t = sub.add_parser(
         "track", help="follow a topic across public discussion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -805,6 +819,44 @@ def _cmd_brands(args: argparse.Namespace, db: str | Path) -> int:
     return 0
 
 
+def _cmd_seeding(args: argparse.Namespace, db: str | Path) -> int:
+    """Judge each roster brand SEEDED vs ORGANIC — thin parse → build_network →
+    seeding_verdicts → format. Resolves the brand/cohort sidecars exactly as
+    ``leads``/``report``/``serve`` do. Requires ≥2 labeled cohorts (a
+    ``coordinated`` label plus an organic/other cohort to contrast against);
+    with only one cohort the verdict has nothing to compare and exits non-zero."""
+    try:
+        brands = serve._sidecar(db, args.brands, "brands.csv")
+        cohorts = serve._sidecar(db, args.cohorts, "cohorts.csv")
+    except FileNotFoundError as e:
+        print(f"file not found: {e}", file=sys.stderr)
+        return 2
+    net = build_network(db, brands=brands, cohorts=cohorts, promote=None)
+    # Need both a 'coordinated' label (the network side) AND a second cohort to
+    # contrast it against — the verdict is a comparison, meaningless with one.
+    if not net.multi_cohort or not net._coordinated:
+        print("seeding needs ≥2 labeled cohorts including a 'coordinated' label "
+              "(the network side) plus an organic/other cohort to contrast "
+              "against — label them in --cohorts (see cohorts.csv).",
+              file=sys.stderr)
+        return 2
+    verdicts = seeding.seeding_verdicts(net._store)
+    if args.json:
+        print(json.dumps([v.as_dict() for v in verdicts], indent=2))
+    elif not verdicts:
+        print("no brand verdicts — needs a brand roster and a 'coordinated' "
+              "cohort (see --brands/--cohorts)", file=sys.stderr)
+    else:
+        print(f"{'brand':<20} {'verdict':<13} {'net_accts':>9} "
+              f"{'net_ment':>8} {'organic':>7} {'lag':>4}  evidence")
+        for v in verdicts:
+            lag = "—" if v.organic_lag_days is None else str(v.organic_lag_days)
+            print(f"{v.brand:<20} {v.verdict:<13} {v.net_accounts:>9} "
+                  f"{v.net_mentions:>8} {v.organic_mentions:>7} {lag:>4}  "
+                  f"{v.evidence}")
+    return 0
+
+
 def _cmd_sync(args: argparse.Namespace, engine: Engine) -> None:
     r = sync_user(args.username, engine, full=args.full)
     print(f"u/{r.user.username}: "
@@ -995,6 +1047,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_leads(args, db)
         if args.verb == "brands":
             return _cmd_brands(args, db)
+        if args.verb == "seeding":
+            return _cmd_seeding(args, db)
         engine = connect(db)
         init_schema(engine)
         if args.verb == "init":
