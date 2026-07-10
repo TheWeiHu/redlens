@@ -156,6 +156,24 @@ def test_no_roster_or_cohort_yields_no_leads(scored):
     assert v and v[0].score == 0.0
 
 
+def test_single_cohort_marks_wave_signal_na(scored):
+    path, roster, _ = scored
+    from redlens.network.core import Network
+    # ONLY the coordinated block is labeled → one cohort → seeding_waves is
+    # gated off. The wave score is a forced 0, so the evidence must say so
+    # rather than implying a real zero-participation reading.
+    solo = dict.fromkeys(["seed1", "seed2", "seed3", "seed4"], "coordinated")
+    net = Network(path, roster=roster, cohorts=solo)
+    assert not net._store.multi_cohort
+    v = verify_leads(net._store, candidates=["plant"])
+    assert v and v[0].wave_hits == 0
+    assert "wave signal: n/a (needs ≥2 cohorts)" in v[0].evidence
+    # and a genuinely-available wave signal does NOT carry the note
+    two = _net(path, roster, scored[2])
+    tv = verify_leads(two._store, candidates=["plant"])
+    assert "wave signal: n/a" not in tv[0].evidence
+
+
 def test_leads_verdict_as_dict_round_trips():
     v = LeadVerdict(account="plant", score=0.7, roster_brands=4,
                     coactivity=0.8, wave_hits=2, evidence="x")

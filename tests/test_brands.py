@@ -82,6 +82,40 @@ def test_keyless_yields_mined_candidates(cohort):
     assert "Really" not in names
 
 
+def test_mining_scoped_to_coordinated_cohort(tmp_path):
+    """Organic-authored brand chatter must NOT leak into the mined roster.
+
+    The DB holds the coordinated cohort's ``Widgetco``/``Zorptech`` co-mentions
+    PLUS two organic authors who co-mention a distinct ``Orgbrand`` — the exact
+    shape brand-tracking produces once it pulls organic discussion in. Scoping
+    the mine to ``store._coordinated`` keeps the roster to the network."""
+    path = str(tmp_path / "mixed.db")
+    _seed_db(path)                                  # coordinated cohort
+    engine = connect(path)
+    posts: list[Post] = []
+    comments: list[Comment] = []
+    for i, acc in enumerate(["org1", "org2"]):      # unlabeled → organic
+        posts.append(Post(
+            post_id=f"op-{acc}", author_username=acc, subreddit_name="organic",
+            created_utc=_T0 + 100 + i, title="Nice day",
+            selftext="Honestly I love Orgbrand a lot lately.", score=1))
+        comments.append(Comment(
+            comment_id=f"oc-{acc}", author_username=acc,
+            subreddit_name="organic", link_id="thread-o",
+            created_utc=_T0 + 100 + i, body="Yeah Orgbrand is fine.", score=1))
+    with Session(engine) as s:
+        upsert(s, posts)
+        upsert(s, comments)
+        s.commit()
+    # only the coordinated block is labeled; org1/org2 are organic
+    cohorts = dict.fromkeys(["seed1", "seed2", "seed3", "seed4"], "coordinated")
+    roster = extract_brand_roster(Network(path, cohorts=cohorts)._store,
+                                  key=None, existing=[])
+    names = {n for n, _ in roster}
+    assert {"Widgetco", "Zorptech"} <= names        # coordinated brands mined
+    assert "Orgbrand" not in names                  # organic-only brand excluded
+
+
 def test_llm_canonicalizes_and_round_trips(cohort, tmp_path, monkeypatch):
     path, cohorts = cohort
 

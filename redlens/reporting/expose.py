@@ -102,12 +102,14 @@ def _prebaked(net: Network) -> dict[str, Any]:
 def _serialize(snapshot: dict[str, Any]) -> str:
     """JSON for embedding in a ``<script>`` tag. ``default=str`` mirrors
     serve's JSON encoder; ``ensure_ascii=False`` keeps names readable. The
-    ``</`` → ``<\\/`` escape is the injection guard: ``json.dumps`` does not
+    ``<`` → ``\\u003c`` escape is the injection guard: ``json.dumps`` does not
     escape ``<``, so an account/brand name containing ``</script>`` (or any
-    ``</``) would otherwise close the tag and break out of the script
-    context. The ``<\\/`` sequence is valid JS and JSON-equivalent."""
+    casing of it) would otherwise close the tag and break out of the script
+    context. Escaping *every* ``<`` is the unambiguous, industry-standard
+    guard — ``\\u003c`` is valid JSON/JS and parses back to a literal ``<``,
+    so the embedded data is byte-for-byte unchanged."""
     return json.dumps(snapshot, default=str, ensure_ascii=False).replace(
-        "</", "<\\/")
+        "<", "\\u003c")
 
 
 def render_report(db: str | Path, *, brands: str | Path | None = None,
