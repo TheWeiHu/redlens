@@ -1191,9 +1191,9 @@ async function loadCohortBridges(){
   $('#bridge-count').textContent = topOf(r.edges.length, r.edges.length);
   $('#bridge-arc').innerHTML = bridgeArc(r.edges);
   const edges = r.edges.map(e =>
-    `<tr><td class="u" onclick="location.hash='#/user/'+encodeURIComponent('${esc(e.a)}')">${esc(e.a)}</td>` +
+    `<tr><td>${userCell(e.a)}</td>` +
     `<td>${cohChip(e.coh_a)}</td>` +
-    `<td class="u" onclick="location.hash='#/user/'+encodeURIComponent('${esc(e.b)}')">${esc(e.b)}</td>` +
+    `<td>${userCell(e.b)}</td>` +
     `<td>${cohChip(e.coh_b)}</td><td class="r"><b>${fmt(e.shared)}</b></td></tr>`).join('');
   $('#bridges').innerHTML =
     `<tr><th>account</th><th>cohort</th><th>account</th><th>cohort</th><th class="r">shared threads</th></tr>` + edges;
