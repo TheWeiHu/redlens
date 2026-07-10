@@ -27,17 +27,33 @@ jobs:
       - run: mypy redlens
       - run: pytest -m "not integration"
 
-  # Single required status check for branch protection. `needs: test` collapses
-  # the 9-way matrix into one pass/fail, so the required check stays valid as the
-  # matrix grows. integration is schedule-only, so it is intentionally excluded.
+  # Line + branch coverage floor, on one cell only (not the full matrix). The
+  # threshold is a couple points under the measured total as a safety margin.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -m "not integration" --cov=redlens --cov-fail-under=82
+
+  # Single required status check for branch protection. `needs` collapses the
+  # matrix + coverage into one pass/fail, so the required check stays valid as
+  # the matrix grows. integration is schedule-only, so it is excluded.
   ci-gate:
-    needs: [test]
+    needs: [test, coverage]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: |
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "test matrix did not pass (result=${{ needs.test.result }})"
+            exit 1
+          fi
+          if [ "${{ needs.coverage.result }}" != "success" ]; then
+            echo "coverage gate did not pass (result=${{ needs.coverage.result }})"
             exit 1
           fi
 

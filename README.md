@@ -37,7 +37,9 @@ everything in **one SQLite file you own**. No API keys, no setup, no Reddit acco
 Archive    redlens sync <user>     a user's full public post + comment history
            redlens track <topic>   build a subreddit net, archive every match
 Analyze    redlens show / topics   rollups, scores, per-subreddit totals
+Network    redlens serve           the coordinated-network dashboard (matrix, brands, seeding)
 Render     redlens page <topic>    a standalone, dependency-free HTML report
+           redlens report          bake the network dashboard into one shareable HTML file
 ```
 
 arctic has no global text search, so a **topic** isn't a query — it's a *net*. `track` discovers
@@ -66,6 +68,10 @@ Two runtime dependencies (`platformdirs`, `sqlmodel`), all permissively licensed
 | `redlens page <topic>` | Render a standalone HTML report (`--all` for every topic + index) |
 | `redlens explore` | Browse the DB in your browser (read-only, with a SQL console) |
 | `redlens serve` | Open the local listening report — a coordinated-network view (drill any account to its posts/comments) |
+| `redlens report` | Bake that dashboard into one self-contained, shareable HTML file (no server) |
+| `redlens leads` | Score unlabeled accounts for cohort membership from deterministic signals (`--out` a promote-ready CSV) |
+| `redlens brands` | Mine the cohort's brand roster and merge it into `brands.csv` (LLM-canonicalized with a key) |
+| `redlens seeding` | Judge each roster brand seeded-vs-organic from deterministic signals (needs ≥2 labeled cohorts) |
 | `redlens summarize <user>` | LLM-powered summary (needs an API key — see below) |
 | `redlens setup` | Configure the optional LLM API key |
 | `redlens completions <shell>` | Print a `bash\|zsh\|fish` completion script |
@@ -73,6 +79,13 @@ Two runtime dependencies (`platformdirs`, `sqlmodel`), all permissively licensed
 Run `redlens <command> --help` for flags. `track` takes `--query`/`--exclude` keyword steering,
 `--sources` to pick the discovery net (`name`, `global`, `web`, `popular`, `llm`), `--comments` to
 archive threads, and `--discover` to widen the net through matched authors.
+
+Explore the network live with `serve`, then hand off a static copy anyone can open:
+
+```bash
+redlens serve --cohorts cohorts.csv --brands brands.csv   # live localhost dashboard
+redlens report --cohorts cohorts.csv -o network.html      # same view, one shareable file
+```
 
 ## Optional LLM Key
 

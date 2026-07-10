@@ -18,45 +18,46 @@ document covers how it is built and why.
 - **Idempotent ingest.** Re-running a sync or track never duplicates rows.
   All writes go through `db.upsert`, which returns the rows actually inserted
   so callers can report net-new counts.
+- **Deterministic first, LLM optional.** Every analysis view is computed from
+  the data with no key. LLM calls (summaries, canonicalization, the per-account
+  read) are isolated behind pure prompt builders and `parse_*` parsers, so the
+  network never depends on a model and each call is trivially testable offline.
 - **No global text search.** Arctic has no full-text search, so topic tracking
-  builds a *subreddit net* and scans within it (see Discovery).
+  builds a *subreddit net* and scans within it (see Stage 1).
 
 ## Two subjects
 
-- **Users** — `sync` archives a user's public history; `analytics` prints a
-  rollup; `summarize` produces an AI profile (optional, BYO LLM key).
+- **Users** — `sync` archives a user's public history; `show`/`analytics`
+  print a rollup; `summarize` produces an AI profile (optional, BYO LLM key).
 - **Topics** — `track` discovers a subreddit net and archives every matching
   post across it; `page` renders the tracked topic as a standalone HTML report.
 
-## Data model (`redlens/models.py`)
+## The investigation pipeline
 
-SQLModel tables: `user`, `post`, `comment`, `topic`, `topicpost`. Rows are
-mapped from arctic payloads via `from_arctic` classmethods so the wire shape is
-isolated from the schema. The schema is created and migrated automatically on
-first use — there is no separate migration step.
+The package mirrors a six-stage flow: **archive** the raw history, **discover**
+the coordinated network inside it, **expand** the network to undetected
+members, **catalogue** the brands it pushes, **verify** which of those brands it
+seeded, and **expose** the result. The `network/` package is one module per
+stage; `redlens.network.Network` is a thin **facade** whose every method
+delegates in one line to a stage module, all sharing one read-only `Store` (the
+DB connection + low-level helpers). Each CLI verb lands on a stage:
 
-## Modules
+| # | Stage | Modules | CLI verb |
+| --- | --- | --- | --- |
+| 1 | **Archive** | `arctic`, `ingest`, `discovery`, `topics`, `db`, `models` | `sync`, `track` |
+| 2 | **Discover** the network | `network/coactivity` | `serve` (matrix) |
+| 3 | **Expand** it | `network/leads` | `leads` |
+| 4 | **Catalogue** its brands | `network/brands` | `brands` |
+| 5 | **Verify** seeding | `network/seeding` | `seeding` |
+| 6 | **Expose** | `serve`, `reporting/expose`, `reporting/` | `serve`, `report`, `page` |
 
-| Module | Responsibility |
-| --- | --- |
-| `arctic.py` | stdlib client for the arctic-shift mirror: pagination, retry, 429 `Retry-After`, descriptive User-Agent |
-| `ingest.py` | `sync_user` and the streaming fetch loop that feeds `db.upsert` |
-| `discovery.py` | subreddit-net discovery sources for topic tracking |
-| `topics.py` | topic tracking: build/extend the net, scan it, record matches |
-| `analytics.py` | derived `UserAnalytics` rollup |
-| `summarize.py` / `llm.py` / `prompts/` | optional AI profile summaries via a BYO OpenAI-compatible key |
-| `reporting/` | standalone HTML report rendering for `page` |
-| `explore.py` | read-only in-browser DB explorer (opened read-only; cannot mutate) |
-| `serve.py` | `serve` — the local listening report; read-only stdlib server + vanilla-JS dashboard |
-| `config.py` | DB-path resolution, `config.toml`, env vars, optional API-key getters |
-| `onboarding.py` | first-run `setup` wizard for optional keys |
-| `db.py` | engine, session, `upsert` |
-| `constants.py` / `data/` | tunables and bundled data files (e.g. popular subreddits) |
+### 1 · Archive (`arctic`, `ingest`, `discovery`, `topics`, `db`, `models`)
 
-## Discovery
-
-Because arctic has no text search, `track` assembles a net of candidate
-subreddits and archives posts whose keywords match within it. Sources:
+`arctic.py` is the stdlib client for the arctic-shift mirror (pagination, retry,
+429 `Retry-After`, descriptive User-Agent). `ingest.sync_user` streams a user's
+history into `db.upsert`. Because arctic has no text search, a **topic** isn't a
+query — it's a *net*: `discovery` assembles candidate subreddits and `topics`
+scans them, archiving posts whose keywords match. Sources:
 
 - `name` — subreddits whose name matches the topic (keyless)
 - `global` — subreddits whose posts match, via PullPush (keyless)
@@ -64,55 +65,85 @@ subreddits and archives posts whose keywords match within it. Sources:
 - `popular` — cast over the largest subreddits
 - `llm` — one cheap LLM-suggested list (needs an LLM key)
 
-Omitting `--sources` opens an interactive picker and a curating step; the net
-is then remembered and re-tracking is incremental. `--discover` widens the net
-one round by following authors of matching posts.
+Omitting `--sources` opens an interactive picker; the net is remembered and
+re-tracking is incremental. `--discover` widens the net one round by following
+authors of matching posts.
 
-## Listening report (`serve`)
+**Data model (`models.py`).** SQLModel tables: `user`, `post`, `comment`,
+`topic`, `topicpost`. Rows map from arctic payloads via `from_arctic`
+classmethods so the wire shape is isolated from the schema. The schema is
+created and migrated automatically on first use — no separate migration step.
 
-`serve` opens a localhost dashboard over an existing DB, framed as a
-**coordinated network**: every account is one cohort and the report surfaces the
-deterministic, keyless coordination signals between them as **matrices** that
-share one account-column order — the account × account **network matrix**
-(pairwise shared subs + co-commented threads, drawn as a heatmap), per-account
-volume, **brand mentions** (a curated roster — `brands.csv` next to the DB or
-`--brands PATH` — counted exactly; mined proper names as the keyless fallback),
-the **shared-subreddit footprint** (subs ≥2 accounts touch), and the **threads
-they co-comment in** (`link_id` seen by ≥2 accounts). The landing page shows
-only the stats, the heatmap, and the accounts table — the other matrices sit
-in **collapsed sections**. **Every matrix cell is clickable** (a drawer opens
-with the exact posts/comments behind it), and every account name opens a
-hash-routed **profile view** (`#/user/<name>`): identity stats, subreddit
-breakdown, top co-actors, brand mentions, and the raw paginated activity.
-**Cohort labels** (`cohorts.csv` next to the DB, or `--cohorts PATH`) group
-the matrices by cohort with separators and tag every account with its chip —
-the coordinated block reads as a block, organics stand apart. When those
-labels exist the DB usually also holds **organic authors** pulled in by
-`track`ing each brand as a topic; the network matrices then **scope to the
-labeled cohort** so they stay legible, and a **Share of voice** section shows,
-per roster brand, the coordinated cohort's share of its Reddit conversation
-(mentions by `coordinated` accounts ÷ all mentions) — the brands the network
-most dominates float to the top, each row drilling to the accounts on both
-sides.
+### 2 · Discover the network (`network/coactivity`)
 
-It reuses `explore.py`'s pattern: a stdlib `http.server` opening the DB
-**read-only**, a JSON API, and one self-contained vanilla-JS page (no build
-step, no framework, no LLM key required) in the redlens report style (light,
-one `constants.ACCENT` red). With a key configured, a profile view can run an
-on-demand **AI profile** (`prompts/coordination.txt`): a cheap-model persona +
-promotional-behavior read + `coordinated?` verdict, grounded in sampled
-content and the deterministic signals, cached per server run. This is the
-first slice of the paid listening report; view-time NL-plots and cross-topic
-crossings are later slices, and the stdlib server is a cheap swap for a hosted
-front door when that era arrives.
+With the history archived, the network is read as a **coordinated network**:
+every account is one cohort and the deterministic, keyless coordination signals
+between them become **matrices** sharing one account-column order. `coactivity`
+computes who shares subreddits and threads with whom (`pairs`), the shared-sub
+and co-commented-thread footprints, and the exact posts/comments behind any
+matrix cell (`pair_evidence`). This is the account × account **network matrix**
+drawn as a heatmap in `serve`.
+
+### 3 · Expand it (`network/leads`)
+
+`leads` grows the labeled cohort without an LLM. `suggested_coordinated`
+surfaces unlabeled accounts pushing many distinct roster brands; `verify_leads`
+scores those candidates for coordinated-block membership from three
+deterministic signals and emits a promote-ready CSV — closing the **detect →
+verify → promote** loop. The CSV feeds straight back into `serve --promote` /
+`report --promote`.
+
+### 4 · Catalogue its brands (`network/brands`)
+
+`brands` builds the mention matrix — exact roster counting when a `brands.csv`
+roster is given, mined proper names as the keyless fallback — and splits each
+brand's Reddit conversation into coordinated vs organic (**share of voice**).
+The `brands` verb mines the cohort's roster and merges it into a roster CSV,
+LLM-canonicalizing the mined names when a key is set (the LLM call is a pure
+builder/parser pair; without a key it merges raw).
+
+### 5 · Verify seeding (`network/seeding`)
+
+With ≥2 labeled cohorts, `seeding` judges each roster brand **seeded** (pushed
+first by the coordinated network) vs adopted **organically**, from deterministic
+signals. It also computes the multi-cohort views: seeding **waves** + the
+coordination **raster** (brands arriving in a synchronized burst), the cohort
+comparison / timeline / bridges, and the per-cohort outbound-domain catalogue.
+
+### 6 · Expose (`serve`, `reporting/expose`, `reporting/`)
+
+Two front doors over the same computations, plus the static topic report:
+
+- **`serve`** — a localhost dashboard. It reuses `explore.py`'s pattern: a
+  stdlib `http.server` opening the DB **read-only**, a JSON API, and one
+  self-contained vanilla-JS SPA (`serve_assets/index.html`) in the redlens
+  report style (light, one `constants.ACCENT` red). The landing page shows the
+  stats, the heatmap, and the accounts table; the other matrices sit in
+  collapsed sections. **Every matrix cell is clickable** (a drawer opens with
+  the units behind it), and every account name opens a hash-routed **profile
+  view** (`#/user/<name>`): identity stats, subreddit breakdown, top co-actors,
+  brand mentions, and raw paginated activity (`network/profiles`). With a key,
+  the profile view runs an on-demand **AI profile** — a cheap-model persona +
+  `coordinated?` verdict grounded in sampled content and the deterministic
+  signals, cached per server run. **Cohort labels** (`cohorts.csv` or
+  `--cohorts`) group the matrices by cohort and scope them so the coordinated
+  block reads as a block; a **Share of voice** section then ranks the brands the
+  network most dominates.
+- **`report`** (`reporting/expose`) — renders that exact dashboard as **one
+  self-contained static HTML file**, no server. It builds the same `Network`,
+  iterates `serve.ENDPOINTS` and calls each handler to pre-compute a snapshot of
+  every payload the SPA would fetch, embeds it, and the SPA's single `getJSON`
+  seam resolves against the snapshot instead of the network. A shareable exposé.
+- **`page`** (`reporting/page`) — the standalone HTML report for a tracked
+  topic. `reporting/html.py` holds the shared HTML primitives both exports use.
 
 ## Configuration
 
 DB path resolves with this precedence: `--db` flag → `REDLENS_DB` env →
 `[storage] db` in `config.toml` → the per-user data directory. An optional LLM
-key (for summaries and the `llm` discovery source) lives in `config.toml`
-(mode 600) or the environment, which always wins over the file. Everything
-works with no config at all.
+key (for summaries, the `llm` discovery source, and brand canonicalization)
+lives in `config.toml` (mode 600) or the environment, which always wins over the
+file. Everything works with no config at all.
 
 The file uses `[storage] db` and `[llm] api_key`; the matching env vars are
 `REDLENS_DB` and `REDLENS_LLM_API_KEY` (falling back to `OPENAI_API_KEY`).
@@ -127,7 +158,12 @@ Reddit credentials.
 
 ```bash
 pip install -e ".[dev]"   # install with dev extras
-pytest                    # tests run offline; network-marked: pytest -m integration
-ruff check .              # lint
-mypy redlens              # types
+make check                # ruff + mypy + pytest, exactly as CI runs them
+make coverage             # coverage report (term-missing)
+make coverage-gate        # the CI coverage floor — fails under the threshold
+pytest -m integration     # opt into the network-marked arctic tests
 ```
+
+CI (`.github/workflows/ci.yml`) runs ruff + mypy strict + pytest across
+3 OS × 3 Python versions, collapsed into one required `ci-gate` check, plus a
+single-cell `coverage` job that enforces the floor. `make check` mirrors it.
