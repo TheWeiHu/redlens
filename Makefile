@@ -1,4 +1,4 @@
-.PHONY: check lint type test coverage install-hooks
+.PHONY: check lint type test coverage coverage-gate install-hooks
 
 # Mirror CI (.github/workflows/ci.yml) exactly. Run before every push.
 check: lint type test
@@ -14,6 +14,10 @@ test:
 
 coverage:
 	pytest --cov --cov-report=term-missing
+
+# Mirror the CI coverage job: enforce the coverage floor.
+coverage-gate:
+	pytest -m "not integration" --cov=redlens --cov-fail-under=82
 
 # One-time per clone: route git hooks at the tracked .githooks dir so that
 # `git push` runs `make check` first (bypass with `git push --no-verify`).
