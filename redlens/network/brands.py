@@ -50,7 +50,8 @@ def _roster_mentions(store: Store) -> dict[str, Any]:
     return {"source": "roster", "total": len(rows), "rows": rows[:MAX_ROWS]}
 
 
-def _mined_mentions(store: Store) -> dict[str, Any]:
+def _mined_mentions(store: Store,
+                    authors: set[str] | None = None) -> dict[str, Any]:
     """Co-mentioned proper names, mined keylessly — the no-roster fallback.
 
     A token counts as a *name* when, looking only at **mid-sentence**
@@ -60,10 +61,17 @@ def _mined_mentions(store: Store) -> dict[str, Any]:
     mid-sentence and drop out. Once a term qualifies, every casing counts
     as a mention. Ranked by how many accounts use the term (≥2).
 
+    When ``authors`` is given, the text scan is restricted to those
+    authors (used by :func:`extract_brand_roster` to mine only the
+    coordinated cohort); ``None`` scans every author (the dashboard's
+    unscoped fallback behind ``/api/mentions``).
+
     Honest limit: a brand the network *always* writes lowercase never
     qualifies — that's what the roster (and later the LLM slice) is for.
     """
     texts = store.texts()
+    if authors is not None:
+        texts = [row for row in texts if row["u"] in authors]
     mid_total: Counter[str] = Counter()            # mid-sentence, any case
     mid_cap: Counter[str] = Counter()              # mid-sentence, capital
     casings: dict[str, Counter[str]] = {}          # low -> seen spellings
@@ -251,7 +259,11 @@ def extract_brand_roster(store: Store, *, key: str | None,
 
     Returns the merged :class:`BrandRoster` — round-trippable through
     :func:`~redlens.network.rosters.load_brands`."""
-    candidates = _mined_mentions(store)["rows"]
+    # Scope mining to the coordinated cohort so organic / tracked-topic brand
+    # chatter doesn't leak into the roster; fall back to every author only when
+    # no coordinated cohort is labeled.
+    scope = set(store._coordinated) or None
+    candidates = _mined_mentions(store, scope)["rows"]
     if key and candidates:
         prompt = _build_extract_prompt(candidates)
         mined = parse_brand_extract(llm.complete_json(prompt, key))

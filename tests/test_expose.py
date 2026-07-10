@@ -4,8 +4,9 @@
 every parameterless ``ENDPOINTS`` payload (plus a bounded set of parameterized
 calls) into one HTML file. These tests seed a real DB + sidecars, render, and
 assert the file is self-contained, carries the expected snapshot keys and
-getJSON shim, pre-bakes labeled-account profiles, and neutralizes a
-``</script>`` breakout in an account name.
+getJSON shim, pre-bakes labeled-account profiles, and neutralizes every
+``<`` from user data (``</script>``, mixed-case, and bare ``<script>``
+breakouts in an account name).
 """
 from __future__ import annotations
 
@@ -124,36 +125,49 @@ def test_key_encoding_matches_encodeuricomponent():
     assert expose._enc("a b/c") == "a%20b%2Fc"
 
 
-def test_script_close_in_account_name_is_neutralized(tmp_path):
+def test_script_tags_in_account_name_are_neutralized(tmp_path):
     db = str(tmp_path / "evil.db")
     engine = connect(db)
     init_schema(engine)
+    # A canonical breakout, a MIXED-CASE close (case-agnostic tag matching),
+    # and a BARE opener with no close — every ``<`` must be escaped.
     evil = "</script><script>alert(1)</script>"
+    mixed = "</ScRiPt><ScRiPt>evil</ScRiPt>"
+    bare = "<script>steal()"
+    payloads = [evil, mixed, bare]
     with Session(engine) as s:
-        upsert(s, [
-            Post(post_id="p1", author_username=evil, subreddit_name="vpn",
-                 created_utc=1, title="x", score=1),
-            Post(post_id="p2", author_username="bob", subreddit_name="vpn",
-                 created_utc=2, title="y", score=1),
-        ])
-        upsert(s, [
-            Comment(comment_id="c1", author_username=evil,
-                    subreddit_name="vpn", link_id="p1", created_utc=3,
-                    body="a"),
-            Comment(comment_id="c2", author_username="bob",
-                    subreddit_name="vpn", link_id="p1", created_utc=4,
-                    body="b"),
-        ])
+        # a second co-actor so pairs/profiles aren't empty
+        upsert(s, [Post(post_id=f"p{i}", author_username=name,
+                        subreddit_name="vpn", created_utc=i, title="x", score=1)
+                   for i, name in enumerate(payloads)]
+               + [Post(post_id="pb", author_username="bob",
+                       subreddit_name="vpn", created_utc=9, title="y",
+                       score=1)])
+        upsert(s, [Comment(comment_id=f"c{i}", author_username=name,
+                           subreddit_name="vpn", link_id=f"p{i}",
+                           created_utc=100 + i, body="a")
+                   for i, name in enumerate(payloads)]
+               + [Comment(comment_id="cb", author_username="bob",
+                          subreddit_name="vpn", link_id="p0", created_utc=9,
+                          body="b")])
         s.commit()
     (tmp_path / "cohorts.csv").write_text(
-        f"{evil}, coordinated\nbob, organic\n", encoding="utf-8")
+        "".join(f"{n}, coordinated\n" for n in payloads) + "bob, organic\n",
+        encoding="utf-8")
     out = expose.render_report(
         db, cohorts=tmp_path / "cohorts.csv", out=tmp_path / "r.html")
     txt = out.read_text(encoding="utf-8")
-    # The raw closing tag must NOT survive; the </ is escaped to <\/ so it
-    # can't break out of the embedded <script>.
-    assert "</script><script>alert(1)</script>" not in txt
-    assert "<\\/script>" in txt
+    # Isolate the embedded data script — the SPA's own <script>/</script> tags
+    # are legitimate; the guard is that no ``<`` from user DATA survives raw.
+    marker = "const SNAPSHOT = "
+    assert marker in txt
+    data = txt[txt.index(marker):]
+    data = data[:data.index("</script>")]              # up to the real close
+    # Every ``<`` in the payloads is escaped to <, so no literal
+    # ``<script``/``</script`` from user data can break out of the tag.
+    assert "<script" not in data and "</script" not in data
+    assert "\\u003cscript" in data and "\\u003c/script" in data
+    assert "\\u003cScRiPt" in data                      # mixed case too
 
 
 def test_report_cli_writes_file(tmp_path, capsys):

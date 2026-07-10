@@ -246,6 +246,11 @@ def verify_leads(store: Store, candidates: list[str] | None = None, *,
     coact = _coactivity_overlap(store, cands)
     hits, n_waves = _wave_hits(store, cands, window_days)
     wave_norm = float(min(n_waves, 3)) or 1.0   # 3 waves = full credit
+    # ``seeding_waves`` is gated on ≥2 cohorts; with a single ``coordinated``
+    # cohort the wave signal can't be computed and every wave score is 0. Say so
+    # in the evidence rather than presenting a real zero (the weighting is
+    # unchanged — an unavailable signal already contributes 0).
+    wave_na = not store.multi_cohort
 
     out: list[LeadVerdict] = []
     for c in sorted(cands):
@@ -257,7 +262,9 @@ def verify_leads(store: Store, candidates: list[str] | None = None, *,
                       + _W_WAVES * s_waves, 3)
         bits = [f"{nb} roster brand{'' if nb == 1 else 's'}",
                 f"{round(100 * s_coact)}% co-activity"]
-        if hits[c]:
+        if wave_na:
+            bits.append("wave signal: n/a (needs ≥2 cohorts)")
+        elif hits[c]:
             bits.append(f"{hits[c]} seeding wave{'' if hits[c] == 1 else 's'}")
         out.append(LeadVerdict(
             account=c, score=score, roster_brands=nb,
