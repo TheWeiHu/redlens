@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -112,9 +113,76 @@ def _serialize(snapshot: dict[str, Any]) -> str:
         "<", "\\u003c")
 
 
+def _pseudonym_map(snapshot: dict[str, Any]) -> dict[str, str]:
+    """Map every real username to a stable, neutral ``user-NN`` pseudonym.
+
+    The universe is every account in the ``/api/accounts`` payload (which lists
+    *every* post/comment author, labeled or organic) plus every cohort-map key —
+    the complete set of names that can surface in any payload. Sorting by the
+    real username makes the numbering reproducible run-to-run, and the width is
+    zero-padded to the account count so labels sort naturally (``user-01`` …).
+    """
+    names: set[str] = {
+        a["username"] for a in
+        snapshot.get("/api/accounts", {}).get("accounts", [])
+        if isinstance(a, dict) and isinstance(a.get("username"), str)}
+    names |= set(snapshot.get("/api/pairs", {}).get("cohorts", {}))
+    ordered = sorted(names)
+    width = max(2, len(str(len(ordered))))
+    return {u: f"user-{i:0{width}d}" for i, u in enumerate(ordered, start=1)}
+
+
+def _anon_value(v: Any, mapping: dict[str, str],
+                pat: re.Pattern[str] | None) -> Any:
+    """Recursively pseudonymize a snapshot value: exact-match a username in a
+    string, replace username-valued dict *keys* and *values*, and rewrite any
+    username embedded in free text (titles, snippets) via ``pat``."""
+    if isinstance(v, dict):
+        return {mapping.get(k, k): _anon_value(val, mapping, pat)
+                for k, val in v.items()}
+    if isinstance(v, list):
+        return [_anon_value(x, mapping, pat) for x in v]
+    if isinstance(v, str):
+        if v in mapping:                       # the value *is* a username
+            return mapping[v]
+        if pat is not None:                    # a username sits inside free text
+            return pat.sub(lambda m: mapping[m.group(0)], v)
+    return v
+
+
+def _anonymize(snapshot: dict[str, Any], mapping: dict[str, str]
+               ) -> dict[str, Any]:
+    """Return a copy of ``snapshot`` with every real username replaced by its
+    pseudonym — in payload keys, values, lists, free text, and the top-level
+    request-URL keys (``/api/profile?u=…``, ``/api/evidence?…a=…&b=…``), whose
+    usernames are URL-encoded so we re-encode the pseudonym to match."""
+    pat = (re.compile("|".join(re.escape(u) for u in
+                      sorted(mapping, key=len, reverse=True)))
+           if mapping else None)
+    out: dict[str, Any] = {}
+    for key, val in snapshot.items():
+        out[_anon_key(key, mapping)] = _anon_value(val, mapping, pat)
+    return out
+
+
+def _anon_key(key: str, mapping: dict[str, str]) -> str:
+    """Rewrite a top-level snapshot key (a request URL). Only the profile and
+    pair-evidence URLs carry usernames — in ``u``/``a``/``b`` query params that
+    were built with ``_enc``, so we swap the encoded real name for the encoded
+    pseudonym. Any other key is returned unchanged."""
+    def _sub(m: re.Match[str]) -> str:
+        param, enc = m.group(1), m.group(2)
+        # Reverse ``_enc`` to recover the raw name, map it, re-encode.
+        for real, pseudo in mapping.items():
+            if _enc(real) == enc:
+                return f"{param}={_enc(pseudo)}"
+        return m.group(0)
+    return re.sub(r"([?&](?:u|a|b))=([^&]*)", _sub, key)
+
+
 def render_report(db: str | Path, *, brands: str | Path | None = None,
                   cohorts: str | Path | None = None, promote: bool = False,
-                  title: str = "coordinated network",
+                  title: str = "coordinated network", anon: bool = False,
                   out: str | Path = "report.html") -> Path:
     """Render the ``serve`` dashboard as a self-contained static HTML file.
 
@@ -122,6 +190,11 @@ def render_report(db: str | Path, *, brands: str | Path | None = None,
     endpoint plus a bounded set of parameterized calls, and injects them into
     the SPA so it renders from the embedded data with no server. Returns the
     written path.
+
+    With ``anon=True`` every Reddit account username is consistently replaced by
+    a stable ``user-NN`` pseudonym across every payload (keys, values, free text,
+    and the request-URL keys) so the report is shareable without naming people.
+    Brands and the title are left untouched.
     """
     # ``promote`` mirrors serve's flag for signature parity; the static export
     # has no separate reviewed-suggestions file, so it only toggles whether
@@ -134,6 +207,8 @@ def render_report(db: str | Path, *, brands: str | Path | None = None,
     net.overview()  # fail fast on a missing / unreadable DB
 
     snapshot = {**_parameterless_snapshot(net), **_prebaked(net), "_miss": _MISS}
+    if anon:
+        snapshot = _anonymize(snapshot, _pseudonym_map(snapshot))
 
     page = (serve.INDEX_HTML
             .replace("$TITLE", html.escape(title)))

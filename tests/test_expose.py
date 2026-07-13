@@ -170,6 +170,77 @@ def test_script_tags_in_account_name_are_neutralized(tmp_path):
     assert "\\u003cScRiPt" in data                      # mixed case too
 
 
+def _snapshot_data(txt: str) -> str:
+    """The embedded SNAPSHOT literal, sliced out of the page for name checks."""
+    marker = "const SNAPSHOT = "
+    assert marker in txt
+    data = txt[txt.index(marker):]
+    return data[:data.index("</script>")]
+
+
+def test_anon_scrubs_every_real_username(seeded):
+    tmp_path, db = seeded
+    _, txt = _render(tmp_path, db, anon=True)
+    data = _snapshot_data(txt)
+    # No seeded account name survives anywhere — not as a key, value, URL, or
+    # embedded in a post title ("try nordvpn" has no name, but the walker still
+    # must not leak alice/bob/carol from any payload).
+    for name in ("alice", "bob", "carol"):
+        assert name not in data, f"real username {name!r} leaked into anon export"
+    # Pseudonyms are present and zero-padded.
+    for pseudo in ("user-01", "user-02", "user-03"):
+        assert pseudo in data
+
+
+def test_anon_mapping_is_consistent_across_payloads(seeded):
+    tmp_path, db = seeded
+    _, txt = _render(tmp_path, db, anon=True)
+    data = _snapshot_data(txt)
+    # The same account must carry the same pseudonym in the accounts list and in
+    # a pair URL. alice sorts first → user-01, bob → user-02.
+    assert '"username": "user-01"' in data      # alice in /api/accounts
+    assert '"username": "user-02"' in data       # bob in /api/accounts
+    # …and that same pair is baked under pseudonymized a/b URL params.
+    assert "/api/evidence?type=pair&a=user-01&b=user-02" in data
+    assert "/api/profile?u=user-01" in data
+    # The real, un-anonymized URL keys are gone.
+    assert "a=alice&b=bob" not in data
+    assert "/api/profile?u=alice" not in data
+
+
+def test_anon_is_deterministic_across_runs(seeded):
+    tmp_path, db = seeded
+    _, txt1 = _render(tmp_path, db, anon=True)
+    _, txt2 = _render(tmp_path, db, anon=True)
+    assert txt1 == txt2
+
+
+def test_without_anon_real_names_remain(seeded):
+    """Regression guard: the default export is byte-for-byte the old behavior —
+    real usernames still appear and no pseudonym is introduced."""
+    tmp_path, db = seeded
+    _, txt = _render(tmp_path, db)
+    data = _snapshot_data(txt)
+    assert "alice" in data and "bob" in data and "carol" in data
+    assert "user-01" not in data
+
+
+def test_anon_cli_flag(tmp_path, capsys):
+    db = str(tmp_path / "cli.db")
+    _seed(db)
+    (tmp_path / "cohorts.csv").write_text(
+        "alice, coordinated\nbob, coordinated\ncarol, organic\n",
+        encoding="utf-8")
+    out = tmp_path / "out.html"
+    code = main(["--db", db, "report", "--anon",
+                 "--cohorts", str(tmp_path / "cohorts.csv"), "--out", str(out)])
+    assert code == 0
+    data = _snapshot_data(out.read_text(encoding="utf-8"))
+    for name in ("alice", "bob", "carol"):
+        assert name not in data
+    assert "user-01" in data
+
+
 def test_report_cli_writes_file(tmp_path, capsys):
     db = str(tmp_path / "cli.db")
     _seed(db)

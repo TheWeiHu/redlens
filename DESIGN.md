@@ -134,6 +134,11 @@ Two front doors over the same computations, plus the static topic report:
   iterates `serve.ENDPOINTS` and calls each handler to pre-compute a snapshot of
   every payload the SPA would fetch, embeds it, and the SPA's single `getJSON`
   seam resolves against the snapshot instead of the network. A shareable exposé.
+  `--anon` builds a deterministic real-username → `user-NN` map (sorted by name
+  for run-to-run stability) and walks the snapshot **dict** — keys, values, list
+  items, request-URL keys, and free-text titles/snippets — replacing every
+  account occurrence before embedding, so the export can be shared without
+  naming people. Brands and the title stay real.
 - **`page`** (`reporting/page`) — the standalone HTML report for a tracked
   topic. `reporting/html.py` holds the shared HTML primitives both exports use.
 

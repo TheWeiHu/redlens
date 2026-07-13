@@ -359,6 +359,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "serve --promote)")
     rp.add_argument("--title", default="coordinated network", metavar="NAME",
                     help="dashboard heading (default: 'coordinated network')")
+    rp.add_argument("--anon", action="store_true",
+                    help="pseudonymize every account username (user-01, "
+                    "user-02, …) so the report is shareable without naming "
+                    "accounts; brands are left intact")
     rp.add_argument("-o", "--out", metavar="PATH",
                     help="output HTML file (default: ./report.html)")
     ld = sub.add_parser(
@@ -727,7 +731,7 @@ def _cmd_report(args: argparse.Namespace, db: str | Path) -> int:
     out = Path(args.out) if args.out else Path("report.html")
     written = expose.render_report(
         db, brands=brands, cohorts=cohorts, promote=args.promote,
-        title=args.title, out=out)
+        title=args.title, anon=args.anon, out=out)
     print(f"wrote {written} ({written.stat().st_size:,} bytes)")
     return 0
 
