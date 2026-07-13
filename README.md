@@ -68,7 +68,7 @@ Two runtime dependencies (`platformdirs`, `sqlmodel`), all permissively licensed
 | `redlens page <topic>` | Render a standalone HTML report (`--all` for every topic + index) |
 | `redlens explore` | Browse the DB in your browser (read-only, with a SQL console) |
 | `redlens serve` | Open the local listening report — a coordinated-network view (drill any account to its posts/comments) |
-| `redlens report` | Bake that dashboard into one self-contained, shareable HTML file (no server) |
+| `redlens report` | Bake that dashboard into one self-contained, shareable HTML file (no server); `--anon` pseudonymizes every account (`user-01`, …) to share without naming people |
 | `redlens leads` | Score unlabeled accounts for cohort membership from deterministic signals (`--out` a promote-ready CSV) |
 | `redlens brands` | Mine the cohort's brand roster and merge it into `brands.csv` (LLM-canonicalized with a key) |
 | `redlens seeding` | Judge each roster brand seeded-vs-organic from deterministic signals (needs ≥2 labeled cohorts) |
@@ -85,6 +85,7 @@ Explore the network live with `serve`, then hand off a static copy anyone can op
 ```bash
 redlens serve --cohorts cohorts.csv --brands brands.csv   # live localhost dashboard
 redlens report --cohorts cohorts.csv -o network.html      # same view, one shareable file
+redlens report --cohorts cohorts.csv --anon -o public.html  # same file, accounts pseudonymized
 ```
 
 ## Optional LLM Key
