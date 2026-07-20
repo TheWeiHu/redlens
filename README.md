@@ -9,9 +9,12 @@
   <a href="https://github.com/TheWeiHu/redlens/blob/main/LICENSE"><img src="https://img.shields.io/github/license/TheWeiHu/redlens" alt="MIT license"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+"></a>
   <a href="https://arctic-shift.photon-reddit.com"><img src="https://img.shields.io/badge/data-arctic--shift-orange" alt="Data: arctic-shift"></a>
+  <a href="https://www.redlens.dev"><img src="https://img.shields.io/badge/site-redlens.dev-8b5cf6" alt="Website: redlens.dev"></a>
 </p>
 
 <p align="center">
+  <a href="https://www.redlens.dev">redlens.dev</a>
+  ·
   <a href="#how-it-works">How It Works</a>
   ·
   <a href="#install">Install</a>
