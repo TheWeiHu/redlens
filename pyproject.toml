@@ -29,7 +29,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/TheWeiHu/redlens"
+Homepage = "https://www.redlens.dev"
+Repository = "https://github.com/TheWeiHu/redlens"
 Issues = "https://github.com/TheWeiHu/redlens/issues"
 Changelog = "https://github.com/TheWeiHu/redlens/blob/main/CHANGELOG.md"
 
