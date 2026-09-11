@@ -1,6 +1,6 @@
 # Defined before the imports below: submodules (e.g. arctic's User-Agent)
 # read it while the package is still initializing.
-__version__ = "0.2.0"  # keep in sync with pyproject.toml
+__version__ = "0.4.0"  # keep in sync with pyproject.toml
 
 from redlens.analytics import compute_user_analytics  # noqa: E402
 from redlens.db import connect, init_schema  # noqa: E402

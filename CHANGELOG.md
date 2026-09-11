@@ -6,14 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
 ### Added
+- **`redlens serve` — the local coordinated-network listening dashboard.**
+  Roster-driven brand mentions with click-any-cell evidence, brand share of
+  voice, cohort labels with comparison views and a coordination raster,
+  hash-routed account profiles, an on-demand AI profile with a *coordinated?*
+  verdict, suspected-seeder flags by brand breadth, and `--promote` to fold
+  verified accounts into the coordinated cohort.
+- **`redlens report`** — bake that dashboard into one self-contained HTML file;
+  `--anon` pseudonymizes every account name so the file can be shared.
+- **`redlens leads`** — score unlabeled accounts for cohort membership from
+  deterministic signals and emit a promote-ready CSV.
+- **`redlens brands`** — mine the cohort's brand roster and merge it into
+  `brands.csv` (LLM-canonicalized when a key is set).
+- **`redlens seeding`** — judge each roster brand seeded-vs-organic from
+  deterministic signals.
+- **`page --limit`** refuses oversized topics instead of running out of memory.
 - `arctic.iter_subreddit_posts` / `iter_subreddit_comments`: a subreddit's
   recent posts or comments, newest first, on the plain listing endpoint.
+- CI coverage gate; README demo GIF of the dashboard.
+
+### Changed
+- Coordination prompt judges concrete signals, not vibes.
+- Internals: the CLI is split per verb, the network, reporting and LLM code sit
+  behind small facades, the dashboard SPA is a static asset with a declarative
+  route table, and every verb and HTTP route has characterization tests.
 
 ### Fixed
 - Parallel syncs no longer hold the SQLite write lock across network fetches:
   each upsert commits, and the busy timeout is 30s. Before, extra workers were
   no faster than one.
+- Report export: hardened HTML escaping, brand mining scoped to the cohort,
+  safe JS interpolation, honest lead evidence, and snapshot URL keys that match
+  `encodeURIComponent`.
+- `redlens.__version__` matches `pyproject.toml` again.
 
 ## [0.3.0] - 2026-06-26
 
