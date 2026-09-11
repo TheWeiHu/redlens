@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `arctic.iter_subreddit_posts` / `iter_subreddit_comments`: a subreddit's
+  recent posts or comments, newest first, on the plain listing endpoint.
+
+### Fixed
+- Parallel syncs no longer hold the SQLite write lock across network fetches:
+  each upsert commits, and the busy timeout is 30s. Before, extra workers were
+  no faster than one.
+
 ## [0.3.0] - 2026-06-26
 
 ### Added

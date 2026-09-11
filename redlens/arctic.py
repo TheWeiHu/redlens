@@ -172,6 +172,29 @@ def iter_comments(
     return _iter_kind("comments", username, after=after, before=before)
 
 
+def _iter_subreddit_kind(
+    kind: str, subreddit: str, after: int | None = None
+) -> Iterator[dict[str, Any]]:
+    """Yield a subreddit's posts or comments, newest first (no text query, so
+    this is the plain listing endpoint — the one arctic never throttles the
+    way it throttles full-text scans)."""
+    return _paginate(f"/api/{kind}/search", full_page=ARCTIC_PAGE_LIMIT,
+                     subreddit=subreddit, limit=ARCTIC_PAGE_LIMIT, sort="desc",
+                     after=after)
+
+
+def iter_subreddit_posts(
+    subreddit: str, after: int | None = None
+) -> Iterator[dict[str, Any]]:
+    return _iter_subreddit_kind("posts", subreddit, after=after)
+
+
+def iter_subreddit_comments(
+    subreddit: str, after: int | None = None
+) -> Iterator[dict[str, Any]]:
+    return _iter_subreddit_kind("comments", subreddit, after=after)
+
+
 def iter_post_comments(post_id: str) -> Iterator[dict[str, Any]]:
     """Yield every comment under a post (its ``link_id``), newest first.
 
