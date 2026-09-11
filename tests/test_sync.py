@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, func, select
 
 from redlens import arctic
@@ -298,3 +299,25 @@ def test_sync_without_user_meta_peeks_then_archives(monkeypatch):
     assert (r.posts_written, r.comments_written) == (10, 5)
     with Session(engine) as s:
         assert s.exec(select(func.count()).select_from(Comment)).one() == 5
+
+
+def test_sync_commits_between_streams_so_another_writer_is_not_blocked(tmp_path, monkeypatch):
+    """The user row and each stream's rows are committed before the next
+    network stream starts, so a second connection can write meanwhile."""
+    engine = connect(tmp_path / "s.db")
+    init_schema(engine)
+    other = connect(tmp_path / "s.db")
+    seen = []
+
+    def posts(username, after=None, before=None):
+        with Session(other) as s:  # would raise "database is locked" if held
+            s.exec(text("INSERT INTO user (username, fetched_at) VALUES ('other', 0)"))
+            s.commit()
+        seen.append("wrote")
+        yield from ()
+
+    monkeypatch.setattr(arctic, "fetch_user_meta", lambda u: {"author": u, "id": "x"})
+    monkeypatch.setattr(arctic, "iter_posts", posts)
+    monkeypatch.setattr(arctic, "iter_comments", lambda u, after=None, before=None: iter(()))
+    sync_user("someone", engine)
+    assert seen == ["wrote"]

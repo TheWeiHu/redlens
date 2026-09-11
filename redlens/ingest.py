@@ -50,6 +50,7 @@ def sync_user(username: str, engine: Engine, *, full: bool = False) -> SyncResul
 
     with Session(engine) as session:
         upsert(session, [user])
+        session.commit()  # don't hold the DB write lock across the network streams
         posts = _sync_kind(session, user.username, "posts",
                            arctic.iter_posts, Post.from_arctic, full)
         comments = _sync_kind(session, user.username, "comments",
@@ -116,9 +117,11 @@ def _sync_kind(
         batch.append(obj)
         if len(batch) >= BATCH_SIZE:
             written += upsert(session, batch)
+            session.commit()  # release the write lock while the next page downloads
             batch.clear()
     if batch:
         written += upsert(session, batch)
+        session.commit()
 
     # A stream stops short of history only when the MAX_ITEMS_PER_STREAM cap
     # trips (the interruption hook used in tests — in production it is None, so
@@ -145,4 +148,5 @@ def _sync_kind(
         completed_backfill=completed,
         synced_at=int(time.time()),
     )])
+    session.commit()
     return written

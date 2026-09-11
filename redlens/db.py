@@ -99,7 +99,9 @@ def connect(path: str | Path = "redlens.db") -> Engine:
     p = str(path)
     if p != ":memory:":
         Path(p).expanduser().parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(f"sqlite:///{p}", echo=False)
+    # A 30s busy timeout lets parallel writers (scout sync) queue on the
+    # file lock instead of failing with "database is locked".
+    return create_engine(f"sqlite:///{p}", echo=False, connect_args={"timeout": 30})
 
 
 def init_schema(engine: Engine) -> None:
